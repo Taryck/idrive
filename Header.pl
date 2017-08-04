@@ -746,11 +746,22 @@ sub getServerAddr()
 #**********************************************************************************
 sub readConfigurationFile
 {
+#=====================================================================================================================
+# TBE : ENH-001 - Load local CONFIGURATION_FILE
+# user local variable for file read, in order to readConfigurationFile to be cummulative
+	my @ConfFile = () ;		# TBE : ENH-001 Temp file content
+#=====================================================================================================================
 	my $confFilePath = $_[0];
 	if ((-e $confFilePath and -s $confFilePath > 0)){
 		chmod $filePermission, $confFilePath;
 		open CONF_FILE, "<", $confFilePath or (traceLog($lineFeed.Constants->CONST->{'ConfMissingErr'}." reason :$! $lineFeed", __FILE__, __LINE__) and die);
-		@linesConfFile = <CONF_FILE>;  
+#=====================================================================================================================
+# TBE : ENH-001 Cummulative content
+#		@linesConfFile = <CONF_FILE>;  
+		@ConfFile = <CONF_FILE>;
+		push (@linesConfFile, @ConfFile);
+# TBE : ENH-001 End of change
+#=====================================================================================================================
 		close CONF_FILE;
 	}else{
 		return 0;

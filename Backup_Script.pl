@@ -108,6 +108,24 @@ if(-e $confFilePath) {
 	readConfigurationFile($confFilePath);
 } 
 
+
+if(-e $confFilePath) {
+	readConfigurationFile($confFilePath);
+}
+
+#=====================================================================================================================
+# TBE : ENH-001 - Load local CONFIGURATION_FILE
+# After loading <idrive_path>/userprofile/<my_account>
+# Loads CONFIGURATION_FILE where process is lauched. In scheduled mode :
+# <idrive_path>/userprofile/<my_account>/Backup/Scheduled
+#$confFilePath = $usrProfilePath.'/'.$userName.'/Backup/'.$ARGV[0].'/'.Constants->CONST->{'configurationFile'};
+$confFilePath = $INC[0].'/'.Constants->CONST->{'configurationFile'};
+
+if(-e $confFilePath) {
+	readConfigurationFile($confFilePath);
+}
+#TBE : end of ENH-001
+#=====================================================================================================================
 getConfigHashValue();
 loadUserData();
 my $BackupsetFile = $backupsetFilePath;
