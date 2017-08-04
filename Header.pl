@@ -1538,9 +1538,15 @@ sub createLogFiles()
 		chmod $filePermission, $logDir;
 	}
 
-#	my $currentTime = localtime;
-	my $currentTime = time;#This function will give the current epoch time.
+#=====================================================================================================================
+# TBE : ENH-003 TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
 	#previous log file name use to be like 'BACKUP Wed May 17 12:34:47 2017_FAILURE'.Now log name will be '1495007954_SUCCESS'.
+	#	my $currentTime = localtime;
+#	my $currentTime = time;#This function will give the current epoch time.
+# Correct timestamp string : YYYY-MM-DD_HH-MM-SS
+	my $currentTime = POSIX::strftime("%Y-%m-%d_%H-%M-%S", localtime);
+#=====================================================================================================================
+	
 	$outputFilePath = $logDir.$pathSeparator.$currentTime; 
 	$errorFilePath = $errorDir.$pathSeparator.$errorFileName;
 	$progressDetailsFilePath = $jobRunningDir.$pathSeparator.$progressDetailsFileName;
