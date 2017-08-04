@@ -59,6 +59,7 @@ my %hashParameters = (
 				       "BWTHROTTLE" => undef,                             
                        "RESTORELOCATION" => undef,
 	    		       "RESTOREFROM" => undef,				
+						"TBE_BASE_DIR" => undef,			# TBE : ENH-002 Add new param : Root Directory for relative backup
 	    		       "BACKUPPATHTYPE" => undef   
                      );
 
@@ -321,6 +322,18 @@ our $defRestoreLocation = qq($usrProfilePath/$userName/Restore_Data);
 #********************************************************************************************************/
 sub loadUserData {
 	$usrProfileDir = "$usrProfilePath/$userName";
+#=====================================================================================================================
+# TBE : ENH-002 set Root Directory for relative backup
+# instead of having only last level of relative
+# when this parameter is set the relative path starts from this point
+# Read the additional Parameter
+	our $backupBase_Dir = $hashParameters{TBE_BASE_DIR};
+# check or add / at the end of BASE_DIR
+	if(substr($backupBase_Dir, -1, 1) ne '/'){
+		$backupBase_Dir .= '/';
+	}
+# TBE : ENH-002 set Root Directory for relative backup
+#=====================================================================================================================
 	if($proxyStr eq ""){
 		$proxyStr = getProxy();
 	}

@@ -366,7 +366,19 @@ sub generateBackupsetFiles {
 		elsif ($item eq "." or $item eq "..") {
 			next;
 		}
-		elsif( -l $item # File is a symbolic link #
+# =======================================================================
+# TBE : ENH-002 set Root Directory for relative backup
+# if enh-002 is activated then add base_dir to backupset line
+		if($backupBase_Dir ne "") {
+			if(substr($item, 0, 1) eq "/") {
+				$item =~ s/^.//;
+			}
+			$item = $backupBase_Dir . $item;
+		}
+#		elsif( -l $item # File is a symbolic link #
+		if( -l $item # File is a symbolic link #
+# =======================================================================
+
 			 or -p $item # File is a named pipe #
 			 or -S $item # File is a socket #
 			 or -b $item # File is a block special file #
@@ -390,7 +402,16 @@ sub generateBackupsetFiles {
 				$noRelIndex++;
 				$BackupsetFile_new = $noRelativeFileset."$noRelIndex"; 
 				$filecount = 0;
-				$a = rindex ($item, '/');
+# =======================================================================
+# TBE : ENH-002 set Root Directory for relative backup
+				if($backupBase_Dir eq "") {
+# Original version
+					$a = rindex ($item, '/');
+				} else {
+# if enh-002 is activated define then end of BASE_DIR as the position to define relative name
+					$a = length( $backupBase_Dir ) - 1;
+				}
+# =======================================================================
 				$source[$noRelIndex] = substr($item,0,$a);
 				if($source[$noRelIndex] eq "") {
 					$source[$noRelIndex] = "/";
