@@ -1189,8 +1189,15 @@ sub checkAndCreateServicePath{
 	        local $\ = '';
 	        my $userServicePath = <SP>;
 	        Chomp(\$userServicePath);
-		my ($usrInputSerPath) = $userServicePath =~ m{(.+)/([^/]+)$};
-		$usrInputSerPathExists = validateServiceDir($usrInputSerPath);
+# TBE : Start of change
+			#		my ($usrInputSerPath) = $userServicePath =~ m{(.+)/([^/]+)$};
+# TBE : fix $userServicePath is modified by regex
+		my $usrInputSerPath = $userServicePath;
+#		if ( ($userServicePath =~ tr/\///) gt 1 ) {  => uncomment To allow use /idrive for Service location and use of (/) as user input
+			$usrInputSerPath = $usrInputSerPath =~ m{(.+)/([^/]+)$};
+#		}
+# TBE : End of change
+#		$usrInputSerPathExists = validateServiceDir($usrInputSerPath);
 		$userServicePathExists = validateServiceDir($userServicePath);
 #		print $lineFeed.Constants->CONST->{'SetServiceLocation'}.qq("$userServicePath"$lineFeed);
 		if ($usrInputSerPathExists == 0 and $userServicePathExists == 1){
