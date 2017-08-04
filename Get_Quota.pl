@@ -36,7 +36,7 @@ loadUserData();
 if ( substr( $pwdPath, -4) ne "_SCH" ){
 	$pwdPath = $pwdPath."_SCH";
 }
-my %Results = getQuota_Array();
+my %Results = getQuota_HashTable();
 WriteQuotaFile( $usrProfileDir.'/.quota.txt',
 				$filePermission,
 				$Results{totalquota},
