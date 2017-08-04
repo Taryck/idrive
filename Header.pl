@@ -2995,7 +2995,53 @@ sub isUpdateAvailable{
 	}
 }
 
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
 #****************************************************************************
+#Subroutine Name         : getQuota_HashTable 
+#Objective               : This function will get fresh quota information and provide remaining byte count
+#Usage                   : getQuota_HashTable() => %
+#Added By                : Taryck BENSIALI
+#****************************************************************************/
+sub getQuota_HashTable(){
+	my $encType = checkEncType(1);
+	my $getQuotaUtfFile = getOperationFile($getQuotaOp,$encType);
+	$getQuotaUtfFile =~ s/\'/\'\\''/g;
+	$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+	my $commandOutput = `$idevsutilCommandLine`;
+	unlink($getQuotaUtfFile);
+	parseXMLOutput(\$commandOutput);
+	if (($evsHashOutput{message} eq 'SUCCESS') and ($evsHashOutput{totalquota} =~/\d+/) and ($evsHashOutput{usedquota} =~/\d+/)){
+		$evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
+		$evsHashOutput{remainingquota} = $evsHashOutput{totalquota} - $evsHashOutput{usedquota};
+	}
+	return %evsHashOutput;
+}
+
+#****************************************************************************
+#Subroutine Name         : WriteQuotaFile
+#Objective               : This function will create a quota.txt file based on the quota details provided 
+#Usage                   : WriteQuotaFile()
+#Added By                : Taryck BENSIALI
+#****************************************************************************/
+
+sub WriteQuotaFile($$$$$){
+	my $FileName = shift;
+	my $filePermission = shift;
+	my $totalquota  = shift;
+	my $usedquota = shift;
+	my $remainingquota = shift;
+	
+	open (AQ,'>',$FileName) or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+	chmod $filePermission,$FileName;
+	if ($totalquota =~/\d+/ and $usedquota =~ /\d+/ and $remainingquota =~ /\d+/){
+		print AQ 'totalQuota=' . $totalquota . "\n";
+		print AQ 'usedQuota=' . $usedquota . "\n";
+		print AQ 'remainingQuota=' . $remainingquota . "\n";
+	}
+	close AQ;
+}
+#=====================================================================================================================#****************************************************************************
 #Subroutine Name         : getQuotaForAccountSettings 
 #Objective               : This function will create a quota.txt file based on the quota details which is received during Account setting. 
 #Usgae                   : getQuotaForAccountSettings()
@@ -3003,14 +3049,27 @@ sub isUpdateAvailable{
 #****************************************************************************/
 
 sub getQuotaForAccountSettings{
-	open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-	chmod $filePermission,$usrProfileDir.'/.quota.txt';
-	if ($evsHashOutput{quota} =~/\d+/ and $evsHashOutput{quota_used} =~ /\d+/){
-		$evsHashOutput{quota_used} =~ s/(\d+)\".*/$1/isg;
-		print AQ "totalQuota=$evsHashOutput{quota}\n";
-		print AQ "usedQuota=$evsHashOutput{quota_used}\n";
-	}
-	close AQ;
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+	my $totalquota = $evsHashOutput{quota};
+	my $usedquota = $evsHashOutput{quota_used};
+	my $remainingquota = $totalquota - $usedquota;
+	WriteQuotaFile( $usrProfileDir.'/.quota.txt',
+					$filePermission,
+					$totalquota,
+					$usedquota,
+					$remainingquota);
+# Mutualized code
+	# open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+	# chmod $filePermission,$usrProfileDir.'/.quota.txt';
+	# if ($evsHashOutput{quota} =~/\d+/ and $evsHashOutput{quota_used} =~ /\d+/){
+		# $evsHashOutput{quota_used} =~ s/(\d+)\".*/$1/isg;
+		# print AQ "totalQuota=$evsHashOutput{quota}\n";
+		# print AQ "usedQuota=$evsHashOutput{quota_used}\n";
+		# print AQ "remainingQuota=" . $remainingquota . "\n";
+	# }
+	# close AQ;
+#=====================================================================================================================
 }
 
 #****************************************************************************
@@ -3020,21 +3079,35 @@ sub getQuotaForAccountSettings{
 #Added By                : Abhishek Verma.
 #****************************************************************************/
 sub getQuota{
-	my $encType = checkEncType(1);
-	my $getQuotaUtfFile = getOperationFile($getQuotaOp,$encType);
-	$getQuotaUtfFile =~ s/\'/\'\\''/g;
-        $idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
-	my $commandOutput = `$idevsutilCommandLine`;
-        unlink($getQuotaUtfFile);
-	parseXMLOutput(\$commandOutput);
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+	my %evsHashOutput = getQuota_HashTable();
+# Mutualized code
+#	my $encType = checkEncType(1);
+#	my $getQuotaUtfFile = getOperationFile($getQuotaOp,$encType);
+#	$getQuotaUtfFile =~ s/\'/\'\\''/g;
+#        $idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+#	my $commandOutput = `$idevsutilCommandLine`;
+#        unlink($getQuotaUtfFile);
+#	parseXMLOutput(\$commandOutput);
+#=====================================================================================================================
 	if (($evsHashOutput{message} eq 'SUCCESS') and ($evsHashOutput{totalquota} =~/\d+/) and ($evsHashOutput{usedquota} =~/\d+/)){
-		open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-		chmod $filePermission,$usrProfileDir.'/.quota.txt';
-		$evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
-		print AQ "totalQuota=$evsHashOutput{totalquota}\n";
-		print AQ "usedQuota=$evsHashOutput{usedquota}\n";
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+		WriteQuotaFile( $usrProfileDir.'/.quota.txt',
+						$filePermission,
+						$evsHashOutput{totalquota},
+						$evsHashOutput{usedquota},
+						$evsHashOutput{remainingquota});
+# Mutualized code
+		# open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+		# chmod $filePermission,$usrProfileDir.'/.quota.txt';
+		# $evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
+		# print AQ "totalQuota=$evsHashOutput{totalquota}\n";
+		# print AQ "usedQuota=$evsHashOutput{usedquota}\n";
+		# close AQ;
+#=====================================================================================================================
 	}
-	close AQ;
 }
 #****************************************************************************
 #Subroutine Name         : getQuotaDetails 
