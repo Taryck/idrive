@@ -129,9 +129,9 @@ use constant CONST => {
 			doUwant2Change 	=> 'Do you want to change (y/n)?',
 			defaultServicePath => 'Your default service path is : ',
 			displayUserMessage => sub {return  join(' ',@_)},
-			notExists => 'dose not exists',
+			notExists => 'does not exists',
 			changeServicePath => 'Do you want to change your service path (y/n)?',
-			noSufficientPermission => 'dose not have sufficient permissions',
+			noSufficientPermission => 'does not have sufficient permissions',
 			viewLogMessage => 'Select option to view logs for: ',
 			viewMoreLogs => 'Do you want to view more logs(y/n).',
 		#---------------------E -----------------------------#
@@ -277,7 +277,7 @@ use constant CONST => {
 			noSchJob	=> 'There is no scheduled',
 			noChangeServicePath => 'Your service path remains ',
 			noLogs => 'No logs found. Please try again.',
-#			noServicePath	=> 'Service directory dose not exists. Please run Account_Setting.pl script... ',
+#			noServicePath	=> 'Service directory does not exists. Please run Account_Setting.pl script... ',
 		#------------------- O ----------------------------#
 			OpUsrCancel	=>	'Operation could not be completed. Reason : Operation cancelled by user',
 			operationFailUser => "Operation could not be completed. Reason: Operation Cancelled by user.",
