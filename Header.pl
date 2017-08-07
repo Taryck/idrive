@@ -1728,16 +1728,23 @@ sub writeOperationSummary()
 		$summary .= $lineFeed."Summary: ".$lineFeed;
 		$finalSummery .=  $lineFeed."Summary: ".$lineFeed;
 		Chomp(\$filesConsideredCount);
+#======================================================================
+# TBE : Enh-006 : Add remaining Quota to summary
+		my %quotaDetails = getQuotaDetails();
+		my $TBE_Text = $lineFeed.'Remaining Free space : '. convertFileSize($quotaDetails{remainingQuota});
+#======================================================================
 		if($_[0] eq $backupOp) {
 			$mail_summary .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 						$lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.
+						$lineFeed.$TBE_Text.$lineFeed		# TBE : Enh-006
 						$lineFeed.Constants->CONST->{'BckEndTm'}.localtime, $lineFeed;
 		
 			$finalSummery .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
+						$lineFeed.$TBE_Text.$lineFeed		# TBE : Enh-006
 					       $lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.$lineFeed;
 			
 		} else 	{
@@ -1745,12 +1752,14 @@ sub writeOperationSummary()
 						$lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.
-						$lineFeed.Constants->CONST->{'RstEndTm'}.localtime, $lineFeed;
+						$lineFeed.Constants->CONST->{'RstEndTm'}.localtime, $lineFeed.
+						$lineFeed.$TBE_Text;		# TBE : Enh-006
 
 			$finalSummery .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
-					       $lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.$lineFeed;
+					       $lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.$lineFeed.
+						$lineFeed.$TBE_Text;		# TBE : Enh-006
 		}
 		if($errStr ne "" &&  $errStr ne "SUCCESS"){
 			$mail_summary .= $lineFeed.$lineFeed.$errStr.$lineFeed;
@@ -2884,12 +2893,14 @@ sub headerDisplay{
 	$updateAvailMessage   .= qq(Logged in user :                    );
 	$updateAvailMessage   .= $displayCurrentUser eq '' ? "No Logged In User":$displayCurrentUser; 
 	my %quotaDetails = getQuotaDetails();
-	if (scalar (keys %quotaDetails) == 2){
+#TBE : ENH-004 - Get Quota, compute remaining quota
+#	if (scalar (keys %quotaDetails) == 2){  #TBE : ENH-004 - fix
 		my $totalQuota = convertFileSize($quotaDetails{totalQuota});
 		my $usedQuota = convertFileSize ($quotaDetails{usedQuota});
+		my $remaining = convertFileSize ($quotaDetails{remainingQuota});			#TBE : ENH-004
 		$updateAvailMessage .= qq(\n----------------                    --------------------------------------------\n);
-		$updateAvailMessage .= qq(Quota Display  :                    $usedQuota(used)/$totalQuota(total));
-	}
+		$updateAvailMessage .= qq(Quota Display  :  $remaining(free)/$usedQuota(used)/$totalQuota(total));
+#	}
 	if ($callingScript ne Constants->FILE_NAMES->{checkForUpdateScript} and !isUpdateAvailable()){ # Dont want to call subroutine isUpdateAvailable() in case of calling script is Check_For_Update.pl
 		$updateAvailMessage .= qq(\n--------------------------------------------------------------------------------\n);
 		$updateAvailMessage .= qq(A new update is available. Run ).Constants->FILE_NAMES->{checkForUpdateScript}.qq( to update to latest package.);
