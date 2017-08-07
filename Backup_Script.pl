@@ -1094,31 +1094,39 @@ sub doBackupOperation()
 #******************************************************************************************************************/
 sub getOpStatusNeSubLine()
 {
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+# and simplification
+	my $TBE_status_text = "";
+#======================================================================
 	my $subjectLine= "";
 	my $totalNumFiles = $filesConsideredCount-$failedFilesCount;
 	if($cancelFlag){
 		$status = "ABORTED";
-		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
-	}
-#	elsif($filesConsideredCount == 0){
-#		$status = "FAILURE";
-#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
-#	}
-	elsif($failedFilesCount == 0 and $filesConsideredCount > 0)
-	{
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
+		$TBE_status_text = 'Aborted Backup';
+#======================================================================
+	} elsif ($failedFilesCount == 0 and $filesConsideredCount > 0) {
 		$status = "SUCCESS";
-		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
+		$TBE_status_text = 'Successful Backup';
+#======================================================================
+	} else {
+		$status = "FAILURE";
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
+		$TBE_status_text = 'Failed Backup';
+#======================================================================
 	}
-	else {
-#		if(($failedFilesCount/$filesConsideredCount)*100 <= 5){				  
-#			$status = "SUCCESS*";
-#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful* Backup]";
-#		}
-#		else {
-			$status = "FAILURE";
-			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
-#		}
-	}
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+	$subjectLine = "[$TBE_status_text] [$userName] - $taskType Backup Email Notification";
+#======================================================================
 	return ($subjectLine);
 }
 
