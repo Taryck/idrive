@@ -869,9 +869,10 @@ sub exit_cleanup {
 	}
 	sendMail($subjectLine);
 	terminateStatusRetrievalScript("$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'}) if ($taskType eq "Scheduled");
-	if ($successFiles > 0){#some file has been backed up during the process, getQuota call is done to calculate the fresh quota.
+#ENH-004 - Quota remaining => Data could be removed from web so quota should always be updated
+#ENH-004	if ($successFiles > 0){#some file has been backed up during the process, getQuota call is done to calculate the fresh quota.
 		getQuota($0);
-	}
+#ENH-004	}
 	exit 0;
 }
 
