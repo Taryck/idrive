@@ -1738,13 +1738,13 @@ sub writeOperationSummary()
 						$lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.
-						$lineFeed.$TBE_Text.$lineFeed		# TBE : Enh-006
+						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 						$lineFeed.Constants->CONST->{'BckEndTm'}.localtime, $lineFeed;
 		
 			$finalSummery .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
-						$lineFeed.$TBE_Text.$lineFeed		# TBE : Enh-006
+						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 					       $lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.$lineFeed;
 			
 		} else 	{
