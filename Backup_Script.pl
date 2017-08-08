@@ -102,6 +102,11 @@ sub process_term()
 	exit(0);
 }
 
+#======================================================================
+#TBE - FIX - for Enh-006 : Add remaining Quota to summary
+$displayCurrentUser = $userName;
+#======================================================================
+
 $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
 
 if(-e $confFilePath) {
