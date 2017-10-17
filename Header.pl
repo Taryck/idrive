@@ -1816,7 +1816,7 @@ sub pidAliveCheck {
 	chmod $filePermission, $pidPath;
 
 	if(!flock(PIDFILE, 2|4)) {
-		$pidMsg = "$jobType job is already in progress. Please try again later.\n";
+		$pidMsg = "$jobType job is already in progress. Please try again later. $pidPath \n";
 		print $pidMsg;
 		traceLog($pidMsg, __FILE__, __LINE__);
 		return 0;
@@ -3019,13 +3019,15 @@ sub getQuota_HashTable(){
 	my $getQuotaUtfFile = getOperationFile($getQuotaOp,$encType);
 	$getQuotaUtfFile =~ s/\'/\'\\''/g;
 	$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+	traceLog($idevsutilCommandLine."$lineFeed", __FILE__, __LINE__);
 	my $commandOutput = `$idevsutilCommandLine`;
-	unlink($getQuotaUtfFile);
+	traceLog('Outputs : '.$lineFeed.$commandOutput.$lineFeed, __FILE__, __LINE__);
 	parseXMLOutput(\$commandOutput);
 	if (($evsHashOutput{message} eq 'SUCCESS') and ($evsHashOutput{totalquota} =~/\d+/) and ($evsHashOutput{usedquota} =~/\d+/)){
 		$evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
 		$evsHashOutput{remainingquota} = $evsHashOutput{totalquota} - $evsHashOutput{usedquota};
 	}
+	unlink($getQuotaUtfFile);
 	return %evsHashOutput;
 }
 
@@ -3043,7 +3045,7 @@ sub WriteQuotaFile($$$$$){
 	my $usedquota = shift;
 	my $remainingquota = shift;
 	
-	open (AQ,'>',$FileName) or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+	open (AQ,'>',$FileName) or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$FileName."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
 	chmod $filePermission,$FileName;
 	if ($totalquota =~/\d+/ and $usedquota =~ /\d+/ and $remainingquota =~ /\d+/){
 		print AQ 'totalQuota=' . $totalquota . "\n";
@@ -3051,6 +3053,7 @@ sub WriteQuotaFile($$$$$){
 		print AQ 'remainingQuota=' . $remainingquota . "\n";
 	}
 	close AQ;
+	traceLog('Write File : '.$FileName."$lineFeed", __FILE__, __LINE__);
 }
 #=====================================================================================================================#****************************************************************************
 #Subroutine Name         : getQuotaForAccountSettings 
