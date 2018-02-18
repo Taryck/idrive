@@ -1,4 +1,4 @@
-								IDrive for Linux
+﻿								IDrive for Linux
 								=================
 
 I. INTRODUCTION
@@ -8,31 +8,37 @@ with an optional private key.
 
 II. SYSTEM/SOFTWARE REQUIREMENTS
 =================================
-Linux(CentOS/Ubuntu/Fedora) - 32-bit/64-bit
+Linux(CentOS/Ubuntu/Fedora/OpenSUSE/FreeBSD/Linux Mint) - 32-bit/64-bit
 Perl v5.8 or later
 
 III. SCRIPT DOWNLOAD
 =====================
-STEP 1: The script bundle can be downloaded from the link "https://www.idrive.com/downloads/linux/download-for-linux/IDrive_for_Linux.zip".
+STEP 1: The script bundle can be downloaded from the link 		          			
+		"https://www.idrivedownloads.com/downloads/linux/download-for-linux/IDrive_for_Linux.zip".
 		After downloading, extract the zip file in your machine. Current unzipped folder ie IDrive_for_Linux should contain scripts folder. 
 		Below files will be present in the scripts folder: 
 		
 		1. Account_Setting.pl
 		2. Backup_Script.pl
 		3. Check_For_Update.pl
-		4. Constants.pm
-		5. Edit_Supported_Files.pl
-		6. Header.pl
-		7. Job_Termination_Script.pl
-		8. Login.pl
-		9. Logout.pl
-		10. Operations.pl
-		11. readme.txt
-		12. Restore_Script.pl
-		13. Restore_Version.pl
-		14. Scheduler_Script.pl
-		15. Status_Retrieval_Script.pl
-		16. View_Log.pl
+		4. Configuration.pm
+		5. Constants.pm
+		6. Edit_Supported_Files.pl
+		7. Header.pl
+		8. Helpers.pm
+		9. IxHash.pm
+		10. job_termination.pl
+		11. Login.pl
+		12. Logout.pl
+		13. Operations.pl
+		14. readme.txt
+		15. Restore_Script.pl
+		16. Restore_Version.pl
+		17. Scheduler_Script.pl
+		18. Status_Retrieval_Script.pl
+		19. Strings.pm
+		20. Uninstall_Script.pl
+		21. View_Log.pl
 	
 STEP 2: Provide appropriate permissions (executable permission) to the scripts
 		Example:  chmod a+x *.pl
@@ -40,7 +46,7 @@ STEP 2: Provide appropriate permissions (executable permission) to the scripts
 IV. SETUP YOUR IDRIVE ACCOUNT
 ==============================
 STEP 1: You need to have an IDrive account to use the script bundle to backup your files. In case you do not have an account, 
-		please sign up and create an account at https://www.idrive.com/ .
+		please sign up and create an account at https://www.idrive.com/idrive/signup .
 			
 STEP 2: To set up IDrive script bundle locally with your IDrive account, run the below command and follow the instructions.
 		$./Account_Setting.pl 
@@ -98,7 +104,7 @@ STEP 7: View/restore previous versions of a file
 
 STEP 8:	Stop ongoing backup/restore operations 
 		To stop an ongoing backup or restore operation, run the below command: 
-		$./Job_Termination_Script.pl 
+		$./job_termination.pl 
 		
 STEP 9: View backup/restore logs
 		You can view the backup or restore log files by running the below command: 
@@ -117,12 +123,22 @@ VI. UPDATING YOUR SCRIPT BUNDLE
 		When you see a line "A new update is available. Run Check_For_Update.pl to update to latest package." means we have released a new improved version of script bundle. 
 		To update to most recent available script bundle please perform the below command and follow the instructions.
 		$./Check_For_Update.pl
-		
-VII. OTHERS
+
+VII. UNINSTALLING YOUR SCRIPT BUNDLE
+====================================
+		Uninstalling the script package from your system will leave the files/folders of your system liable to digital disasters.
+
+		To uninstall the script bundle please perform the below command and follow the instructions.
+		$./Uninstall_Script.pl
+
+		This script will automatically remove all package script files and other dependency files. It will also cleanup the scheduled backup/restore jobs if any.
+
+
+VIII. OTHERS
 ============
 		Script bundle have few more supported script files (Header.pl, Constants.pm and Operations.pl) which are used internally by other scripts.
     
-VIII. RELEASES
+IX. RELEASES
 ================
 	Build 1.0:
 		N/A
@@ -256,7 +272,7 @@ VIII. RELEASES
 		
 	Build 2.7
 		1.  Manual update of CONFIGURATION_FILE is not supported now. User must use "Account_Setting.pl" script to configure the account locally.
-		2.  We have introduced service loaction concept in "Account_Setting.pl" script. This directory will contain all user specific data required to perform operations.
+		2.  We have introduced service location concept in "Account_Setting.pl" script. This directory will contain all user specific data required to perform operations.
 		3.  User details can be changed using Account_setting.pl file.
 		4.  Progress bar has been implemented for backup/restore operations.
 		5.  Backup location can be changed while initiating the backup via Backup_Script.pl.
@@ -268,4 +284,39 @@ VIII. RELEASES
 		11. "Check_For_Update.pl" script is added which will allow to update the script bundle to the latest verison.
 		12. Every script will display a header to display script and user related information.
 		13. "Logout.pl" script has been updated to kill manual backup/restore job if they are in progress based on user input.
+		
+	Build 2.8
+		1.  Implemented support for all new IDrive accounts.
+		2.  Account encryption key can be set using Login.pl script.
+		3.  Fixed the invalid proxy issue for Login.pl script.
+		4.  Using IDrive login cgi to validate IDrive accounts in Login.pl script.
+		5.  Version display has been improved in Restore_Version.pl script.
+		6.  Fixed all the issues related to IDrive account reset and password reset.
+
+	Build 2.9
+		1.  Fine tunned the backup process for better performance.
+
+	Build 2.10
+		1.  Fixed the private key validation issue.
+		2.  Resolved the IDrive login issue w.r.t special characters.
+
+	Build 2.11
+		1.  A new script "Uninstall_Script.pl" has been introduced to uninstall package script and dependency files and to cleanup the scheduled jobs.
+		2.  Introduced an argument for "Account_Setting.pl" script where user can input the zip file path based on his machine architecture. This zip will contain all the dependency files "Account_Setting.pl" script may require to download internally. This option can be used if wget does not work as expected from script.
+		3.  Introduced an argument for "Check_For_Update.pl" script where user can input the package zip file path. Script will update the current scripts to the package scripts passed. Using this method user can upgrade and even downgrade (not recommended) his scripts to any version. 
+		4.  Fixed all the issues for scripts path having white-space.
+		5.  Handled the issue when the backup failed due to quota exceed.
+		6.  Extended Support for opensuse and fedora core.
+
+	Build 2.12
+		1.  Extended support for OpenSUSE,FreeBSD and Linux Mint.
+		2.  Renamed the "Job_Termination_Script.pl" to "job_termination.pl" with new design.
+		3.  Fixed restore issue when directory name in restore set file having white-space.
+		4.  Fixed the scheduler issue when crontab path is link.
+		5.  Fixed the status retrival issue when the username having character "cd".
+		6.  Fixed the transfer rate issue in Backup/Restore progress bar.
+		7.  Fixed the linux binary finding issue in "Account_Setting.pl" script when zip file passed as argument.
+		8.  Fixed the duplicate header display issue in Restore_Version.pl script.
+		9.  Fixed the IDrive account validation issue with fallback logic.
+	
 	======================================================================================

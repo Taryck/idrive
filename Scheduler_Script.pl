@@ -23,11 +23,10 @@ if(-e $confFilePath) {
 } 
 getConfigHashValue();
 loadUserData();
-checkEncType(1);
+#checkEncType(1); #Asuming not useful, its commented.
 #$pvtParam = "PVTKEY";
 #getParameterValue(\$pvtParam, \$hashParameters{$pvtParam});
 #my $pvtKey = $hashParameters{$pvtParam};
-
 if(getAccountConfStatus($confFilePath,\&headerDisplay)){
 	exit(0);
 }
@@ -36,7 +35,10 @@ else{
 			exit(0);
 	}
 }
-
+if (! checkIfEvsWorking($dedup)){
+        print Constants->CONST->{'EvsProblem'}.$lineFeed;
+        exit 0;
+}
 ##############################################
 #Subroutine that processes SIGINT and SIGTERM#
 #signal received by the script during backup #
@@ -45,6 +47,13 @@ $SIG{INT} = \&cancelProcess;
 $SIG{TERM} = \&cancelProcess;
 $SIG{TSTP} = \&cancelProcess;
 $SIG{QUIT} = \&cancelProcess;
+
+#Assigning Perl path
+my $perlPath = `which perl`;
+chomp($perlPath);	
+if($perlPath eq ''){
+	$perlPath = '/usr/local/bin/perl';
+}
 
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
@@ -60,7 +69,6 @@ $workingDir = "'".$workingDir."'";
 
 quotemeta($workingDir);
 
-my $crontabFilePath = "/etc/crontab";
 my $choice = undef;
 my @options = ();
 #Hash containing the weekdays#
@@ -74,14 +82,20 @@ my %hashDays = ( 1 => "MON",
                  '*' => "daily"
                );
  
-my @linesCrontab = ();
 checkUser();
+system("clear");
+headerDisplay($0);
+PRINTMENU:
 printMainMenu();
-my $mainMenuChoice = getMenuChoice(4);	
+my $mainMenuChoice = getMenuChoice(6);	
 loadType();
 $crontabEntryStatus = checkEntryExistsCrontab();
 if($mainMenuChoice == 1 || $mainMenuChoice == 3) {
-	emptyLocationsQueries(\$maximumAttemptMessage);
+	if ($mainMenuChoice == 1 and $dedup eq 'on'){
+		print qq{Your Backup Location name is "}.$backupHost.qq{". $lineFeed};
+	}else{
+		emptyLocationsQueries(\$maximumAttemptMessage);
+	} 
 	#If the backup job already exists in crontab#
 	if ($crontabEntryStatus){
 		print $maximumAttemptMessage;
@@ -107,15 +121,14 @@ if($mainMenuChoice == 1 || $mainMenuChoice == 3) {
 } elsif($mainMenuChoice == 2 || $mainMenuChoice == 4) {
 	if(checkEntryExistsCrontab()) {
 		$rmFlag = 1;
-		print $lineFeed.Constants->CONST->{'existingSchJob'}." $jobType Job.";
-		print $whiteSpace.Constants->CONST->{'schDelQuery'}.$whiteSpace;
+		print $lineFeed.Constants->CONST->{'delExistingSchJob'}." $jobType Job(y/n)?";
 		$confirmationChoice = getConfirmationChoice();
 		
 		if($confirmationChoice eq "y" || $confirmationChoice eq "Y") {
 			removeEntryFromCrontabLines();
 			my $writeFlag = writeToCrontab();
 			if(!$writeFlag) {
-				print "\nUnable to delete schedule $jobType job.\n";
+				print "\nUnable to delete Schedule $jobType Job.\n";
 			} else {
 				print $lineFeed.$jobType.' '.Constants->CONST->{'jobRemoveSuccess'}.$lineFeed;
 			}
@@ -124,8 +137,74 @@ if($mainMenuChoice == 1 || $mainMenuChoice == 3) {
 		print $lineFeed.Constants->CONST->{'noSchJob'}." $jobType Job. \n\n";
 	}
 	system('stty','echo');
+}elsif ($mainMenuChoice == 5){
+	displayScheduledJobs($jobType);
+	goto PRINTMENU;
+}elsif ($mainMenuChoice == 6){
+	cancelProcess();	
 }
-
+sub displayScheduledJobs{
+	my ($bCuttoffFlag,$rCuttoffFlag) = ('Off') x 2;
+	my ($bCutMin,$bCutHr,$rCutMin,$rCutHr,$bCutTime,$rCutTime) = (undef) x 6;
+	my ($bSchMin,$bSchHr,$bSchFrequency) = (undef) x 3;
+	my ($rSchMin,$rSchHr,$rSchFrequency) = (undef) x 3;
+	my (@schBackData,@schResData) = (()) x 2;
+	my $tableData = '';
+	my $backupScheduledJob = (split('/',$usrProfilePath))[-1]."/$userName/Backup/Scheduled";
+	my $restoreScheduleJob = (split('/',$usrProfilePath))[-1]."/$userName/Restore/Scheduled";
+	my $readable = readFromCrontab();
+	if($readable == 0){
+		@linesCrontab = readCrontabAsRoot();
+	}
+	my @schBackupJobs = grep /$backupScheduledJob/,@linesCrontab;
+	if (scalar(@schBackupJobs) > 0 ){
+		($bSchMin,$bSchHr,$bSchFrequency) = (split (/ /,$schBackupJobs[0]))[0,1,4];
+		$bSchFrequency = 'DAILY' if ($bSchFrequency eq '*');
+		if ($schBackupJobs[1] ne ''){
+			$bCuttoffFlag = 'On';
+			($bCutMin,$bCutHr) = (split (/ /,$schBackupJobs[1]))[0,1];
+			$bCutTime = ($bCutMin ne '' and $bCutHr ne '') ? $bCutHr.':'.$bCutMin : '';
+		}
+		@schBackData = ('Backup',$bSchFrequency,"$bSchHr:$bSchMin",$bCuttoffFlag,$bCutTime);
+	}
+	my @schRestoreJobs = grep /$restoreScheduleJob/,@linesCrontab;
+	if (scalar(@schRestoreJobs) > 0){
+		($rSchMin,$rSchHr,$rSchFrequency) = (split (/ /,$schRestoreJobs[0]))[0,1,4];
+		$rSchFrequency = 'DAILY' if ($rSchFrequency eq '*');
+        	if ($schRestoreJobs[1] ne ''){
+                	$rCuttoffFlag = 'On';
+	                ($rCutMin,$rCutHr) = (split (/ /,$schRestoreJobs[1]))[0,1];
+			$rCutTime = ($rCutMin ne '' and $rCutHr ne '') ? $rCutHr.':'.$rCutMin : '';
+        	}
+		@schResData = ('Restore',$rSchFrequency,"$rSchHr:$rSchMin",$rCuttoffFlag,$rCutTime);
+	}
+	my @columnNames = (['Job Name','Frequency','Scheduled Time','Cut-off','Cut-off Time'],[11,26,16,10,15]);
+	my $tableHeader = (getTableHeader(@columnNames));
+	$tableHeader  =~ s/\n$//;
+	my $tableData = getScheduleJobTableData(\@schBackData,\@schResData,$columnNames[1]);
+	if ($tableData ne ''){
+		print $lineFeed.Constants->CONST->{'scheduleJobDet'}.$lineFeed;
+		print $tableHeader.$lineFeed.$tableData;
+	}else{
+		print $lineFeed.Constants->CONST->{'noSchJob'}." Job. $lineFeed$lineFeed";
+	}
+	print $lineFeed;	
+}
+sub getScheduleJobTableData{
+	my @displayData = (@{$_[0]},@{$_[1]});
+	my @spacesBtwWords = @{$_[2]};
+	my ($dataInOneLine,$spaceIndex,$tableData) = (5,0,'');
+	foreach(@displayData){
+		$tableData .= $_;
+		$tableData .= ' ' x ($spacesBtwWords[$spaceIndex] - length($_));
+		++$spaceIndex;
+		if ($dataInOneLine == $spaceIndex){
+			$spaceIndex = 0;
+			$tableData .= $lineFeed;
+		}
+	}
+	return $tableData;	
+}
 #****************************************************************************************************
 # Subroutine Name         : scheduleJob.
 # Objective               : Create a new backup/restore job /modify an existing backup job. 
@@ -163,20 +242,14 @@ sub scheduleJob {
 #*****************************************************************************************************/
 sub printMainMenu
 {
-	system("clear");
-	headerDisplay($0);
-	## To Check EVS Binary, if not exists, exit... ##
-	my $err_string = checkBinaryExists();
-	if($err_string ne "") {
-        	print qq($err_string);
-        	exit 1;
-	}
 	print Constants->CONST->{'AskOption'}."\n\n";
 #	print "\n";
 	print "1) Schedule Backup Job\n";
 	print "2) Delete Scheduled Backup Job\n";
 	print "3) Schedule Restore Job\n";
 	print "4) Delete Scheduled Restore Job\n";
+	print "5) View Scheduled Jobs\n";
+	print "6) Exit\n";
 #	print "\n";
 }
 
@@ -203,7 +276,7 @@ sub getMenuChoice {
 	my $count = 0;
 	while(!defined $choice) {
 		if ($count < 4){
-			print "\n".Constants->CONST->{'EnterChoice'};
+			print $lineFeed.Constants->CONST->{'EnterChoice'};
 			$choice = <>;
 			Chomp(\$choice);
 			$choice =~ s/^0+(\d+)/$1/g;
@@ -249,8 +322,8 @@ sub loadType {
 		}
 	}
 	chmod $filePermission, $jobRunningDir;
-	
-	$scriptName = qq{perl "$userScriptLocation/$scriptType"};
+
+	$scriptName = qq{$perlPath "$userScriptLocation/$scriptType"};
 	$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." SCHEDULED $userName";
 }
 
@@ -299,6 +372,7 @@ sub printAddCrontabMenu
 #*****************************************************************************************************/
 sub getDays
 {
+=comment
 	if(${$_[0]} ne "") {
 		print Constants->CONST->{'previousChoice'};
 		if(${$_[0]} eq '*') {
@@ -307,6 +381,7 @@ sub getDays
 			print "${$_[0]}\n";
 		}
 	}
+=cut
 	my $choiceCount = 0;	
 	while(!defined $choice) {
 		if ($choiceCount == 3){
@@ -315,7 +390,9 @@ sub getDays
 		}
 		print Constants->CONST->{'EnterChoice'};
 		chomp($choice = <>);
+		$choice =~ s/,$//;
 		Chomp(\$choice);
+		$choice =~ s/\s+//g;
 		$choice =~ s/^0+(\d+)/$1/g;
 		$choiceCount ++;	
 		if($choice =~ m/^(\d,)*\d$/) {
@@ -367,9 +444,9 @@ sub getHour
 		print "\nEnter Time of the Day when $jobType is supposed to run.\n";
 	}
 	
-	if(${$_[0]} ne "") {
-		print "Previously entered Hour: ${$_[0]} \n";
-	} 
+#	if(${$_[0]} ne "") {
+#		print "Previously entered Hour: ${$_[0]} \n";
+#	} 
 	
 	my $Choosenhour = undef;
 	my $choiceCount = 0;
@@ -473,8 +550,8 @@ sub getNscheduleCutOff {
 			($terminateHour,$terminateMinute,$selectJobTermination) = (undef,undef,undef);
 			print Constants->CONST->{'maxRetryCuttoff'}.$lineFeed;
 		}else{# If user enters correct input the cutoff will be scheduled properly
-			$scriptName = qq{perl "$userScriptLocation/}.Constants->FILE_NAMES->{jobTerminationScript}.qq{"};
-			$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." $jobType $userName SCHEDULED";
+			$scriptName = qq{$perlPath "$userScriptLocation/}.Constants->FILE_NAMES->{jobTerminationScript}.qq{"};
+			$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." scheduled_$jobType $userName";			
 		}
 	}
 }
@@ -490,15 +567,16 @@ sub mainOperation {
 	my $cuttOffDailyFlag = 0;
 	if($dayWkOp eq 2) {
 		printAddCrontabMenu();
-		getDays(\$dayOptionPresentCrontab);
+#		getDays(\$dayOptionPresentCrontab);
+		getDays();#As now we are not showing the previous choice so there is not point of sending $dayOptionPresentCrontab in argument.
 	} else {
 		$choice = "*";
 		$cuttOffDailyFlag = 1;
 		$numArguments = 7;
 	}
 	
-	$hour = getHour(\$hourOptionPresentCrontab);
-	$minute = getMinute(\$minuteOptionPresentCrontab);
+	$hour = getHour();
+	$minute = getMinute();
 	
 	if($editFlag) {
 		removeEntryFromCrontabLines();
@@ -512,14 +590,17 @@ sub mainOperation {
 	} else {
 		@daysEntered = '*';
 	}
-	
+	if (scalar(@daysEntered) == 7){#If user enters all the days of week then coverting array entry to * so that daily can be displayed
+                        @daysEntered = ('*');
+                        $cuttOffDailyFlag = 1; #For cutt-off this flag should be initialized with 1 as user enter all days of the week after selecting weekly.
+        }
 	if(($mainMenuChoice == 1 || $mainMenuChoice == 3) and $editFlag == 0) {
 		$scheduleMsg = "\n$jobType Job has been scheduled successfully for";
 	
 		foreach my $value (@daysEntered) {
 			$scheduleMsg .= " $hashDays{$value}";
 		}
-		$scheduleMsg .= " at $hour:$minute. \n\n";
+		$scheduleMsg .= " at $hour:$minute ";
 	}
 	elsif(($mainMenuChoice == 1 || $mainMenuChoice == 3) and $editFlag == 1) {
 		my @daysEnteredCrontab = ();
@@ -529,27 +610,29 @@ sub mainOperation {
 			@daysEnteredCrontab = '*';
 		}
 			
-		$scheduleMsg .= "$jobType Job has been modified successfully from";
+		$scheduleMsg .= "$jobType Job has been modified successfully to";
 		
-		foreach my $value (@daysEnteredCrontab) {
-			$scheduleMsg .= " $hashDays{$value}";
-		}
-		
-		$scheduleMsg .= " at $hourOptionPresentCrontab:$minuteOptionPresentCrontab to";
+		#Commented by Senthil for Snigdha_2.11_7_2
+		#foreach my $value (@daysEnteredCrontab) {
+			#$scheduleMsg .= " $hashDays{$value}";
+		#}		
+		#$scheduleMsg .= " at $hourOptionPresentCrontab:$minuteOptionPresentCrontab to";
 		
 		foreach my $value (@daysEntered) {
 			$scheduleMsg .= " $hashDays{$value}";
 		}
-		$scheduleMsg .= " at $hour:$minute.\n";
+		$scheduleMsg .= " at $hour:$minute ";
 	}
 	
 	getNscheduleCutOff();
 	if(!$selectJobTermination) {
+		$scheduleMsg =~ s/\s$/\.$lineFeed/;#if no cutt off has been added then we need to put new line at the end of message.
 		emailNotifyQueries();
 		return;
 	}
 	
-	$scheduleMsg .= "Cut off for $jobType has been scheduled successfully for";
+	#$scheduleMsg .= "Cut off for $jobType has been scheduled successfully for";
+	$scheduleMsg .= "with cut off time for";
 	if ($cuttOffDailyFlag == 1){
 		$scheduleMsg .= " daily";
 	}else{# code to calculate cut-off for shifting days 
@@ -655,9 +738,12 @@ sub createCrontabEntry
 # Added By                : 
 #*****************************************************************************************************/
 sub checkEntryExistsCrontab{
-	readFromCrontab();
+	my $readable = readFromCrontab();
+	if($readable == 0){
+		@linesCrontab = readCrontabAsRoot();
+	}
 	foreach (@linesCrontab) {
-		if (/$checkScriptCronEntry/){
+		if (/$jobRunningDir/){
 			$crontabEntry = $_;
 			return true;
 		}
@@ -681,22 +767,44 @@ sub removeEntryFromCrontabLines
 }
 
 #****************************************************************************************************
-# Subroutine Name         : readFromCrontab.
-# Objective               : Read entire crontab file.
-# Added By                : 
+# Subroutine Name		: readCrontabAsRoot.
+# Objective				: Read entire crontab file by root user mode.
+# Modified By			: Senthil Pandian
 #*****************************************************************************************************/
-sub readFromCrontab {
-	open CRONTABFILE, "<", $crontabFilePath or (print "$lineFeed Couldn't open file $crontabFilePath. :$! $lineFeed" and die);
-	@linesCrontab = <CRONTABFILE>;  
-	close CRONTABFILE;
+sub readCrontabAsRoot {
+	my $command = '';
+	my $temp = "$jobRunningDir/operationsfile.txt";
+	if(!open TEMP, ">", $temp) {
+		print $tHandle "$!\n";
+		print "unable $!";
+		exit;
+	}
+	
+	print TEMP "READ_CRON_ENTRIES";
+	close TEMP;
+	chmod $filePermission, $temp;
+	my $operationsScript = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
+	if($noRoot) {
+		$command = "su -c \"$perlPath '$operationsScript' '$jobRunningDir' \" root";
+		if (ifUbuntu()){
+			$command = "sudo -p\"".Constants->CONST->{'CronQueryUbuntu'}." $user: \" ".$command;
+		}else{
+			print Constants->CONST->{'CronQuery'};
+		}
+	} else {
+		$command = qq{$perlPath '$operationsScript' '$jobRunningDir'};
+	}
+	
+	traceLog("Read cron entry command: $command", __FILE__, __LINE__);
+	my @res = `$command`;
+	unlink($temp);
+	return @res;
 }
-
 #****************************************************************************************************
 # Subroutine Name		: writeToCrontab.
 # Objective				: Append an entry to crontab file.
 # Modified By			: Dhritikana
 #*****************************************************************************************************/
-
 sub writeToCrontab {
 	my $command = '';
 	s/^\s+// for @linesCrontab;
@@ -706,23 +814,22 @@ sub writeToCrontab {
 		print "unable $!";
 		exit;
 	}
-	print TEMP "schedule\n";
+	print TEMP "WRITE_TO_CRON\n";
 	print TEMP @linesCrontab;
 	close TEMP;
 	chmod $filePermission, $temp;
 	my $operationsScript = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
 	if($noRoot) {
-		$command = "su -c \"perl  $operationsScript $jobRunningDir\" root";
+		$command = "su -c \"$perlPath '$operationsScript' '$jobRunningDir' \" root";
 		if (ifUbuntu()){
-			$command = "sudo -p\" ".Constants->CONST->{'CronQueryUbuntu'}." $user: \" ".$command;
+			$command = "sudo -p\"".Constants->CONST->{'CronQueryUbuntu'}." $user: \" ".$command;
 		}else{
 			print Constants->CONST->{'CronQuery'};
 		}	
 	} else {
-		$command = qq{perl  $operationsScript $jobRunningDir};
+		$command = qq{$perlPath '$operationsScript' '$jobRunningDir'};
 	}
 	traceLog(" Cron entry command: $command", __FILE__, __LINE__);
-
 	my $res = system($command);
 	unlink($temp);
 	if($res ne "0") {
@@ -828,7 +935,7 @@ sub emailNotifyQueries {
 		} 
 		
 		if($notifyEmailIds) {
-			print Constants->CONST->{'existingEmail'}.$notifyEmailIds;
+			print $lineFeed.Constants->CONST->{'existingEmail'}.$notifyEmailIds.$lineFeed;
 			print $lineFeed.Constants->CONST->{'editQuery'}.$whiteSpace;
 			$confirmationChoice = getConfirmationChoice();
 			if($confirmationChoice eq "n" or $confirmationChoice eq "N") {
@@ -841,22 +948,22 @@ sub emailNotifyQueries {
 	}		
 	elsif($notifyFlag eq "ENABLED") {
 		print $lineFeed.Constants->CONST->{'emailNotificationSetting'}.$lineFeed;
-		print Constants->CONST->{'emailNotificationStatus'}." ENABLED\n";
-		print Constants->CONST->{'emailIDs'}." $notifyEmailIds\n";
-		print Constants->CONST->{'emailNotificationDisable'};
+		print Constants->CONST->{'emailNotificationStatus'}." ENABLED".$lineFeed;
+		print Constants->CONST->{'emailIDs'}." $notifyEmailIds".$lineFeed;
+		print $lineFeed.Constants->CONST->{'emailNotificationDisable'};
 		$confirmationChoice = getConfirmationChoice();
 		if($confirmationChoice eq "y" or $confirmationChoice eq "Y") {
 			print ENABLEFILE "DISABLED\n";
-			print ENABLEFILE $notifyEmailIds."\n";
+			print ENABLEFILE $notifyEmailIds.$lineFeed;
 			close(ENABLEFILE);
 			return 1;
 		}
 		elsif($confirmationChoice eq 'N' or $confirmationChoice eq 'n'){
-			print Constants->CONST->{'emailIDChange'};
+			print $lineFeed.Constants->CONST->{'emailIDChange'};
 			$confirmationChoice = getConfirmationChoice();
 			if ($confirmationChoice eq "n" or $confirmationChoice eq "N"){
-				 print ENABLEFILE "ENABLED\n";
-				 print ENABLEFILE $notifyEmailIds."\n";
+				 print ENABLEFILE "ENABLED".$lineFeed;
+				 print ENABLEFILE $notifyEmailIds.$lineFeed;
 				 close(ENABLEFILE);
 				 return 1;
 			}

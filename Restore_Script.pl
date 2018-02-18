@@ -3,7 +3,6 @@
 ########################################################################
 #Script Name : Restore_Script.pl
 ########################################################################
-
 unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
 require 'Header.pl';
 use FileHandle;
@@ -49,7 +48,13 @@ use constant FAILEDFILES_LISTIDX => 3;
 use constant RETRY_ATTEMPT_INDEX => 4;
 #use constant ERR_MSG_INDEX => 4;
 use constant EXIT_FLAG_INDEX => 4;
-
+my @commandArgs = ('--silent',Constants->CONST->{'versionRestore'},'SCHEDULED');
+if ($#ARGV >= 0){
+	if (!validateCommandArgs(\@ARGV,\@commandArgs)){
+		print Constants->CONST->{'InvalidCmdArg'}.$lineFeed;
+		cancelProcess();
+	}
+}
 # Status File Parameters
 my @statusFileArray = (		"COUNT_FILES_INDEX",
 							"SYNC_COUNT_FILES_INDEX",
@@ -77,10 +82,10 @@ if(-e $confFilePath) {
 
 getConfigHashValue();
 loadUserData(); # $restoreHost variable is not getting populated
+
 if ($silentFlag == 0 and $ARGV[0] != Constants->CONST->{'versionRestore'} and $ARGV[0] ne 'SCHEDULED'){ #To prevent the calling of headerDisplay() subroutine.
 	headerDisplay($0);
 }
-
 my $errorFilePresent = false;
 my $invalidCharPresent = false;
 my $lineCount;
@@ -115,7 +120,14 @@ $SIG{TSTP} = \&process_term;
 $SIG{QUIT} = \&process_term;
 $SIG{PWR}  = \&process_term;
 $SIG{KILL} = \&process_term;
+$SIG{USR1} = \&process_term;
 
+#Assigning Perl path
+my $perlPath = `which perl`;
+chomp($perlPath);	
+if($perlPath eq ''){
+	$perlPath = '/usr/local/bin/perl';
+}			
 #$confFilePath = $usrProfilePath."/$userName/CONFIGURATION_FILE";
 
 #if(-e $confFilePath) {
@@ -132,7 +144,7 @@ my $curFile = basename(__FILE__);
 
 #Verifying if Restore scheduled or manual job
 my $flagToCheckSchdule = 0;
-if(${ARGV[0]} eq "SCHEDULED") {
+if($ARGV[0] eq "SCHEDULED") {
 	$pwdPath = $pwdPath."_SCH";
 	$pvtPath = $pvtPath."_SCH";
 	$flagToCheckSchdule = 1;
@@ -140,7 +152,7 @@ if(${ARGV[0]} eq "SCHEDULED") {
 	$RestoreFileName = $RestoresetSchFile;
 #	$CurrentRestoresetSoftPath = $RestoresetSchFileSoftPath;
 	chmod $filePermission, $RestoreFileName;
-} else {
+}else{
 	$taskType = "Manual";
 #	my $pvtParam = "PVTKEY";
 #	getParameterValue(\$pvtParam, \$hashParameters{$pvtParam});
@@ -156,6 +168,10 @@ if(${ARGV[0]} eq "SCHEDULED") {
 	}
 #	$CurrentRestoresetSoftPath = $RestoresetFileSoftPath;
 }
+if (! checkIfEvsWorking($dedup)){
+        print Constants->CONST->{'EvsProblem'}.$lineFeed;
+        exit 0;
+}
 traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
 #Defining and creating working directory
 $jobRunningDir = "$usrProfilePath/$userName/Restore/$taskType";
@@ -163,10 +179,14 @@ if(!-d $jobRunningDir) {
 	mkpath($jobRunningDir);
 	chmod $filePermission, $jobRunningDir;
 }
-checkEvsStatus($restoreOp);
+exit 1 if(!checkEvsStatus(Constants->CONST->{'RestoreOp'}));
 $pidPath = "$jobRunningDir/pid.txt";
+
 #Checking if another job in progress
-if(!pidAliveCheck()) {
+if(!pidAliveCheck()){
+	$pidMsg = "$jobType job is already in progress. Please try again later.\n";
+	print $pidMsg;
+	traceLog($pidMsg, __FILE__, __LINE__);
 	exit 1;
 }
 
@@ -184,10 +204,12 @@ $noRelativeFileset	= $jobRunningDir."/".$noRelativeFileset;
 $filesOnly	= $jobRunningDir."/".$filesOnly;
 my $fileForSize = "$jobRunningDir/TotalSizeFile";
 my $incSize = "$jobRunningDir/transferredFileSize.txt";
+my $trfSizeAndCountFile = "$jobRunningDir/trfSizeAndCount.txt";
 
 # pre cleanup for all intermediate files and folders.
-`rm -rf $RestoresetFile_relative* $noRelativeFileset* $filesOnly* $info_file $retryinfo ERROR $statusFilePath $failedfiles*`;
+`rm -rf '$RestoresetFile_relative'* '$noRelativeFileset'* '$filesOnly'* '$info_file' '$retryinfo' ERROR '$statusFilePath' '$failedfiles'*`;
 $errorDir = $jobRunningDir."/ERROR";
+unlink($progressDetailsFilePath);
 if(!-d $errorDir) {
 	my $ret = mkdir($errorDir);
 	if($ret ne 1) {
@@ -197,66 +219,31 @@ if(!-d $errorDir) {
 	chmod $filePermission, $errorDir;
 }   				     
 # Deciding Restore set File based on normal restore or version restore
-if(${ARGV[0]} eq Constants->CONST->{'versionRestore'}) {
+if($ARGV[0] eq Constants->CONST->{'versionRestore'}) {
 	$RestoreFileName = $jobRunningDir."/versionRestoresetFile.txt";
 }
-
 my $serverAddress = verifyAndLoadServerAddr();
 if ($serverAddress == 0){
         exit_cleanup($errStr);
 }
-my $encType = checkEncType($flagToCheckSchdule);
+#my $encType = checkEncType($flagToCheckSchdule); # This function has been called inside getOperationFile() function.
 createUpdateBWFile();
-checkPreReq();
+checkPreReq($RestoreFileName,$jobType,$taskType,'NORESTOREDATA');
 createLogFiles("RESTORE");
-
 #$info_file = $jobRunningDir."/info_file";
 $failedfiles = $jobRunningDir."/".$failedFileName;
 createRestoreTypeFile();
 if(${ARGV[0]} eq ""){				#Only for Manual Restore.
 	emptyLocationsQueries();
 }
-
 $location = $restoreLocation;
 $mail_content_head = writeLogHeader($flagToCheckSchdule);
 if($flagToCheckSchdule == 0 and $silentFlag == 0) {
 	getCursorPos();
 }
+
 startRestore();
 exit_cleanup($errStr);
-
-#****************************************************************************************************
-# Subroutine Name         : checkPreReq.
-# Objective               : This function will check if prequired files before doing restore.					
-# Added By		  : Dhritikana
-# Modified By		  : Abhishek Verma-17/10/2016-Changed display message if restoresetfile is empty.
-#*****************************************************************************************************/
-sub checkPreReq {
-	my $err_string = checkBinaryExists();
-	if($err_string eq "") {
-                if(!-e $RestoreFileName) {
-			open(SETFILE, ">", $RestoreFileName);
-			close(SETFILE);
-			chmod $filePermission, $RestoreFileName;
-#			`ln -s $RestoreFileName $CurrentRestoresetSoftPath`;
-			$err_string = "Your $jobType"."set file \"$RestoreFileName\" is empty. ".Constants->CONST->{pleaseUpdate}.$lineFeed;#Added by Abhishek Verma
-		} elsif( !-s $RestoreFileName ) {
-			$err_string = "Your $jobType"."set file \"$RestoreFileName\" is empty. ".Constants->CONST->{pleaseUpdate}.$lineFeed;# Added by abhishek Verma.
-		}
-	}
-
-	if($err_string ne "") {
-		$errStr = $err_string;
-		print $err_string;
-		traceLog($err_string, __FILE__, __LINE__);
-		$subjectLine = "$taskType Restore Email Notification "."[$userName]"." [Failed Restore]";
-		$status = "FAILURE";
-		sendMail($subjectLine,'NORESTOREDATA',$RestoreFileName);
-		rmtree($errorDir);  
-		unlink $pidPath;
-		exit 1;
-	}
-}
 
 #****************************************************************************************************
 # Subroutine Name         : startRestore
@@ -278,22 +265,21 @@ sub startRestore {
 
 	close(FD_WRITE);
 START:
-	if(!open(FD_READ, "<", $info_file)) {
-		$errStr = Constants->CONST->{'FileOpnErr'}." $info_file to read, Reason:$!";
-		traceLog($errStr, __FILE__, __LINE__);
-		return;
-	}
+	if (-e $info_file){
+		if(!open(FD_READ, "<", $info_file)) {
+			$errStr = Constants->CONST->{'FileOpnErr'}." $info_file to read, Reason:$!";
+			traceLog($errStr, __FILE__, __LINE__);
+			return;
+		}
 	
 	my $lastFlag = 0;
 	while (1) {
 		$line = <FD_READ>;
-		
 		if($line eq "") {
 			sleep(1);
 			seek(FD_READ, 0, 1);		#to clear eof flag
 			next;
 		}
-		
 		chomp($line);
 		$line =~ m/^[\s\t]+$/;
 		#space and tab space also trim 
@@ -325,12 +311,12 @@ START:
 	undef @linesStatusFile;
 	
 	if($totalFiles == 0 or $totalFiles !~ /\d+/) {
-		my $fileCountCmd = "cat $info_file | grep \"^TOTALFILES\"";
+		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
 		$totalFiles = `$fileCountCmd`; 
 		$totalFiles =~ s/TOTALFILES//;
 		
 		if($totalFiles == 0 or $totalFiles !~ /\d+/){
-			traceLog("\n Unable to get total files count  1\n", __FILE__, __LINE__);
+			traceLog("\n Unable to get total files count \n", __FILE__, __LINE__);
 		}
 	} 
 	
@@ -353,6 +339,7 @@ START:
 		chmod $filePermission, $info_file;
 		goto START;
 	}
+	}
 }
 
 #****************************************************************************************************
@@ -369,7 +356,10 @@ sub checkRestoreItem {
 		traceLog(Constants->CONST->{'FileOpnErr'}." $RestoreItemCheck , Reason: $!\n", __FILE__, __LINE__);
 		return 0;
 	}
-	
+	$tempRestoreHost = $restoreHost;
+	if($dedup eq 'on'){
+		$tempRestoreHost = "";
+	}
 	while(<RESTORELIST>) {
 		chomp($_);
 		$_ =~ s/^\s+//;
@@ -378,11 +368,10 @@ sub checkRestoreItem {
 		}
 		my $rItem = "";
 		if(substr($_, 0, 1) ne "/") {
-			$rItem = $restoreHost."/".$_;
+			$rItem = $tempRestoreHost."/".$_;
 		} else {
-			$rItem = $restoreHost.$_;
+			$rItem = $tempRestoreHost.$_;
 		}
-	
 		print RESTORELISTNEW $rItem.$lineFeed;
 	}
 	close(RESTORELIST);
@@ -390,7 +379,7 @@ sub checkRestoreItem {
 
 GETSTAT:
 	my @itemsStat = ();
-	my $checkItemUtf = getOperationFile( $itemStatOp, $RestoreItemCheck);
+	my $checkItemUtf = getOperationFile( Constants->CONST->{'ItemStatOp'}, $RestoreItemCheck);
 	
 	if(!$checkItemUtf) {
 		traceLog($errStr, __FILE__, __LINE__);
@@ -398,13 +387,16 @@ GETSTAT:
 	}
 	
 	$checkItemUtf =~ s/\'/\'\\''/g; 
-	$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$checkItemUtf."'".$whiteSpace.$errorRedirection;;
+	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$checkItemUtf."'".$whiteSpace.$errorRedirection;
 	my @itemsStat = `$idevsutilCommandLine`;
-	
+#	if (-s "$usrProfileDir/Restore/Manual/error.txt" > 0){
+#		$errStr = Constants->CONST->{'UnableToConnect'} if (appLogout("$usrProfileDir/Restore/Manual/error.txt"));
+#	}
 	# update server address if cmd failed due to wrong evs server address
 	if(updateServerAddr()){
 		goto GETSTAT;
 	}
+	
 	unlink($checkItemUtf);
 	unlink($RestoreItemCheck);
 	return @itemsStat;
@@ -439,19 +431,19 @@ sub enumerateRemote {
 	my $searchError = $search."/error.txt";
 	
 START:
-	my $searchUtfFile = getOperationFile($searchOp, $remoteFolder);
+	my $searchUtfFile = getOperationFile(Constants->CONST->{'SearchOp'}, $remoteFolder);
 	if(!$searchUtfFile) {
 		return 0;
 	}
 	
 	$searchUtfFile =~ s/\'/\'\\''/g;
-	$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$searchUtfFile."'".$whiteSpace.$errorRedirection;
+	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$searchUtfFile."'".$whiteSpace.$errorRedirection;
 #	my $commandOutput = `$idevsutilCommandLine`;
 	# EVS command execute
 	$res = `$idevsutilCommandLine`;
 	traceLog("res - $res\n", __FILE__, __LINE__);	
 
-	if("" ne $res){
+	if("" ne $res and $res !~ /no version information available/i){
 		$errStr = "search cmd syntax error found\n";
 		return REMOTE_SEARCH_CMD_ERROR;
 	}
@@ -463,6 +455,8 @@ START:
 	
 	if(-s $searchError > 0) {
 		$errStr = "Remote folder enumeration has failed.\n";
+		checkExitError($searchError);
+		writeParameterValuesToStatusFile($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$exit_flag,$failedfiles_index);
 		return REMOTE_SEARCH_FAIL;
 	}
 	unlink($searchUtfFile);
@@ -473,49 +467,92 @@ START:
 		traceLog($errStr, __FILE__, __LINE__);
 		return REMOTE_SEARCH_OUTPUT_PARSE_FAIL;
 	}
-	
-	while(<OUTFH>){
-		@fileName = split(/\] \[/, $_, SPLIT_LIMIT_SEARCH_OUTPUT);		# split to get file name.
-		if($#fileName != 5) {
-			next;
-		}
-		chomp($fileName[5]);
-		chop($fileName[5]);			# remove lat character as ']'.
-		$temp = $fileName[5];
 
-		my $quoted_current_source = quotemeta($current_source);
-		if($relative == 0) {
-			if($current_source ne "/") {
-				if($temp =~ s/^$quoted_current_source//) {
-					print $filehandle $temp.$lineFeed;
+	if($dedup eq 'on'){
+		while(<OUTFH>){
+			@fileName = split("\"", $_, 43);
+			if($#fileName != 42) {
+				next;
+			}
+			$temp = $fileName[41];
+			replaceXMLcharacters(\$temp);
+			my $quoted_current_source = quotemeta($current_source);
+			if($relative == 0) {
+				if($current_source ne "/") {
+					if($temp =~ s/^$quoted_current_source//) {
+						print $filehandle $temp.$lineFeed;
+					} else {
+						next;
+					}
 				} else {
-					next;
+					print $filehandle $temp.$lineFeed;
 				}
-			} else {
-				print $filehandle $temp.$lineFeed;
 			}
+			else {
+				if($temp =~ /\^$remoteFolder/) {
+					$current_source = "/";
+					print RESTORE_FILE $temp.$lineFeed;
+					$RestoresetFileTmp = $RestoresetFile_relative;
+				}
+			}		
+			$totalFiles++;
+			$filecount++;	
+			$size = $fileName[5];
+			$size =~ s/\D+//g;
+			$size =~ s/\s+//g;
+			$totalSize += $size;
+			
+			if($filecount == FILE_MAX_COUNT) {
+				if(!createRestoreSetFiles1k()){
+					traceLog($errStr, __FILE__, __LINE__);
+					return REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR;
+				}
+			}				
 		}
-		else {
-			if($temp =~ /\^$remoteFolder/) {
-				$current_source = "/";
-				print RESTORE_FILE $temp.$lineFeed;
-				$RestoresetFileTmp = $RestoresetFile_relative;
+	} else {
+		while(<OUTFH>){
+			@fileName = split(/\] \[/, $_, SPLIT_LIMIT_SEARCH_OUTPUT);		# split to get file name.
+			if($#fileName != 5) {
+				next;
 			}
+			chomp($fileName[5]);
+			chop($fileName[5]);			# remove lat character as ']'.
+			$temp = $fileName[5];
+
+			my $quoted_current_source = quotemeta($current_source);
+			if($relative == 0) {
+				if($current_source ne "/") {
+					if($temp =~ s/^$quoted_current_source//) {
+						print $filehandle $temp.$lineFeed;
+					} else {
+						next;
+					}
+				} else {
+					print $filehandle $temp.$lineFeed;
+				}
+			}
+			else {
+				if($temp =~ /\^$remoteFolder/) {
+					$current_source = "/";
+					print RESTORE_FILE $temp.$lineFeed;
+					$RestoresetFileTmp = $RestoresetFile_relative;
+				}
+			}
+			
+			$totalFiles++;
+			$filecount++;	
+			$size = $fileName[1];
+			$size =~ s/\D+//g;
+			$size =~ s/\s+//g;
+			$totalSize += $size;
+			
+			if($filecount == FILE_MAX_COUNT) {
+				if(!createRestoreSetFiles1k()){
+					traceLog($errStr, __FILE__, __LINE__);
+					return REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR;
+				}
+			}	
 		}
-		
-		$totalFiles++;
-		$filecount++;	
-		$size = $fileName[1];
-		$size =~ s/\D+//g;
-		$size =~ s/\s+//g;
-		$totalSize += $size;
-		
-		if($filecount == FILE_MAX_COUNT) {
-			if(!createRestoreSetFiles1k()){
-				traceLog($errStr, __FILE__, __LINE__);
-				return REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR;
-			}
-		}	
 	}
 	traceLog($errStr, __FILE__, __LINE__);
 	return REMOTE_SEARCH_SUCCESS;
@@ -549,7 +586,8 @@ sub generateRestoresetFiles {
 
 		$totalFiles = 1;
 		$current_source = "/";
-		print FD_WRITE "$RestoreFileName ".NORELATIVE." $current_source\n"; 
+		#print FD_WRITE "$RestoreFileName ".NORELATIVE." $current_source\n";
+		print FD_WRITE "$current_source' '".NORELATIVE."' '$RestoreFileName\n";
 		goto GENEND;
 	} 
 	my $traceExist = $errorDir."/traceExist.txt";
@@ -561,73 +599,69 @@ sub generateRestoresetFiles {
 	$pidTestFlag = "GenerateFile";
 	my @itemsStat = checkRestoreItem();
 	chomp(@itemsStat);
+	@itemsStat = uniqueData(@itemsStat);
 	my $checkItems = join (' ',@itemsStat);
-#	if ($checkItems =~/.*No such file or directory.*?\[(.*?)\].*/i){
-#		print qq{\n\n"$1" -> No such file or directory.\n\n};		
-#	}
 	
 	$filesonlycount = 0;
 	my $j = 0;
 	my $idx = 0;
-	
+		
 	if($#itemsStat ge 1) {
 		chomp(@itemsStat);
-
-		foreach my $tmpLine (@itemsStat) {
-			my @fields = split("\\] \\[", $tmpLine, SPLIT_LIMIT_ITEMS_OUTPUT);
-			my $total_fields = @fields;
-					
-			if($total_fields == SPLIT_LIMIT_ITEMS_OUTPUT) {
-				
-				$fields[0] =~ s/^.//; # remove starting character [ from first field
-				$fields[$fields_in_progress-1] =~ s/.$//; # remove last character ] from last field
-				$fields[0] =~ s/^\s+//; # remove spaces from beginning from required fields
-				$fields[1] =~ s/^\s+//;
-				
-				if ($fields[1] eq "." or $fields[1] eq "..") {
+		
+		if($dedup eq 'on'){
+			foreach my $tmpLine (@itemsStat) {
+				if($tmpLine =~ /connection established/){
 					next;
 				}
-				
-				if($fields[0] =~ /directory exists/) {
-					chop($fields[1]);
+				#my ($key,$value) = split(/\="/, $tmpLine);
+				$tmpLine =~ s/\"\/\>//;
+				my @fields = split(/\="/, $tmpLine);
+				replaceXMLcharacters(\$fields[2]);
+				if($fields[1] =~ /directory exists/) {
+					#print "directory exists";
+					chop($fields[2]);
 					if($relative == 0) {
 						$noRelIndex++;
 						$RestoresetFile_new = $noRelativeFileset."$noRelIndex";
 						$filecount = 0;
-						$sourceIdx = rindex ($fields[1], '/');
-						$source[$noRelIndex] = substr($fields[1],0,$sourceIdx);
+						$sourceIdx = rindex ($fields[2], '/');
+						$source[$noRelIndex] = substr($fields[2],0,$sourceIdx);
 						if($source[$noRelIndex] eq "") {
 							$source[$noRelIndex] = "/";
 						}
 						$current_source = $source[$noRelIndex];
 						if(!open $filehandle, ">>", $RestoresetFile_new){
+							$errStr = "Unable to get list of files to restore.\n";
 							traceLog("\n cannot open $RestoresetFile_new to write ", __FILE__, __LINE__);
-							exit 0;
+							goto GENEND;
 						}
 						chmod $filePermission, $RestoresetFile_new;
 					}
 					my $resEnumerate = 0;
-					$resEnumerate = enumerateRemote($fields[1]);
+					$resEnumerate = enumerateRemote($fields[2]);
 					if(!$resEnumerate){
-						traceLog("$errStr ". $fields[1].$lineFeed, __FILE__, __LINE__);
+						traceLog("$errStr ". $fields[2].$lineFeed, __FILE__, __LINE__);
 						goto GENEND;
 					} 
 					elsif(REMOTE_SEARCH_CMD_ERROR == $resEnumerate or REMOTE_SEARCH_FAIL == $resEnumerate or REMOTE_SEARCH_OUTPUT_PARSE_FAIL == $resEnumerate){
-						my $searchErrMsg = "[".(localtime)."]". "[".$fields[1]."] Failed. Reason: Search has failed for the item.$lineFeed";
-						traceLog("Search command failed due to syntax error for the folder ". $fields[1].$lineFeed, __FILE__, __LINE__);
+						my $searchErrMsg = "[".(localtime)."]". "[".$fields[2]."] Failed. Reason: Search has failed for the item.$lineFeed";
+						traceLog("Search command failed due to syntax error for the folder ". $fields[2].$lineFeed, __FILE__, __LINE__);
 						appendErrorToUserLog($searchErrMsg);
 					}
 					elsif(REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR == $resEnumerate){
-						traceLog("Error in creating 1k files ". $fields[1].$lineFeed, __FILE__, __LINE__);
+						traceLog("Error in creating 1k files ". $fields[2].$lineFeed, __FILE__, __LINE__);
 						goto GENEND;
 					}
 				
 					if($relative == 0 && $filecount>0) {
 						autoflush FD_WRITE;
-						print FD_WRITE "$RestoresetFile_new ".RELATIVE." $current_source\n";
+						#print FD_WRITE "$RestoresetFile_new#".RELATIVE."#$current_source\n";
+						print FD_WRITE "$current_source' '".RELATIVE."' '$RestoresetFile_new\n";
 					}
-				} elsif($fields[0] =~ /file exists/) {
-					my $propertiesFile = getOperationFile($propertiesOp, $fields[1]);
+				} elsif($fields[1] =~ /file exists/) {
+					#print "file exists";
+					my $propertiesFile = getOperationFile(Constants->CONST->{'PropertiesOp'}, $fields[2]);
 					my $tmp_idevsutilBinaryPath = $idevsutilBinaryPath;
 					$tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
 					my $tmp_propertiesFile = $propertiesFile;
@@ -637,6 +671,7 @@ sub generateRestoresetFiles {
 					my $propertiesCmd = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_propertiesFile\'".$whiteSpace.$errorRedirection;
 					my $commandOutput = `$propertiesCmd`;
 					traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
+					
 					unlink $propertiesFile;
 					
 					$commandOutput =~ m/(size)(.*)/;
@@ -645,8 +680,8 @@ sub generateRestoresetFiles {
 					$totalSize += $size;
 					
 					$current_source = "/";
-					print RESTORE_FILE $fields[1].$lineFeed;
-					
+					print RESTORE_FILE $fields[2].$lineFeed;
+
 					if($relative == 0) {
 						$filesonlycount++;
 						$filecount = $filesonlycount;
@@ -663,35 +698,128 @@ sub generateRestoresetFiles {
 							goto GENEND;
 						}
 					}
-				} elsif ($fields[0] =~ /No such file or directory/) {
+				} elsif ($fields[1] =~ /No such file or directory/) {
+					#print "No such file or directory";
 					$totalFiles++;	
 					$nonExistsCount++; 
-					print TRACEERRORFILE "[".(localtime)."] [FAILED] [$fields[1]]. Reason: No such file or directory".$lineFeed;
+					print TRACEERRORFILE "[".(localtime)."] [FAILED] [$fields[2]]. Reason: No such file or directory".$lineFeed;
 					next;
+				}
+			}
+		} else {
+			foreach my $tmpLine (@itemsStat) {
+				my @fields = split("\\] \\[", $tmpLine, SPLIT_LIMIT_ITEMS_OUTPUT);
+				my $total_fields = @fields;
+				if($total_fields == SPLIT_LIMIT_ITEMS_OUTPUT) {
+					
+					$fields[0] =~ s/^.//; # remove starting character [ from first field
+					$fields[$fields_in_progress-1] =~ s/.$//; # remove last character ] from last field
+					$fields[0] =~ s/^\s+//; # remove spaces from beginning from required fields
+					$fields[1] =~ s/^\s+//;
+					if ($fields[1] eq "." or $fields[1] eq "..") {
+						next;
+					}
+					
+					if($fields[0] =~ /directory exists/) {
+						chop($fields[1]);
+						if($relative == 0) {
+							$noRelIndex++;
+							$RestoresetFile_new = $noRelativeFileset."$noRelIndex";
+							$filecount = 0;
+							$sourceIdx = rindex ($fields[1], '/');
+							$source[$noRelIndex] = substr($fields[1],0,$sourceIdx);
+							if($source[$noRelIndex] eq "") {
+								$source[$noRelIndex] = "/";
+							}
+							$current_source = $source[$noRelIndex];
+							if(!open $filehandle, ">>", $RestoresetFile_new){
+								$errStr = "Unable to get list of files to restore.\n";
+        	                                                traceLog("\n cannot open $RestoresetFile_new to write ", __FILE__, __LINE__);
+	                                                        goto GENEND;
+							}
+							chmod $filePermission, $RestoresetFile_new;
+						}
+						my $resEnumerate = 0;
+						$resEnumerate = enumerateRemote($fields[1]);
+						if(!$resEnumerate){
+							traceLog("$errStr ". $fields[1].$lineFeed, __FILE__, __LINE__);
+							goto GENEND;
+						} 
+						elsif(REMOTE_SEARCH_CMD_ERROR == $resEnumerate or REMOTE_SEARCH_FAIL == $resEnumerate or REMOTE_SEARCH_OUTPUT_PARSE_FAIL == $resEnumerate){
+							my $searchErrMsg = "[".(localtime)."]". "[".$fields[1]."] Failed. Reason: Search has failed for the item.$lineFeed";
+							traceLog("Search command failed due to syntax error for the folder ". $fields[1].$lineFeed, __FILE__, __LINE__);
+							appendErrorToUserLog($searchErrMsg);
+						}
+						elsif(REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR == $resEnumerate){
+							traceLog("Error in creating 1k files ". $fields[1].$lineFeed, __FILE__, __LINE__);
+							goto GENEND;
+						}
+					
+						if($relative == 0 && $filecount>0) {
+							autoflush FD_WRITE;
+							#print FD_WRITE "$RestoresetFile_new#".RELATIVE."#$current_source\n";
+							print FD_WRITE "$current_source' '".RELATIVE."' '$RestoresetFile_new\n";
+						}
+					} elsif($fields[0] =~ /file exists/) {
+						my $propertiesFile = getOperationFile(Constants->CONST->{'PropertiesOp'}, $fields[1]);
+						my $tmp_idevsutilBinaryPath = $idevsutilBinaryPath;
+						$tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
+						my $tmp_propertiesFile = $propertiesFile;
+						$tmp_propertiesFile =~ s/\'/\'\\''/g;
+		
+						# EVS command to execute for properties
+						my $propertiesCmd = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_propertiesFile\'".$whiteSpace.$errorRedirection;
+						my $commandOutput = `$propertiesCmd`;
+						traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
+						unlink $propertiesFile;
+						
+						$commandOutput =~ m/(size)(.*)/;
+						my $size = $2;
+						$size =~ s/\D+//g;
+						$totalSize += $size;
+						
+						$current_source = "/";
+						print RESTORE_FILE $fields[1].$lineFeed;
+						
+						if($relative == 0) {
+							$filesonlycount++;
+							$filecount = $filesonlycount;
+						}
+						else {
+							$filecount++;
+						}
+						
+						$totalFiles++;	
+		
+						if($filecount == FILE_MAX_COUNT) {
+							$filesonlycount = 0;
+							if(!createRestoreSetFiles1k("FILESONLY")){
+								goto GENEND;
+							}
+						}
+					} elsif ($fields[0] =~ /No such file or directory/) {
+						$totalFiles++;	
+						$nonExistsCount++; 
+						print TRACEERRORFILE "[".(localtime)."] [FAILED] [$fields[1]]. Reason: No such file or directory".$lineFeed;
+						next;
+					}
 				}
 			}
 		}
 	}
 	else{
-		open ERROR_FD, "< $idevsErrorFile" or traceLog(Constants->CONST->{'FileOpnErr'}." $idevsErrorFile. Reason: $!\n", __FILE__, __LINE__);
-		my @errorStr = <ERROR_FD>;
-		if ($errorStr[0] =~ /password mismatch|encryption verification failed/i){
-			$exit_flag = "1-$errorStr[0]";
-			writeParameterValuesToStatusFile($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$exit_flag,$failedfiles_index);
-			unlink($pidPath);
-			unlink($pwdPath);
-		}
-		else{
-			appendErrorToUserLog(@errorStr);
-		}
+		checkExitError($idevsErrorFile);
+		writeParameterValuesToStatusFile($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$exit_flag,$failedfiles_index);
 	}
 	
 	if($relative == 1 && $filecount > 0){
-		print FD_WRITE "$RestoresetFile_new ".RELATIVE." $current_source \n"; #[dynamic]
+		#print FD_WRITE "$RestoresetFile_new#".RELATIVE."#$current_source \n"; #[dynamic]
+		print FD_WRITE "$current_source' '".RELATIVE."' '$RestoresetFile_new \n"; #[dynamic]
 	}
 	elsif($filesonlycount >0){
 		$current_source = "/";
-		print FD_WRITE "$RestoresetFile_Only ".NORELATIVE." $current_source\n"; #[dynamic]
+		#print FD_WRITE "$RestoresetFile_Only#".NORELATIVE."#$current_source\n"; #[dynamic]
+		print FD_WRITE "$current_source' '".NORELATIVE."' '$RestoresetFile_Only\n"; #[dynamic]
 	}
 	
 	GENEND:
@@ -724,7 +852,8 @@ sub createRestoreSetFiles1k {
 	if($relative == 0) {
 		if($filesOnlyFlag eq "FILESONLY") {
 			$filesOnlyCount++;
-			print FD_WRITE "$RestoresetFile_Only ".NORELATIVE." $current_source\n"; # 0
+			#print FD_WRITE "$RestoresetFile_Only#".NORELATIVE."#$current_source\n"; # 0
+			print FD_WRITE "$current_source' '".NORELATIVE."' '$RestoresetFile_Only\n"; # 0
 			$RestoresetFile_Only = $filesOnly."_".$filesOnlyCount;
 			
 			close RESTORE_FILE;
@@ -736,7 +865,8 @@ sub createRestoreSetFiles1k {
 		}
 		else 
 		{
-			print FD_WRITE "$RestoresetFile_new ".RELATIVE." $current_source\n"; 
+			#print FD_WRITE "$RestoresetFile_new#".RELATIVE."#$current_source\n";
+			print FD_WRITE "$current_source' '".RELATIVE."' '$RestoresetFile_new\n";
 			$RestoresetFile_new =  $noRelativeFileset."$noRelIndex"."_$Restorefilecount";
 			
 			close $filehandle;
@@ -746,9 +876,10 @@ sub createRestoreSetFiles1k {
 			}	
 			chmod $filePermission, $RestoresetFile_new;
 		}
-	}	
+	}
 	else {
-		print FD_WRITE "$RestoresetFile_new ".RELATIVE." $current_source\n"; 
+		#print FD_WRITE "$RestoresetFile_new#".RELATIVE."#$current_source\n";
+		print FD_WRITE "$current_source' '".RELATIVE."' '$RestoresetFile_new\n";
 		$RestoresetFile_new = $RestoresetFile_relative."_$Restorefilecount";
 		
 		close RESTORE_FILE;
@@ -781,29 +912,23 @@ sub createRestoreSetFiles1k {
 sub doRestoreOperation()
 {
 	$parameters = $_[0];
-	@parameter_list = split / /,$parameters, SPLIT_LIMIT_INFO_LINE;
-
-	$restoreUtfFile = getOperationFile($restoreOp, $parameter_list[0] ,$parameter_list[1] ,$parameter_list[2], $encType);
-	
+	@parameter_list = split /\' \'/,$parameters, SPLIT_LIMIT_INFO_LINE;
+	$restoreUtfFile = getOperationFile(Constants->CONST->{'RestoreOp'}, $parameter_list[2] ,$parameter_list[1] ,$parameter_list[0]);
 	if(!$restoreUtfFile) {
 		traceLog($errStr, __FILE__, __LINE__);
 		return 0;
 	}
-
 	my $tmprestoreUtfFile = $restoreUtfFile;
 	$tmprestoreUtfFile =~ s/\'/\'\\''/g;
 	my $tmp_idevsutilBinaryPath = $idevsutilBinaryPath;
 	$tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
-	
 	# EVS command to execute for backup
 	$idevsutilCommandLine = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmprestoreUtfFile\'".$whiteSpace.$errorRedirection;
-	
 	$pid = fork();
 	if(!defined $pid) {
 		$errStr = Constants->CONST->{'ForkErr'}.$whiteSpace.Constants->CONST->{"EvsChild"}.$lineFeed;
 		return RESTORE_PID_FAIL;
 	}
-	
 	if($pid == 0) 
 	{
 		if(-e $pidPath) {
@@ -829,19 +954,16 @@ sub doRestoreOperation()
 	{
 		lock $childProcessStatus;
 		$childProcessStatus = CHILD_PROCESS_STARTED;       
-	}   
-		
+	}
 	$pid_OutputProcess = fork();
 	if(!defined $pid_OutputProcess) {
 		$errStr = Constants->CONST->{'ForkErr'}.$whiteSpace.Constants->CONST->{"LogChild"}.$lineFeed;
 		return OUTPUT_PID_FAIL;
 	}
-	
 	if($pid_OutputProcess == 0) {
 		if( !-e $pidPath) {
 			exit 1;
 		}
-		
 		$isLocalRestore = 0;
 		$workingDir = $currentDir;
 		$workingDir =~ s/\'/\'\\''/g;
@@ -849,17 +971,19 @@ sub doRestoreOperation()
 		$tmpOpFilePath =~ s/\'/\'\\''/g;
 		my $tmpJobRngDir = $jobRunningDir;
 		$tmpJobRngDir =~ s/\'/\'\\''/g;
-		my $tmpRstSetFile = $parameter_list[0];
+		my $tmpRstSetFile = $parameter_list[2];
 		$tmpRstSetFile =~ s/\'/\'\\''/g;
-		my $tmpSrc = $parameter_list[2];
+		my $tmpSrc = $parameter_list[0];
 		$tmpSrc =~ s/\'/\'\\''/g;
 		$fileChildProcessPath = $workingDir.'/'.Constants->FILE_NAMES->{operationsScript};
 		my $tmpRestoreHost = $restoreHost;
 		$tmpRestoreHost =~ s/\'/\'\\''/g;
 		my $tmpRestoreLoc = $restoreLocation;
 		$tmpRestoreLoc =~ s/\'/\'\\''/g;
-		
-		exec("cd \'$workingDir\'; perl \'$fileChildProcessPath\' \'$tmpJobRngDir\' \'$tmpOpFilePath\' \'$tmpRstSetFile\' \'$parameter_list[1]\' \'$tmpSrc\'  $curLines \'$progressSizeOp\' \'$tmpRestoreHost\' \'$tmpRestoreLoc\' $silentFlag $errorDevNull");
+		my @param = join ("\n",('RESTORE_OPERATION',$tmpOpFilePath,$tmpRstSetFile,$parameter_list[1],$tmpSrc,$curLines,$progressSizeOp,$tmpRestoreHost,$tmpRestoreLoc,$silentFlag));
+		writeParamToFile("$tmpJobRngDir/operationsfile.txt",@param);
+		exec("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmpJobRngDir\' \'$userName\'");
+
 		$errStr = Constants->CONST->{'rstProcessFailureMsg'};
 		print $errStr.$lineFeed;
 		traceLog($errStr, __FILE__, __LINE__);
@@ -899,9 +1023,8 @@ sub doRestoreOperation()
 	}
 	
 	waitpid($pid_OutputProcess, 0);
-	unlink($parameter_list[0]);
+	unlink($parameter_list[2]);
 	unlink($idevsOutputFile);
-
 	
 	if(-e $errorFilePath && -s $errorFilePath) {
 		return 0;
@@ -976,7 +1099,7 @@ sub cancelSubRoutine()
 	} 
 	
 	if($totalFiles == 0 or $totalFiles !~ /\d+$/) {
-		my $fileCountCmd = "cat $info_file | grep \"^TOTALFILES\"";
+		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
 		$totalFiles = `$fileCountCmd`; 
 		$totalFiles =~ s/TOTALFILES//;
 	}	
@@ -986,12 +1109,12 @@ sub cancelSubRoutine()
 	}
 	
 	if($nonExistsCount == 0) {
-		my $nonExistCheckCmd = "cat $info_file | grep \"^FAILEDCOUNT\"";
+		my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
 		$nonExistsCount = `$nonExistCheckCmd`; 
 		$nonExistsCount =~ s/FAILEDCOUNT//;
 	}
 	
-	my $evsCmd = "ps -elf | grep \"$idevsutilBinaryName\" | grep \'$backupUtfFile\'";
+	my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$backupUtfFile\'";
 	$evsRunning = `$evsCmd`;
 	@evsRunningArr = split("\n", $evsRunning);
 	
@@ -1065,13 +1188,19 @@ sub exit_cleanup {
 				if ($errStr =~ /password mismatch|encryption verification failed/i){
 					$errStr = $errStr.'. '.Constants->CONST->{loginAccount}.$lineFeed;
 					unlink($pwdPath);
+					if($taskType == "Scheduled"){
+						$pwdPath =~ s/_SCH$//g;
+						unlink($pwdPath);
+					}
+				} elsif($errStr =~ /failed to get the device information|Invalid device id/i){
+                    $errStr = $errStr.' '.Constants->CONST->{restoreFromLocationConfigAgain}.$lineFeed;
 				}
 			}
 		}
 	
 	}
 	unlink($pidPath);
-	writeOperationSummary($restoreOp);	
+	writeOperationSummary(Constants->CONST->{'RestoreOp'});
 	unlink($idevsOutputFile);
 	unlink($idevsErrorFile);
 	unlink($restoreUtfFile);
@@ -1079,7 +1208,6 @@ sub exit_cleanup {
 	unlink($fileForSize);
 	unlink($incSize);
 	unlink($retryinfo);
-	unlink($progressDetailsFilePath);
 	if(-e $RestoreItemCheck) {
 		unlink($RestoreItemCheck);
 	}
@@ -1103,7 +1231,9 @@ sub exit_cleanup {
 		#This function display summary on stdout once backup job has completed.
 	}
 	sendMail($subjectLine);
+	appendEndProcessInProgressFile();
 	terminateStatusRetrievalScript("$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'}) if ($taskType eq "Scheduled");
+	unlink($progressDetailsFilePath);
 	exit 0;
 }
 
@@ -1121,24 +1251,14 @@ sub getOpStatusNeSubLine()
 		$status = "ABORTED";
 		$subjectLine = "$taskType Restore Email Notification "."[$userName]"."[Aborted Restore]";
 	}
-#	elsif($filesConsideredCount == 0){
-#		$status = "FAILURE";
-#		$subjectLine = "$taskType Restore Email Notification "."[$userName]"."[Failed Restore]";
-#	}
 	elsif($failedFilesCount == 0 and $filesConsideredCount > 0)
 	{
 		$status = "SUCCESS";
 		$subjectLine = "$taskType Restore Email Notification "."[$userName]"."[Successful Restore]";
 	}
 	else {
-#		if(($failedFilesCount/$filesConsideredCount)*100 <= 5){				  
-#			$status = "SUCCESS*";
-#			$subjectLine = "$taskType Restore Email Notification "."[$userName]"."[Successful* Restore]";
-#		}
-#		else {
-			$status = "FAILURE";
-			$subjectLine = "$taskType Restore Email Notification "."[$userName]"."[Failed Restore]";
-#		}
+		$status = "FAILURE";
+		$subjectLine = "$taskType Restore Email Notification "."[$userName]"."[Failed Restore]";
 	}
 	return ($subjectLine);
 }
@@ -1182,7 +1302,6 @@ sub updateServerAddr {
 		open EVSERROR, "<", $idevsErrorFile or traceLog("\n Failed to open error.txt Reason : $!\n", __FILE__, __LINE__);
 		$errorContent = <EVSERROR>;
 		close EVSERROR;
-		
 		if($errorContent =~ m/$errorPatternServerAddr/){
 			if (!(getServerAddr())){
 				exit_cleanup($errStr);
@@ -1274,4 +1393,51 @@ sub updateRetryCount()
 	#assign the latest backuped and synced value to prev.
 	$prevFailedCount = $curFailedCount;
 	$prevTime = $currentTime;
+}
+
+#****************************************************************************************************
+# Subroutine Name         : checkExitError.
+# Objective               : This function will display the proper error message if evs error found in Exit argument.
+# Added By				  : Senthil Pandian
+#*****************************************************************************************************/
+sub checkExitError
+{
+	my $errorline = "idevs error";
+	my $individual_errorfile = $_[0];
+	
+	if(!-e $individual_errorfile) {
+		return 0;
+	}
+	#check for retry attempt
+	if(!open(TEMPERRORFILE, "< $individual_errorfile")) {
+		traceLog("Could not open file individual_errorfile in checkretryAttempt: $individual_errorfile, Reason:$! $lineFeed", __FILE__, __LINE__);
+		return 0;
+	}
+	
+	@linesBackupErrorFile = <TEMPERRORFILE>;
+	close TEMPERRORFILE;
+	chomp(@linesBackupErrorFile);
+	for(my $i = 0; $i<= $#linesBackupErrorFile; $i++) {
+		$linesBackupErrorFile[$i] =~ s/^\s+|\s+$//g;
+		
+		if($linesBackupErrorFile[$i] eq "" or $linesBackupErrorFile[$i] =~ m/$errorline/){
+			next;
+		}
+		
+		for(my $j=0; $j<=$#ErrorArgumentsExit; $j++)
+		{
+			if($linesBackupErrorFile[$i] =~ m/$ErrorArgumentsExit[$j]/)
+			{
+				$errStr  = "Operation could not be completed. Reason : $ErrorArgumentsExit[$j].";
+				#$errStr .= "Please login using Login.pl script.";
+				traceLog($errStr, __FILE__, __LINE__);
+				#kill evs and then exit
+				my $jobTerminationPath = $currentDir.'/'.Constants->FILE_NAMES->{jobTerminationScript}; 
+				system("$perlPath \'$jobTerminationPath\' \'$taskType\_$jobType\' \'$userName\' 1>/dev/null 2>/dev/null");
+				$exit_flag = "1-$errStr";
+				unlink($pwdPath);
+				return 0;
+			}
+		}	
+	}
 }

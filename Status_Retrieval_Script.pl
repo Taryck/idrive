@@ -48,26 +48,16 @@ if(!($ARGV[0])) {
 holdScreen2displayMessage(3);
 #my $BackupScriptCmd = "ps -elf | grep \"Backup_Script.pl Backup $userName\" | grep -v cd | grep -v grep";
 #my $RestoreScriptCmd = "ps -elf | grep \"Restore_Script.pl Restore $userName\" | grep -v cd | grep -v grep";
-=comment
-## Above two statements has be reframed as below because:
-1)Deepak has reframed the crontab string as:
-	41 10 * * * abhishek cd "/tmp/idrive/user_profile/abhishek.verma@idrive.com/Backup/Scheduled"; perl "/home/abhishek/IDrive_for_Linux_AV_Review/scripts/Backup_Script.pl" SCHEDULED abhishek.verma@idrive.com
-  which was previously: 
-	00 12 * * TUE root cd "/home/harish/idrive/user_profile/tester_1/Backup/Scheduled"; perl "/home/harish/scripts/Backup_Script.pl" Backup tester_1 SCHEDULED
-2)Due to this change Status retrival stopped working because ps command uses script name , job name, username and tasktype.
-3)So i changed it to scriptname,tasktype and username. 
-4)This is the reason behind below statement change.
-=cut
 
-my $BackupScriptCmd = "ps -elf | grep \"".Constants->FILE_NAMES->{backupScript}." SCHEDULED $userName\" | grep -v cd | grep -v grep";
-my $RestoreScriptCmd = "ps -elf | grep \"".Constants->FILE_NAMES->{restoreScript}." SCHEDULED $userName\" | grep -v cd | grep -v grep";
+my $BackupScriptCmd  = "ps $psOption | grep \"".Constants->FILE_NAMES->{backupScript}." SCHEDULED $userName\" | grep -v grep";
+my $RestoreScriptCmd = "ps $psOption | grep \"".Constants->FILE_NAMES->{restoreScript}." SCHEDULED $userName\" | grep -v grep";
 
 $BackupScriptRunning = `$BackupScriptCmd`;
 $RestoreScriptRunning = `$RestoreScriptCmd`;
 
 if($BackupScriptRunning ne "" && $RestoreScriptRunning ne "") {
 	printMenu();	
-	$menuChoice = getMenu();
+	getMenuChoice();
 	if($menuChoice eq 1) {
 		$jobType = "BACKUP";
 	} elsif($menuChoice eq 2) {
@@ -94,24 +84,33 @@ $SIG{QUIT} = \&process_term;
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
 traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
-
+my $displayProgress = 1;
 constructProgressDetailsFilePath();
 
 system("clear");
 getCursorPos();
-
 do {
 	my @lastLine = readProgressDetailsFile();
-	my $lastLine = join "", @lastLine;
+	chomp(@lastLine);
+	@lastLine = grep {/\S/}@lastLine;
+	my $lastLine = join "\n", @lastLine;
 	if($lastLine ne "" && $lastLine ne $prevLine) {
-		my @params = split( /\|Idrive\|/, $lastLine);
+		if ($lastLine =~ /PROGRESS END/){
+			$lastLine =~s/PROGRESS END//;
+			if ($lastLine eq $prevLine){
+				$displayProgress = 0;
+			}
+		}
+		my @params = split( /\n/, $lastLine);
 		displayProgressBar($params[0], $params[1], $params[2], $params[3], $params[4], $params[5], $params[6], $params[7]);
 		$prevLine = $lastLine;
+	} elsif($lastLine eq "" and !-e $progressDetailsFilePath){
+		$displayProgress = 0;
 	}
 	select undef, undef, undef, 0.005;
 }
-while(1);
-
+while($displayProgress);
+process_term();
 #****************************************************************************************************
 # Subroutine Name         : printMenu.
 # Objective               : Subroutine to print options to do status Retrival.
@@ -165,7 +164,6 @@ sub readProgressDetailsFile {
 	close PROGRESS_DETAILS_FILE;
 	return @lastLine;
 }
-
 #****************************************************************************************************
 # Subroutine Name         : process_term.
 # Objective               : In case the script execution is canceled by the user,the script should exit.
@@ -174,6 +172,37 @@ sub readProgressDetailsFile {
 #*****************************************************************************************************/
 sub process_term {
 	my $jobType = lc($jobType) eq 'backup' ? 'Scheduled Backup Job':'Scheduled Restore Job';
-	displayFinalSummary($jobType,$jobRunningDir.'/'.Constants->CONST->{'fileDisplaySummary'});#This function display summary on stdout once backup job has completed.	
+	displayFinalSummary($jobType,$jobRunningDir.'/'.Constants->CONST->{'fileDisplaySummary'});#This function display summary on stdout once backup job has completed	
 	exit 0;
+}
+#***************************************************************************************
+# Subroutine Name         : getMenuChoice
+# Objective               : get Menu choioce to check if user wants to configure his/her
+#                                                       with Default or Private Key.
+# Added By                : Dhritikana
+#****************************************************************************************/
+sub getMenuChoice {
+    my $count = 0;
+    while(!defined $menuChoice) {
+        if ($count < 4){
+            $count++;
+            print Constants->CONST->{'EnterChoice'};
+            $menuChoice = <STDIN>;
+            chomp $menuChoice;
+            $menuChoice =~ s/^\s+|\s+$//;
+            if($menuChoice =~ m/^\d$/) {
+                    if($menuChoice < 1 || $menuChoice > 2) {
+                    $menuChoice = undef;
+                    print Constants->CONST->{'InvalidChoice'}.$whiteSpace if ($count < 4);
+            }
+            }else {
+                    $menuChoice = undef;
+                    print Constants->CONST->{'InvalidChoice'}.$whiteSpace if ($count < 4);
+            }
+        }else{
+            print Constants->CONST->{'maxRetry'}.$lineFeed;
+            $menuChoice='';
+            exit;
+        }
+    }
 }
