@@ -165,7 +165,9 @@ use constant CONST => {
 			notExists => 'does not exists',
 			changeServicePath => 'Do you want to change your service path (y/n)?',
 			noSufficientPermission => 'does not have sufficient permissions',
+
 			noSufficientPermissionToCleanup => sub { return qq{System user [$_[0]] does not have sufficient permission to perform cleanup operation. Please run this script in privileged user mode to perform the cleanup.}},
+
 			viewLogMessage => 'Select option to view logs for: ',
 			viewMoreLogs => 'Do you want to view more logs(y/n).',
 			removeDirectories => 'Do you want to remove the following directories(y/n)?',
@@ -330,7 +332,9 @@ use constant CONST => {
 			noSchJob	=> 'There is no scheduled',
 			noChangeServicePath => 'Your service directory remains ',
 			noLogs => 'No logs found. Please try again.',
+
 			noPermissionToKill => sub { return qq{System user [$_[0]] does not have sufficient permission to stop the on going Backup/Restore process. Please run this script in privileged user mode to perform the cleanup.}},
+
 #			noServicePath	=> 'Service directory does not exists. Please run Account_Setting.pl script... ',
 		#------------------- O ----------------------------#
 			operationNotcomplete => 'Operation could not be completed.',

@@ -1223,10 +1223,19 @@ sub checkAndCreateServicePath{
 	        my $userServicePath = <SP>;
 	        Chomp(\$userServicePath);
 		if($userServicePath eq ''){
+#TBE : Avert ajoute par version2.12 non teste
 			getAndSetServicePath();
 		}
 		else{
-			my ($usrInputSerPath) = $userServicePath =~ m{(.+)/([^/]+)$};
+# TBE : Start of change
+			#		my ($usrInputSerPath) = $userServicePath =~ m{(.+)/([^/]+)$};
+# TBE : fix $userServicePath is modified by regex
+		my $usrInputSerPath = $userServicePath;
+#		if ( ($userServicePath =~ tr/\///) gt 1 ) {  => uncomment To allow use /idrive for Service location and use of (/) as user input
+			$usrInputSerPath = $usrInputSerPath =~ m{(.+)/([^/]+)$};
+#		}
+# TBE : End of change
+#		$usrInputSerPathExists = validateServiceDir($usrInputSerPath);    " TBE : A commenter peut-etre à voir
 			$userServicePathExists = validateServiceDir("$userServicePath");
 			if($userServicePathExists == 1){ 
 				$usrInputSerPathExists = validateServiceDir("$usrInputSerPath");
