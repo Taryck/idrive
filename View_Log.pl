@@ -29,8 +29,8 @@ my $menu        =       {'Backup'  => {1 => ["View logs for Manual Backup","$usr
                          'Restore' => {3 => ["View logs for Manual Restore","$usrProfileDir/Restore/Manual/LOGS"], 
 				       4 => ["View logs for Scheduled Restore","$usrProfileDir/Restore/Scheduled/LOGS"]},
                         };
-my @columnNames = (['S.No.','Time','Status'],[8,40,8]);#Contains two annonymous array one contais table header conter and other spaces related to that.
-my $displayDateMenu = ['1) Last one week','2) Last two weeks','3) Last one month','4) Selected date range'];
+my @columnNames = (['S.No.','Time & Date','Status'],[8,30,7]);#Contains two annonymous array one contais table header conter and other spaces related to that.
+my $displayDateMenu = ['1) Last one week','2) Last two weeks','3) Last 30 days','4) Selected date range'];
 my ($maxRangeForMenuChoice,$maxRangeForViewLogChoice) = (4,4);
 my %optionwithLogName = (); 
 my $currentEpochtime = time();
@@ -59,7 +59,7 @@ while($userDateChoiceCount != 0 and $userDateChoice eq ''){
 	$userDateChoice = <STDIN>;
 	Chomp(\$userDateChoice);
 	$userDateChoice =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-        if(($userDateChoice eq '') or ($userDateChoice > 4 or $userDateChoice <= 0) or $userDateChoice !~ /\d+/){
+        if(($userDateChoice eq '') or ($userDateChoice > 4 or $userDateChoice <= 0) or $userDateChoice !~ /\d+/ or $userDateChoice =~ /\s+/){
                 print Constants->CONST->{'InvalidChoice'}.$whiteSpace;
                 $userDateChoice = '';
         }
@@ -93,6 +93,7 @@ sub viewLogFile{
 	my $showLogs = 1;
 	while ($showLogs){# This loop is to display the log list again and again.
 		displayLogList(\@columnNames,\%logFileList); #This function will display the log list.
+		print Constants->CONST->{'ctrlc2Exit'}.$lineFeed;
 		my $logFileChoice = '';
 		getChoiceToViewLog(\$logFileChoice);
 		openViEditor($menu,$keyName,$userChoice,$logFileChoice);
@@ -119,7 +120,7 @@ sub getChoiceToViewLog{
                 ${$logFileChoice} = <STDIN>;
                 Chomp($logFileChoice);
                 ${$logFileChoice} =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-                if((${$logFileChoice} eq '') or (${$logFileChoice} > (scalar (keys %logFileList)) or ${$logFileChoice} <= 0) or ${$logFileChoice} !~ /\d+/){
+                if((${$logFileChoice} eq '') or (${$logFileChoice} > (scalar (keys %optionwithLogName)) or ${$logFileChoice} <= 0) or ${$logFileChoice} !~ /^\d+$/ or ${$logFileChoice} =~ /\s+/){
                         print $lineFeed.Constants->CONST->{'InvalidChoice'}.$whiteSpace;
                 	${$logFileChoice} = '';
                 }
@@ -145,7 +146,7 @@ sub getLogFileNames{
 	my @logFiles = ();
 	my %timestampStatus = ();
 	if (-e $logFileLocation){
-		@logFiles = `ls $logFileLocation`; #This is done to process ls command at one shot, if used with map processing of ls will continue till all the file processing has been completed.
+		@logFiles = `ls '$logFileLocation'`; #This is done to process ls command at one shot, if used with map processing of ls will continue till all the file processing has been completed.
 		%timestampStatus = map {m/(\d+)_([A-Z]+)/} @logFiles;
 		return %timestampStatus;
 	}else{
@@ -177,39 +178,21 @@ sub displayLogList{
 			$spaceIndex++;
 			$tableContent .= (' ') x ($columnNames[1]->[$spaceIndex] - length($logFileList{$_}));#(total_space - used_space by data) will be used to keep separationbetween 2 data
 			$tableContent .= $lineFeed;
-			$optionwithLogName{$displayCount} = $_.'_'.$logFileList{$_};#creating another has will contain searial number and logname as key and value pair so that later it can be used to display the log file.
+			$optionwithLogName{$displayCount} = $_.'_'.$logFileList{$_};#creating another hash which contain searial number and logname as key and value pair so that later it can be used to display the log file.
 			$spaceIndex = 0;
 			$displayCount++;	
 		}
 	}
 	if ($tableContent ne ''){
 		print $lineFeed.Constants->CONST->{'logList'}.$lineFeed;;
-		print $tableHeader.$tableContent."\n";
+		print $tableHeader.$tableContent.$lineFeed;
 	}else{
 		print $lineFeed.Constants->CONST->{'noLogs'}.$lineFeed;
 		traceLog($whiteSpace.Constants->CONST->{'noLogs'}.$lineFeed, __FILE__, __LINE__);
 		cancelProcess();		
 	}
 }
-#****************************************************************************
-#Subroutine Name         : getTableHeader 
-#Objective               : To get the table header display with column name.
-#Usgae                   : getTableHeader(@columnNames)
-#                        : @columnNames       : This array contains the name of column and spaces required between two column nanes.
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub getTableHeader{
-	my $logTableHeader = ('=') x 76;
-	$logTableHeader .= $lineFeed;
-	for (my $contentIndex = 0; $contentIndex <= scalar(@{$_[0]}); $contentIndex++){
-		$logTableHeader .= $_[0]->[$contentIndex];
-		$logTableHeader .= (' ') x ($_[1]->[$contentIndex] - length($_[0]->[$contentIndex]));#(total_space - used_space by data) will be used to keep separation between 2 data.
-	}
-	$logTableHeader .= $lineFeed;
-	$logTableHeader .= ('=') x 76;
-	$logTableHeader .= $lineFeed;
-	return $logTableHeader;
-}
+
 #****************************************************************************
 #Subroutine Name         : openViEditor
 #Objective               : To open vi editor for given file.
@@ -225,7 +208,7 @@ sub openViEditor {
 	print $lineFeed.Constants->CONST->{'viClosureMessage'}.$lineFeed;
 	print $lineFeed.Constants->CONST->{'logOpeningMessage'}.$lineFeed;
 	holdScreen2displayMessage(4);	
-	my $logdisplayStatus = system "vi $fileLocation";
+	my $logdisplayStatus = system "vi '$fileLocation'";
 	if ($logdisplayStatus == 0){
 		print $lineFeed.Constants->CONST->{'logDispSuccess'}.$lineFeed;
 	}else{
@@ -239,7 +222,7 @@ sub openViEditor {
 #Added By                : Abhishek Verma.
 #****************************************************************************/
 sub convertUserDateToEpoch{
-        my ($startDate,$endDate) = ('') x 2;
+        my ($startDate,$endDate,$invalidDateMessage) = ('') x 3;
         my $inputCount = 3;
         while($inputCount and ($startDate eq '' or $endDate eq '')){
                 ($startDate,$endDate) = getUserDateRange();
@@ -249,8 +232,16 @@ sub convertUserDateToEpoch{
 			$endDate .= ' 23:59:59';
                         my $stEpochTimeCmd = 'date --date="'.$startDate.'" +%s';
                         my $edEpochTimeCmd = 'date --date="'.$endDate.'" +%s';
-                        $startEpoch = `$stEpochTimeCmd`;#$startEpoch global variable
-                        $endEpoch = `$edEpochTimeCmd`;#$endEpoch global variable 
+                        $startEpoch = `$stEpochTimeCmd $errorRedirection`;#$startEpoch global variable
+			Chomp(\$startEpoch);
+			$invalidDateMessage = checkDateValidity($startEpoch);
+                        $endEpoch = `$edEpochTimeCmd $errorRedirection`;#$endEpoch global variable 
+			Chomp(\$endEpoch);
+			$invalidDateMessage .= checkDateValidity($endEpoch);
+			if ($invalidDateMessage ne ''){
+				($startDate,$endDate,$startEpoch,$endEpoch) = ('') x 4;
+				print $invalidDateMessage;
+			}
 			my $currentEpochPlusOne = $currentEpochtime + (1*24*60*60); 
                         if (($startEpoch > $currentEpochPlusOne) || ($endEpoch > $currentEpochPlusOne)){#Error handling if start date is grater than current date.
                                 ($startDate,$endDate,$startEpoch,$endEpoch) = ('') x 4;
@@ -282,4 +273,10 @@ sub isLogFilesPresent{
 		traceLog($whiteSpace.Constants->CONST->{'noLogs'}.$lineFeed, __FILE__, __LINE__);
 		exit(0);
 	}	
+}
+
+sub checkDateValidity{
+	if ($_[0] =~ /.*?(invalid date) \‘(\d{2}\/\d{2}\/\d{4}).*?\’/){
+		return ucfirst($1).': '.$2.$lineFeed;
+	}
 }

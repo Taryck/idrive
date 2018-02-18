@@ -35,17 +35,16 @@ finalLogout();
 # Usgae                   : killOrContinueJob()
 # Added By                : Abhishek Verma.
 #****************************************************************************/
-
 sub killOrContinueJob{
 	if ((-e $ManualBackupPidpath) and (-e $ManualRestorePidpath)){
-		killJob(Constants->CONST->{'logoutBackupRestoreJob'},'ManualBackup');
-		killJob('','ManualRestore');
+		killJob(Constants->CONST->{'logoutBackupRestoreJob'},'manual_backup');
+		killJob('','manual_restore');
 	}else{
 		if(-e $ManualBackupPidpath){
-			killJob(Constants->CONST->{'logoutBackupJob'},'ManualBackup');
+			killJob(Constants->CONST->{'logoutBackupJob'},'manual_backup');
 		}
 		if(-e $ManualRestorePidpath){
-			killJob(Constants->CONST->{'logoutRestoreJob'},'ManualRestore');
+			killJob(Constants->CONST->{'logoutRestoreJob'},'manual_restore');
 		}
 	}
 }
@@ -68,7 +67,7 @@ sub killJob{
 		$confirmationChoice = 'Y';
 	}
 	if ($confirmationChoice eq 'y' or $confirmationChoice eq 'Y'){
-		$JobTermCmd = "perl $jobTerminationScript $jobToTerminate";
+		$JobTermCmd = "perl '$jobTerminationScript' '$jobToTerminate'";
 		system($JobTermCmd);
 		if(-e Constants->CONST->{'incorrectPwd'}){
         		print Constants->CONST->{'noLogOut'}.$lineFeed;

@@ -29,9 +29,10 @@ my $menu	=	{'Backup'  => {1 => ["Edit your Manual Backupset File","$backupsetFil
 			};
 my $filePermission = 0777;
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations Start ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
+START:
 print Constants->CONST->{'AskOption'}.qq($lineFeed$lineFeed);
 displayMenu($menu);
+print $lineFeed.Constants->CONST->{'ctrlc2Exit'}.$lineFeed;
 print $lineFeed.Constants->CONST->{'EnterChoice'};
 my $userChoice = <STDIN>;
 Chomp(\$userChoice);
@@ -41,7 +42,10 @@ unless ($keyName){
 	print $lineFeed.Constants->CONST->{'InvalidChoice'}.Constants->CONST->{'TryAgain'}.$lineFeed;
 	exit(0);
 }
-openViEditor($menu,$keyName,$userChoice);
+if (openViEditor($menu,$keyName,$userChoice)){
+	print $lineFeed;
+	goto START;
+}
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations End ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Defining utility functions ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -60,7 +64,7 @@ sub openViEditor {
 		if (!-e $fileLocation){
 			$fileLocation =~ /(.*\/)[a-zA-Z0-9.]/;
 			my $scheduleDirLoc = $1;
-			my $mkRes = `mkdir -p $scheduleDirLoc $errorRedirection`;
+			my $mkRes = `mkdir -p '$scheduleDirLoc' $errorRedirection`;
 			open(SETFILE, ">", $fileLocation) or die "Couldn't create $fileLocation, Reason: $!\n";
 	                close(SETFILE);
         	        chmod $filePermission, $fileLocation;
@@ -70,12 +74,15 @@ sub openViEditor {
 	print $lineFeed.Constants->CONST->{'FileopeningMess'}.$lineFeed;
 	holdScreen2displayMessage(4);
 	#print $lineFeed.Constants->CONST->{'fileEditSuccessfully'}.$lineFeed;
-	my $operationStatus = system "vi $fileLocation";
+	my $operationStatus = system "vi '$fileLocation'";
 	if ($operationStatus == 0){
-		print $lineFeed.Constants->CONST->{'fileEditSuccessfully'}.$lineFeed;
+		print $lineFeed.qq(File "$fileLocation" ).Constants->CONST->{'fileEditSuccessfully'}.$lineFeed;
+		print $lineFeed.Constants->CONST->{'editOtherSupportedFiles'};
+		my $choice = getConfirmationChoice();
+		Chomp($choice);
+		return 1 if ($choice =~/^y$/i);
 	}else{
 		print $lineFeed.Constants->CONST->{'operationNotCompleted'}.qq(Reason : $!\n);
 	}
 }
-
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Functions defination End ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
