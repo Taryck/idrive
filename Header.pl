@@ -4,6 +4,7 @@
 #Script Name : Header.pl
 ###############################################################################
 #use Data::Dumper;
+use Time::HiRes;		# Required for sleep
 use Cwd;
 use Tie::File;
 use File::Copy;
@@ -3446,17 +3447,29 @@ sub isUpdateAvailable{
 #****************************************************************************/
 sub getQuota_HashTable(){
 	my $encType = checkEncType(1);
-	my $getQuotaUtfFile = getOperationFile($getQuotaOp,$encType);
-	$getQuotaUtfFile =~ s/\'/\'\\''/g;
-	$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
-	traceLog($idevsutilCommandLine."$lineFeed", __FILE__, __LINE__);
-	my $commandOutput = `$idevsutilCommandLine`;
-	traceLog('Outputs : '.$lineFeed.$commandOutput.$lineFeed, __FILE__, __LINE__);
-	parseXMLOutput(\$commandOutput);
+	my $WaitTime = 0;
+	my $Continue = 0;
+	my $getQuotaUtfFile = '';
+	my $commandOutput = '';
+	my %evsHashOutput;
+# Get a Valid answer
+	do {
+		sleep( $WaitTime );
+		$WaitTime += 50 + rand( 10 );	# Ajoute Entre 50 et 60 secondes au prochain temps d'attente
+		$getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'},$encType);
+		$getQuotaUtfFile =~ s/\'/\'\\''/g;
+		$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+		traceLog($idevsutilCommandLine."$lineFeed", __FILE__, __LINE__);
+		$commandOutput = `$idevsutilCommandLine`;
+		%evsHashOutput = parseXMLOutput(\$commandOutput);
+		$Continue = (	($evsHashOutput{message} eq 'ERROR') and ($evsHashOutput{desc} =~ /Try again/) and ($WaitTime < 600)	);
+		traceLog('Outputs : '.$lineFeed.$commandOutput.$lineFeed, __FILE__, __LINE__);
+	} while ($Continue eq 1);
 	if (($evsHashOutput{message} eq 'SUCCESS') and ($evsHashOutput{totalquota} =~/\d+/) and ($evsHashOutput{usedquota} =~/\d+/)){
 		$evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
 		$evsHashOutput{remainingquota} = $evsHashOutput{totalquota} - $evsHashOutput{usedquota};
 	}
+#	} while (	(	($evsHashOutput{message} eq 'ERROR') and ($evsHashOutput{desc} =~ /Try again/)	)	or ($WaitTime > 600)	);
 	unlink($getQuotaUtfFile);
 	return %evsHashOutput;
 }
