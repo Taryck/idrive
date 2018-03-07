@@ -988,6 +988,13 @@ sub updateConfFile {
                 chmod $filePermission, $RestoresetSchFile;
         }
         print Constants->CONST->{'LocationString'}.$RestoresetSchFile.$lineFeed;
+		
+	print $lineFeed.Constants->CONST->{'SetLocalBackupList'}.$lineFeed;
+		if (! -e $localBackupsetFilePath){
+				open(FH, ">", $localBackupsetFilePath)  or (print $! and exit(1));
+				chmod $filePermission, $localBackupsetFilePath;
+		}
+		print Constants->CONST->{'LocationString'}.$localBackupsetFilePath.$lineFeed;		
 
 	print $lineFeed.Constants->CONST->{'SetFullExclList'}.$lineFeed; 
 	open(FH, ">", $excludeFullPath)	or (print $! and exit(1));  
@@ -1025,8 +1032,9 @@ sub updateConfFile {
 		my $usrProfileDir = "$usrProfilePath/$CurrentUser";
 		$ManualBackupPidpath = $usrProfileDir."/Backup/Manual/pid.txt";
 		$ManualRestorePidpath = $usrProfileDir."/Restore/Manual/pid.txt";
+		$ExpressBackupPidpath = $usrProfileDir."/LocalBackup/Manual/pid.txt";
 		print $lineFeed.qq("$userName").' '.Constants->CONST->{'AccountConfig'}.$lineFeed;
-		if ((!-e $ManualBackupPidpath) and (!-e $ManualRestorePidpath)){			
+		if ((!-e $ManualBackupPidpath) and (!-e $ManualRestorePidpath) and (!-e $ExpressBackupPidpath)){			
 			print $lineFeed.Constants->CONST->{'askfForLogin'}.qq{"$userName" (y/n)?};
                         my $confirmationChoiceLogin = getConfirmationChoice($0,Constants->CONST->{'AccountConfig'}.q(. Please try to login using ).Constants->FILE_NAMES->{loginScript});
 			if ($confirmationChoiceLogin =~ /^y$/i){
@@ -1100,7 +1108,8 @@ sub writeConfigurationFile{
 					"PROXY = $proxyStr".$lineFeed.
 					"BWTHROTTLE = 100".$lineFeed.
 					"BACKUPTYPE = $backupType".$lineFeed.
-					"DEDUP = $dedup";
+					"DEDUP = $dedup".$lineFeed.
+					"SERVERROOT = $serverRoot".$lineFeed;
 	print CONF $confString;
 	close CONF;
 
@@ -1214,7 +1223,7 @@ sub resetGlobalVariables{
 sub checkAndCreateServicePath{
 	my $serviceFileLocation = "$userScriptLocation/".Constants->CONST->{serviceLocation};
 	if (!(-e $serviceFileLocation)){
-		       	getAndSetServicePath();
+		getAndSetServicePath();
 	}else{
 		my $usrInputSerPathExists = 0;
 		my $userServicePathExists = 0;
@@ -1223,19 +1232,10 @@ sub checkAndCreateServicePath{
 	        my $userServicePath = <SP>;
 	        Chomp(\$userServicePath);
 		if($userServicePath eq ''){
-#TBE : Avert ajoute par version2.12 non teste
 			getAndSetServicePath();
 		}
 		else{
-# TBE : Start of change
-			#		my ($usrInputSerPath) = $userServicePath =~ m{(.+)/([^/]+)$};
-# TBE : fix $userServicePath is modified by regex
-		my $usrInputSerPath = $userServicePath;
-#		if ( ($userServicePath =~ tr/\///) gt 1 ) {  => uncomment To allow use /idrive for Service location and use of (/) as user input
-			$usrInputSerPath = $usrInputSerPath =~ m{(.+)/([^/]+)$};
-#		}
-# TBE : End of change
-#		$usrInputSerPathExists = validateServiceDir($usrInputSerPath);    " TBE : A commenter peut-etre à voir
+			my ($usrInputSerPath) = $userServicePath =~ m{(.+)/([^/]+)$};
 			$userServicePathExists = validateServiceDir("$userServicePath");
 			if($userServicePathExists == 1){ 
 				$usrInputSerPathExists = validateServiceDir("$usrInputSerPath");
@@ -1299,7 +1299,7 @@ sub editConfigurationFile {
 	        displayMenu($configMenu);
         	my $userChoice = getUserOption(Constants->CONST->{'EnterChoice'},0,$maxChoice,4);
 		$userChoice = (($dedup eq 'on') and ($userChoice >= 5)) ? $userChoice+1 : $userChoice; 
-       		if ($userChoice == 7){
+       	if ($userChoice == 7){
 			exit(0);
 		}
 		elsif ($userChoice == 2){#Editing Restore Location
@@ -1323,6 +1323,7 @@ sub editConfigurationFile {
 				}
 			}
 			putParameterValue(\"BACKUPLOCATION",\"$backupHost",$configFilePath);#This function will write the backuplocation to conf file.
+			putParameterValue(\"SERVERROOT",\"$serverRoot",$configFilePath);
 		}
 		elsif($userChoice == 3){
 			my $restLoc = (($dedup eq 'on') and $restoreHost =~ /\#/) ? (split ('#',$restoreHost))[1] : $restoreHost;
@@ -1334,7 +1335,7 @@ sub editConfigurationFile {
 				}
 			}else{
 				print $lineFeed.Constants->CONST->{'LoadingAccDetails'};
-				my %evsDeviceHashOutput = getDeviceList();
+				%evsDeviceHashOutput = getDeviceList();
 				my $totalElements = keys %evsDeviceHashOutput;
 				if ($totalElements == 1 or $totalElements == 0){
 					print $lineFeed.Constants->CONST->{'restoreFromLocationNotFound'}.$lineFeed;

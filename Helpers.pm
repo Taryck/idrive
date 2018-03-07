@@ -56,7 +56,6 @@ sub display {
 			print $message->[$i];
 		}
 	}
-
 	print "\n" if ($endWithNewline);
 }
 
@@ -440,14 +439,32 @@ sub getCatfile {
 sub getUserChoice {
 	my $echoBack = shift;
 	$echoBack = 1 unless(defined($echoBack));
-
-	system('stty', '-echo') unless ($echoBack);
-	chomp(my $input = <STDIN>);
-	unless ($echoBack) {
-		system('stty', 'echo');
-		display('');
+	my $message = shift;
+	my $noOfOptions = shift;
+	my $userChoice = '';
+	my $maxRetry = 4;
+	while ($maxRetry and $userChoice eq ''){
+		Helpers::display($message,0);
+		system('stty', '-echo') unless($echoBack);
+		chomp(my $input = <STDIN>);
+		unless ($echoBack) {
+			system('stty', 'echo');
+			display('');
+		}
+		unless(Helpers::isValidSelection($input,$noOfOptions)) {
+			Helpers::display('invalid_option');			
+			$userChoice = '';
+			$maxRetry--;
+		} else {
+			$userChoice = $input;
+		}
 	}
-	return $input;
+	if ($maxRetry == 0 and $userChoice eq ''){
+		Helpers::display('your_max_attempt_reached');
+		exit(0);
+	}else{
+		return $userChoice;
+	}
 }
 
 #*******************************************************************************
@@ -977,7 +994,8 @@ sub authenticateUser {
 		if (exists $responseData[0]->{'desc'}) {
 			#display(lc($responseData[0]->{'desc'} =~ s/ /_/gr));
 			my $desc = $responseData[0]->{'desc'};
-			display(lc($desc =~ s/ /_/g));
+			$desc =~ s/ /_/g;
+			display(lc($desc));
 		}
 		else {
 			display($responseData[0]->{'MSG'});
@@ -1116,7 +1134,8 @@ sub downloadEVSBinary {
 		$dp = ($downloadPage . "/$ezf->[$i]");
 		#unless(download($dp =~ s/__EVSTYPE__/-dedup/gr)) {
 		my $desc = $dp;
-		unless(download($desc =~ s/__EVSTYPE__/-dedup/g)) {
+		$desc =~ s/__EVSTYPE__/-dedup/g;
+		unless(download($desc)) {
 			$status = 0;
 			last;
 		}
@@ -1127,7 +1146,8 @@ sub downloadEVSBinary {
 		}
 		#if (hasEVSBinary(getServicePath() . "/$Configuration::downloadsPath/" . $ezf->[$i] =~ s/.zip//gr)) {
 		$desc = $ezf->[$i];
-		if (hasEVSBinary(getServicePath() . "/$Configuration::downloadsPath/" . $desc =~ s/.zip//g)) {
+		$desc =~ s/.zip//g;
+		if (hasEVSBinary(getServicePath() . "/$Configuration::downloadsPath/" . $desc)) {
 			$status = 1;
 			last;
 		}
@@ -1411,7 +1431,8 @@ sub parseEVSCmdOutput {
 				$keyValuePair[($_ * 2)] =~ s/^\s+|\s+$//g;
 				#$data{$keyValuePair[($_ * 2)]} = $keyValuePair[(($_ * 2) + 1)] =~ s/^\s$//gr;
 				my $desc = $keyValuePair[(($_ * 2) + 1)];				
-				$data{$keyValuePair[($_ * 2)]} = $desc =~ s/^\s$//g;
+				$desc =~ s/^\s$//g;				
+				$data{$keyValuePair[($_ * 2)]} = $desc;
 			}
 			if (exists $data{'status'}) {
 				$data{'STATUS'} = uc($data{'status'});

@@ -16,6 +16,8 @@ my $encType = undef;
 my $pvtKey = undef;
 my $pvtKeyField = undef;
 my $accDetailsCheck = 0;
+my $serverAddress = 0;
+
 headerDisplay($0);
 my $CurrentUser = getCurrentUser();
 if ($CurrentUser ne ""){
@@ -84,11 +86,9 @@ unless (validatePassword($password)){
 }
 CHECK_ACC_DETAILS:
 getAccountInfo();
-my $serverAddress = verifyAndLoadServerAddr();
-if ($serverAddress == 0){
-	cancelProcess();
-}
 createPasswordFiles($password,$pwdPath,$userName,$enPwdPath);
+getServerAddr($serverAddress);
+
 setAccount($cnfgstat,\$pvt,$pvtPath);
 if ($message eq 'SUCCESS'){
 	getPvtKey();
@@ -105,7 +105,7 @@ getQuotaForAccountSettings($accountQuota, $quotaUsed);
 sub validateAccount
 {	
 #	print $lineFeed.$lineFeed.Constants->CONST->{'verifyAccount'}.$lineFeed;
-	my $validateUtf8File = getOperationFile(Constants->CONST->{'ValidateOp'});
+	my $validateUtf8File = getOperationFile(Constants->CONST->{'ValidateOp'},$_[0]);
 	chomp($validateUtf8File);
 
 	#log API in trace file as well
@@ -165,7 +165,7 @@ sub validateAccount
 				if ($proxyStr ne ""){
 					$commandOutput = '';
 					createPasswordFiles($password,$pwdPath,$userName,$enPwdPath);
-					$res = validateAccount('on');
+					$res = validateAccount($password);
 					return $res;
 				}
 			}else{
@@ -200,7 +200,7 @@ sub validateAccount
 			 if ($proxyStr ne ""){
 			        $commandOutput = '';
 				createPasswordFiles($password,$pwdPath,$userName,$enPwdPath);
-				$res = validateAccount('on');
+				$res = validateAccount($password);
 				return $res;
 			 }
 		}else{
@@ -264,8 +264,7 @@ sub verifyAccount
 	if($isPrivate) {
 		createEncodeFile($pvtKey, $pvtPath);
 	}
-	#get evs server address for other APIs
-	getServerAddr();
+	
 	my $retType = '';
 	if($isPrivate eq 1) {
 		print $lineFeed.Constants->CONST->{'verifyPvt'}.$lineFeed;
@@ -370,6 +369,7 @@ sub getAccountInfo {
 		$curlCmd = "$curl --max-time 15 -s -k -d '$data' '$PATH'";
 	}
 	my $res = `$curlCmd`;
+
 	if($res =~ /FAILURE/) {
 		if($res =~ /passwords do not match|Username or Password not found|invalid value passed for username|password too short|username too short|password too long|username too long/i) {
 #			undef $userName; Any specific reason behind writing this statement.
@@ -387,12 +387,12 @@ sub getAccountInfo {
 	traceLog("curl res :$res", __FILE__, __LINE__);
 
         if(!$res) {
-        	$res =	validateAccount();
+        	$res =	validateAccount($password);
         } elsif( $res =~ /Unauthorized/) {
-            $res = validateAccount();
+            $res = validateAccount($password);
         }
         if ($res eq ''){
-           $res =  validateAccount();
+           $res =  validateAccount($password);
         }
 	
 	my %evsLoginHashOutput = parseXMLOutput(\$res);
@@ -405,13 +405,18 @@ sub getAccountInfo {
 	$dedup = $evsLoginHashOutput{"dedup"} if($appType eq "IDrive");
 	$accountQuota = $evsLoginHashOutput{"quota"};
 	$quotaUsed = $evsLoginHashOutput{"quota_used"};
-	getServerAddr($evsLoginHashOutput{evssrvrip});	
+
+	if(defined($evsLoginHashOutput{"evssrvrip"})){
+		$serverAddress = $evsLoginHashOutput{"evssrvrip"};
+	}
+
 	#dedup check
 	if ($dedup eq 'on'){
 		$idevsutilBinaryName = "idevsutil_dedup";#Name of idevsutil binary#
 		$idevsutilBinaryPath = "$idriveServicePath/idevsutil_dedup";#Path of idevsutil binary#
 	}		
 }
+
 #****************************************************************************************************
 # Subroutine Name         : getPvtKey.
 # Objective               : Get the input for private key from user.
