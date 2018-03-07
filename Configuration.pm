@@ -5,7 +5,7 @@ use warnings;
 use lib substr(__FILE__, 0, rindex(__FILE__, '/'));
 use IxHash;
 
-our $version       = '2.12';
+our $version       = '2.13';
 our $displayHeader = 1;
 our $appType       = 'IDrive';
 
@@ -50,6 +50,7 @@ our %userProfilePaths = (
 	'scheduled_restore' => 'Restore/Scheduled',
 	'user_info'         => '.userInfo',
 	'restore_data'      => 'Restore_Data',
+	'manual_localBackup'=> 'LocalBackup/Manual',
 );
 
 our $screenSize = `stty size`;
@@ -88,6 +89,9 @@ tie (our %availableJobsSchema, 'Tie::IxHash',
 	'scheduled_restore' => {
 		'file' => "__SERVICEPATH__/$userProfilePath/__USERNAME__/$userProfilePaths{'scheduled_restore'}/RestoresetFile.txt",
 	},
+	'manual_localBackup' => {
+		'file' => "__SERVICEPATH__/$userProfilePath/__USERNAME__/$userProfilePaths{'manual_localBackup'}/BackupsetFile.txt",
+	},	
 );
 
 tie (our %excludeFilesSchema, 'Tie::IxHash',
