@@ -67,9 +67,13 @@ our %strings = (
 	'multiple_backup_locations_are_configured' => "Multiple Backup Locations are configured with this account",
 	'manual_backup' => "Manual backup",
 	'manual_restore' => "Manual restore",
-
+	'manual_localBackup' => "Manual express backup",
+	'manual_backup_not_running' => "No Backup Job is running",
+	'manual_restore_not_running' => "No Restore Job is running",
+	'manual_localBackup_not_running' => "No Express Backup Job is running",
+	
 # N
-	'no_backup_or_restore_is_running' => "No Backup/Restore Job is running",
+	'no_backup_or_restore_is_running' => "No Backup/Express Backup/Restore Job is running",
 	'no_logged_in_user' => "No logged in user",
 	'no_such_directory_try_again' => "No such directory. Please try again.",
 	'not_found' => 'Not found.',
@@ -92,6 +96,7 @@ our %strings = (
 	'stop_manual_restore' => "Stop Manual Restore",
 	'stop_scheduled_backup' => "Stop Scheduled Backup",
 	'stop_scheduled_restore' => "Stop Scheduled Restore",
+	'stop_manual_localBackup' => "Stop Manual Express Backup",
 	'storage_used' => "Storage Used:",
 	'select_an_option' => "Select an option",
 	'select_from_existing_backup_locations' => "Select from existing Backup Locations",
@@ -126,6 +131,7 @@ our %strings = (
 	'your_backup_to_device_name_is' => 'Your Backup To Device Name is',
 	'your_restore_from_device_is_set_to' => 'Your Restore From Device is set to',
 	'your_restore_location_is_set_to' => "Your Restore Location is set to",
-	'your_account_details_are' => "Your account details are"
+	'your_account_details_are' => "Your account details are",
+	'your_max_attempt_reached' => 'Your maximum attempt reached. Please try again.',
 );
 1;

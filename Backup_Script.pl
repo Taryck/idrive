@@ -34,7 +34,7 @@ my $cancelFlag = 0;
 my %backupExcludeHash = (); #Hash containing items present in Exclude List#
 my $backupUtfFile = '';
 
-my $maxNumRetryAttempts = 5;
+my $maxNumRetryAttempts = 50;
 my $totalSize = 0;
 my $BackupsetFileTmp = "";
 my $regexStr = '';
@@ -42,7 +42,7 @@ my $parStr = '';
 #my $relativeAsPerOperation = undef; This variable is not used at any place in the script.
 my $filesOnlyCount = 0;
 my $prevFailedCount = 0;
-
+my $excludedCount = 0;
 my $noRelIndex = 0;
 my $retrycount = 0;
 my $exitStatus = 0;
@@ -67,7 +67,7 @@ use constant OUTPUT_PID_FAIL => 3;
 use constant PID_NOT_EXIST => 4;
 
 use constant FILE_MAX_COUNT => 1000;
-
+use constant EXCLUDED_MAX_COUNT => 30000;
 my @commandArgs = qw(--silent SCHEDULED);
 if ($#ARGV >= 0){
 	if(!validateCommandArgs(\@ARGV,\@commandArgs)){
@@ -115,35 +115,12 @@ sub process_term()
 	exit(0);
 }
 
-#======================================================================
-#TBE - FIX - for Enh-006 : Add remaining Quota to summary
-$displayCurrentUser = $userName;
-#======================================================================
-
 $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
 
 if(-e $confFilePath) {
 	readConfigurationFile($confFilePath);
 } 
 
-
-if(-e $confFilePath) {
-	readConfigurationFile($confFilePath);
-}
-
-#=====================================================================================================================
-# TBE : ENH-001 - Load local CONFIGURATION_FILE
-# After loading <idrive_path>/userprofile/<my_account>
-# Loads CONFIGURATION_FILE where process is lauched. In scheduled mode :
-# <idrive_path>/userprofile/<my_account>/Backup/Scheduled
-#$confFilePath = $usrProfilePath.'/'.$userName.'/Backup/'.$ARGV[0].'/'.Constants->CONST->{'configurationFile'};
-$confFilePath = $INC[0].'/'.Constants->CONST->{'configurationFile'};
-
-if(-e $confFilePath) {
-	readConfigurationFile($confFilePath);
-}
-#TBE : end of ENH-001
-#=====================================================================================================================
 getConfigHashValue();
 loadUserData();
 my $BackupsetFile = $backupsetFilePath;
@@ -222,15 +199,22 @@ $noRelativeFileset	= $jobRunningDir."/".$noRelativeFileset;
 $filesOnly	= $jobRunningDir."/".$filesOnly;
 my $incSize = "$jobRunningDir/transferredFileSize.txt";
 my $trfSizeAndCountFile = "$jobRunningDir/trfSizeAndCount.txt";
+$excludeDirPath  = "$jobRunningDir/Excluded";
+$excludedLogFilePath  = "$excludeDirPath/excludedItemsLog.txt";
+$errorDir = $jobRunningDir."/ERROR";
                       
 # pre cleanup for all intermediate files and folders.
-`rm -rf '$relativeFileset'* '$noRelativeFileset'* '$filesOnly'* '$info_file' '$retryinfo' ERROR '$statusFilePath' '$incSize' '$failedfiles'*`;
+`rm -rf '$relativeFileset'* '$noRelativeFileset'* '$filesOnly'* '$info_file' '$retryinfo' '$errorDir' '$statusFilePath' '$excludeDirPath' '$incSize' '$failedfiles'*`;
 unlink($progressDetailsFilePath);
 #Start creating required file/folder
-$errorDir = $jobRunningDir."/ERROR";
 if(!-d $errorDir) {
 	mkdir($errorDir);
 	chmod $filePermission, $errorDir;
+}
+
+if(!-d $excludeDirPath) {
+	mkdir($excludeDirPath);
+	chmod $filePermission, $excludeDirPath;
 }
 #getParameterValue(\"PASSWORD",\$hashParameters{PASSWORD});
 #my $encType = checkEncType($flagToCheckSchdule); # This function has been called inside getOperationFile() function.
@@ -383,7 +367,15 @@ sub generateBackupsetFiles {
 	}
 	chmod $filePermission, $traceExist;
 	
+	# require to open excludedItems file to log excluded details
+	if(!open(EXCLUDEDFILE, ">", $excludedLogFilePath)){
+		print Constants->CONST->{'CreateFail'}." $excludedLogFilePath, Reason:$!";
+		traceLog(Constants->CONST->{'CreateFail'}." $excludedLogFilePath, Reason:$!", __FILE__, __LINE__) and die;
+	}
+	chmod $filePermission, $excludedLogFilePath;
+	
 	$filesonlycount = 0;
+	$excludedFileIndex = 1;
 	my $j =0;
 	chomp(@BackupArray);
 	@BackupArray = uniqueData(@BackupArray);
@@ -401,26 +393,19 @@ sub generateBackupsetFiles {
 		elsif ($item eq "." or $item eq "..") {
 			next;
 		}
-# =======================================================================
-# TBE : ENH-002 set Root Directory for relative backup
-# if enh-002 is activated then add base_dir to backupset line
-		if($backupBase_Dir ne "") {
-			if(substr($item, 0, 1) eq "/") {
-				$item =~ s/^.//;
-			}
-			$item = $backupBase_Dir . $item;
-		}
-#		elsif( -l $item # File is a symbolic link #
-		if( -l $item # File is a symbolic link #
-# =======================================================================
-
+		elsif( -l $item # File is a symbolic link #
 			 or -p $item # File is a named pipe #
 			 or -S $item # File is a socket #
 			 or -b $item # File is a block special file #
 			 or -c $item )# File is a character special file #
 		#	 or -t $item ) # Filehandle is opened to a tty #
 		{
-			print OUTFILE "[".(localtime)."] [EXCLUDED] [$item]. reason: Not a regular file/folder.$lineFeed";
+			print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$item]. reason: Not a regular file/folder.$lineFeed";
+			$excludedCount++;
+			if($excludedCount == EXCLUDED_MAX_COUNT) {
+				$excludedCount = 0;
+				createExcludedLogFile30k();
+			}
 			next;
 		}
 		Chomp(\$item);		
@@ -436,16 +421,7 @@ sub generateBackupsetFiles {
 				$noRelIndex++;
 				$BackupsetFile_new = $noRelativeFileset."$noRelIndex"; 
 				$filecount = 0;
-# =======================================================================
-# TBE : ENH-002 set Root Directory for relative backup
-				if($backupBase_Dir eq "") {
-# Original version
-					$a = rindex ($item, '/');
-				} else {
-# if enh-002 is activated define then end of BASE_DIR as the position to define relative name
-					$a = length( $backupBase_Dir ) - 1;
-				}
-# =======================================================================
+				$a = rindex ($item, '/');
 				$source[$noRelIndex] = substr($item,0,$a);
 				if($source[$noRelIndex] eq "") {
 					$source[$noRelIndex] = "/";
@@ -525,6 +501,7 @@ GENLAST:
 	chmod $filePermission, $fileForSize;
 	
 	close(TRACEERRORFILE);
+	close(EXCLUDEDFILE);
 	exit 0;
 }
 #****************************************************************************************************
@@ -562,7 +539,12 @@ sub enumerate {
 			 or -c $temp )# File is a character special file #
 			 #or -t $temp ) # Filehandle is opened to a tty #
 			{
-				print OUTFILE "[".(localtime)."] [EXCLUDED] [$temp]. reason: Not a regular file/folder.$lineFeed";
+				print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$temp]. reason: Not a regular file/folder.$lineFeed";
+				$excludedCount++;
+				if($excludedCount == EXCLUDED_MAX_COUNT) {
+					$excludedCount = 0;
+					createExcludedLogFile30k();
+				}				
 				next;
 			}
 			
@@ -612,10 +594,15 @@ sub enumerate {
 		closedir(DIR);
 	}
 	else {
-		print OUTFILE "[".(localtime)."] [EXCLUDED] [$item]. Reason: $!".$lineFeed;
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$item]. Reason: $!".$lineFeed;
+		$excludedCount++;
 		traceLog("Could not open Dir $item, Reason:$!", __FILE__, __LINE__);
 	}	
-return $retVal;	
+	if($excludedCount == EXCLUDED_MAX_COUNT) {
+		$excludedCount = 0;
+		createExcludedLogFile30k();
+	}
+	return $retVal;	
 }
 
 #****************************************************************************************************
@@ -636,7 +623,7 @@ sub cancelSubRoutine()
 		close NEWFILE;
 		exit 0;
 	} 
-
+	waitpid($generateFilesPid,0);
 	if($totalFiles == 0 or $totalFiles !~ /\d+/) {
 		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
 		$totalFiles = `$fileCountCmd`; 
@@ -673,6 +660,8 @@ sub cancelSubRoutine()
 			}
 		}
 	}
+	
+	waitpid($pid_OutputProcess, 0);
 	exit_cleanup($errStr);
 }
 
@@ -769,15 +758,16 @@ sub loadRegexExclude {
 		} else {
 			foreach(@excludeRegexArray) {
 				my $a = $_;
+				chomp($a);
 				$b = eval { qr/$a/ };
 				if ($@) {
 					print OUTFILE " Invalid regex: $a";
 					traceLog("Invalid regex: $a\n", __FILE__, __LINE__);
 				} elsif($a) {
 					push @tmp, $a;
-					}
+				}
 			}
-			$regexStr = join('\n', @tmp);
+			$regexStr = join("\n", @tmp);
 			chomp($regexStr);
 			$regexStr =~ s/\n/|/g;
 		}
@@ -801,6 +791,7 @@ sub exit_cleanup {
 	$syncedFiles = getParameterValueFromStatusFile('SYNC_COUNT_FILES_INDEX');
 	$failedFilesCount = getParameterValueFromStatusFile('ERROR_COUNT_FILES');
 	$exit_flag = getParameterValueFromStatusFile('EXIT_FLAG_INDEX');
+	chomp($exit_flag);
 	if($errStr eq "" and -e $errorFilePath) {
 		open ERR, "<$errorFilePath" or traceLog(Constants->CONST->{'FileOpnErr'}."errorFilePath in exit_cleanup: $errorFilePath, Reason: $!".$lineFeed, __FILE__, __LINE__);
 		$errStr .= <ERR>;
@@ -808,7 +799,7 @@ sub exit_cleanup {
 		chomp($errStr);
 	}
 	
-	if(!-e $pidPath) {
+	if(!-e $pidPath or $exit_flag) {
 		$cancelFlag = 1;
 		
 		# In childprocess, if we exit due to some exit scenario, then this exit_flag will be true with error msg
@@ -849,13 +840,7 @@ sub exit_cleanup {
 		}
 	}
 	unlink($pidPath);
-
-#ENH-004 - Quota remaining => Data could be removed from web so quota should always be updated
-#ENH-004	if ($successFiles > 0){#some file has been backed up during the process, getQuota call is done to calculate the fresh quota.
-	getQuota($0);
-#ENH-004	}
 	writeOperationSummary(Constants->CONST->{'BackupOp'});
-
 	unlink($idevsOutputFile);
 	unlink($idevsErrorFile);
 	unlink($backupUtfFile); 
@@ -887,7 +872,6 @@ sub exit_cleanup {
 	sendMail($subjectLine);
 	appendEndProcessInProgressFile();
 	terminateStatusRetrievalScript("$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'}) if ($taskType eq "Scheduled");
-
 	unlink($progressDetailsFilePath);
 	if ($successFiles > 0){#some file has been backed up during the process, getQuota call is done to calculate the fresh quota.
 		my $childProc = fork();
@@ -896,7 +880,6 @@ sub exit_cleanup {
 			exit(0);
 		}
 	}
-
 	exit 0;
 }
 
@@ -911,14 +894,21 @@ sub checkForExclude {
 	my $returnvalue = 0;
 	###$element the last slash needs to be removed before comparing with hash for full exclude
 	if(exists $backupExcludeHash{$element} or $element =~ m/$fullStr/) {
-		print OUTFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Full path excluded item.$lineFeed";
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Full path excluded item.$lineFeed";
+		$excludedCount++;
 		$returnvalue = 1;
 	} elsif($parStr ne "" and $element =~ m/$parStr/) {
-		print OUTFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Partial path excluded item.$lineFeed";
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Partial path excluded item.$lineFeed";
+		$excludedCount++;
 		$returnvalue = 1;
 	} elsif($regexStr ne "" and $element =~ m/$regexStr/) {
-		print OUTFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Regex path excluded item.$lineFeed";
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Regex path excluded item.$lineFeed";
+		$excludedCount++;
 		$returnvalue = 1;
+	}
+	if($excludedCount == EXCLUDED_MAX_COUNT) {
+		$excludedCount = 0;
+		createExcludedLogFile30k();
 	}
 
 	return $returnvalue;
@@ -1119,39 +1109,31 @@ sub doBackupOperation()
 #******************************************************************************************************************/
 sub getOpStatusNeSubLine()
 {
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-# and simplification
-	my $TBE_status_text = "";
-#======================================================================
 	my $subjectLine= "";
 	my $totalNumFiles = $filesConsideredCount-$failedFilesCount;
 	if($cancelFlag){
 		$status = "ABORTED";
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
-		$TBE_status_text = 'Aborted Backup';
-#======================================================================
-	} elsif ($failedFilesCount == 0 and $filesConsideredCount > 0) {
-		$status = "SUCCESS";
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
-		$TBE_status_text = 'Successful Backup';
-#======================================================================
-	} else {
-		$status = "FAILURE";
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
-		$TBE_status_text = 'Failed Backup';
-#======================================================================
+		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
 	}
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-	$subjectLine = "[$TBE_status_text] [$userName] - $taskType Backup Email Notification";
-#======================================================================
+#	elsif($filesConsideredCount == 0){
+#		$status = "FAILURE";
+#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
+#	}
+	elsif($failedFilesCount == 0 and $filesConsideredCount > 0)
+	{
+		$status = "SUCCESS";
+		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
+	}
+	else {
+#		if(($failedFilesCount/$filesConsideredCount)*100 <= 5){				  
+#			$status = "SUCCESS*";
+#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful* Backup]";
+#		}
+#		else {
+			$status = "FAILURE";
+			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
+#		}
+	}
 	return ($subjectLine);
 }
 

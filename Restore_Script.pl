@@ -1098,23 +1098,7 @@ sub cancelSubRoutine()
 		exit 0;
 	} 
 	
-	if($totalFiles == 0 or $totalFiles !~ /\d+$/) {
-		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
-		$totalFiles = `$fileCountCmd`; 
-		$totalFiles =~ s/TOTALFILES//;
-	}	
-
-	if($totalFiles == 0 or $totalFiles !~ /\d+$/){
-		traceLog("\n Unable to get total files count2 \n", __FILE__, __LINE__);
-	}
-	
-	if($nonExistsCount == 0) {
-		my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
-		$nonExistsCount = `$nonExistCheckCmd`; 
-		$nonExistsCount =~ s/FAILEDCOUNT//;
-	}
-	
-	my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$backupUtfFile\'";
+	my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$jobRunningDir\'";
 	$evsRunning = `$evsCmd`;
 	@evsRunningArr = split("\n", $evsRunning);
 	
@@ -1133,6 +1117,25 @@ sub cancelSubRoutine()
 			}
 		}
 	}
+	
+	waitpid($generateFilesPid,0);
+	if($totalFiles == 0 or $totalFiles !~ /\d+$/) {
+		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
+		$totalFiles = `$fileCountCmd`; 
+		$totalFiles =~ s/TOTALFILES//;
+	}	
+
+	if($totalFiles == 0 or $totalFiles !~ /\d+$/){
+		traceLog("\n Unable to get total files count2 \n", __FILE__, __LINE__);
+	}
+	
+	if($nonExistsCount == 0) {
+		my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
+		$nonExistsCount = `$nonExistCheckCmd`; 
+		$nonExistsCount =~ s/FAILEDCOUNT//;
+	}
+	
+	waitpid($pid_OutputProcess, 0);
 	exit_cleanup($errStr);
 }
 

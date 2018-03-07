@@ -19,6 +19,7 @@ my $menuChoice = undef;
 #my $Pflag = undef;
 my $taskType = "SCHEDULE";
 my $progressDetailsFilePath = '';
+my $currPidFile = '';
 my $prevLine = '';
 
 $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
@@ -87,14 +88,15 @@ traceLog("$lineFeed File: $curFile $lineFeed------------------------------------
 my $displayProgress = 1;
 constructProgressDetailsFilePath();
 
-system("clear");
+#system("clear");
 getCursorPos();
 do {
 	my @lastLine = readProgressDetailsFile();
 	chomp(@lastLine);
 	@lastLine = grep {/\S/}@lastLine;
 	my $lastLine = join "\n", @lastLine;
-	if($lastLine ne "" && $lastLine ne $prevLine) {
+	
+	if($lastLine ne "" and $lastLine ne $prevLine and scalar(@lastLine)>1) {
 		if ($lastLine =~ /PROGRESS END/){
 			$lastLine =~s/PROGRESS END//;
 			if ($lastLine eq $prevLine){
@@ -104,7 +106,7 @@ do {
 		my @params = split( /\n/, $lastLine);
 		displayProgressBar($params[0], $params[1], $params[2], $params[3], $params[4], $params[5], $params[6], $params[7]);
 		$prevLine = $lastLine;
-	} elsif($lastLine eq "" and !-e $progressDetailsFilePath){
+	} elsif($lastLine eq "" and !-e $progressDetailsFilePath and !-e $currPidFile){
 		$displayProgress = 0;
 	}
 	select undef, undef, undef, 0.005;
@@ -149,6 +151,7 @@ sub constructProgressDetailsFilePath {
     
     $jobRunningDir = $usrProfileDir.$pathSeparator.ucfirst(lc($jobType)).$pathSeparator."Scheduled";
     $progressDetailsFilePath = $jobRunningDir.$pathSeparator."PROGRESS_DETAILS_".$jobType;
+	$currPidFile = $jobRunningDir.$pathSeparator."pid.txt";
 }
 
 #****************************************************************************************************

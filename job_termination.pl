@@ -44,7 +44,11 @@ sub init {
 
 	my %jobs = getRunningJobs();
 	if (!%jobs) {
-		Helpers::display('no_backup_or_restore_is_running');
+		unless ($cmdNumOfArgs == -1){
+			Helpers::display($ARGV[0].'_not_running');
+		} else {
+			Helpers::display('no_backup_or_restore_is_running');
+		}
 		exit 0;
 	}
 
@@ -56,8 +60,8 @@ sub init {
 			Helpers::display('you_can_stop_one_job_at_a_time')
 		}
 
-		Helpers::displayMenu('select_the_job_from_the_above_list', @options);
-		$userSelection = Helpers::getUserChoice();
+		Helpers::displayMenu('',@options);
+		$userSelection = Helpers::getUserChoice(1,'select_the_job_from_the_above_list',scalar(@options));
 	}
 	else {
 		$userSelection = 1;
@@ -83,10 +87,15 @@ sub init {
 			exit(1);
 		}
 		else {
-			unlink($jobs{$options[($userSelection - 1)]});
-			Helpers::display([$options[($userSelection - 1)],
-												" ",
-												'job_terminated_successfully']);
+			if(-e $jobs{$options[($userSelection - 1)]}){
+				unlink($jobs{$options[($userSelection - 1)]});
+				Helpers::display([$options[($userSelection - 1)],
+													" ",
+													'job_terminated_successfully']);
+			} else {
+				Helpers::display('no_backup_or_restore_is_running');
+				exit(1);
+			}
 		}
 	}
 	else {
@@ -111,15 +120,17 @@ sub getPid {
 	}
 	chomp($parentpid);
 	my ($findpid, $r, $pid);
-
-	$findpid = qq{ps -o sid= -p$parentpid | xargs pgrep -s | xargs ps -o pid,command -p | grep idev | grep -v "grep"};
-	my @r    = `$findpid`;
 	my (@pid, @cmd);
-	foreach(@r) {
-		$_ =~ s/^\s+//;
-		my ($p, $c) = split(/\s+/, $_, 2);
-		chomp($p);
-		push @pid, $p;
+	if($parentpid){
+		$findpid = qq{ps -o sid= -p$parentpid | xargs pgrep -s | xargs ps -o pid,command -p | grep idev | grep -v "grep"};
+		my @r    = `$findpid`;
+		
+		foreach(@r) {
+			$_ =~ s/^\s+//;
+			my ($p, $c) = split(/\s+/, $_, 2);
+			chomp($p);
+			push @pid, $p;
+		}
 	}
 	return join(" ", @pid);
 }
@@ -168,7 +179,11 @@ sub killPid {
 sub getRunningJobs {
 	my @availableJobs;
 	if ($cmdNumOfArgs > -1) {
-		push @availableJobs, lc($ARGV[0]);
+		unless (exists $Configuration::availableJobsSchema{$ARGV[0]}) {
+			push @availableJobs, lc($ARGV[0]);
+		} else {
+			push @availableJobs, $ARGV[0];
+		}
 	}
 	else {
 		@availableJobs = keys %Configuration::availableJobsSchema;
@@ -177,7 +192,7 @@ sub getRunningJobs {
 	my %runningJobs;
 	foreach (@availableJobs) {
 		my @p = split '_', $_;
-
+		
 		unless (exists $Configuration::availableJobsSchema{$_}) {
 			Helpers::retreat([
 					'undefined_job_name',
