@@ -57,7 +57,7 @@ use constant CONST => {
 			AskMirrorType	=> '1) Mirror',
 			AskRelativeType	=> '2) Relative',
 			Product => 'ForLinux',
-			ScriptBuildVersion => '2.12  ',
+			ScriptBuildVersion => '2.13  ',
 		#------------------EVS Operations ---------------------#	
 			LinkBucketOp => 'LinkBucket',
 			NickUpdateOp => 'NickUpdate',
@@ -78,6 +78,7 @@ use constant CONST => {
 			VersionOp => 'Version',
 			VerifyPvtOp => 'VerifyPvtKey',		
 			validatePvtKeyOp => 'validatePvtKey',
+			LocalBackupOp => 'LocalBackup',
 		#------------------ A -----------------------------#
 			AskIfProxy	=>	'Are you using Proxy(y/n)?',
 			AccountSet	=>	'Your Account is ready to use now.',
@@ -165,14 +166,13 @@ use constant CONST => {
 			notExists => 'does not exists',
 			changeServicePath => 'Do you want to change your service path (y/n)?',
 			noSufficientPermission => 'does not have sufficient permissions',
-
 			noSufficientPermissionToCleanup => sub { return qq{System user [$_[0]] does not have sufficient permission to perform cleanup operation. Please run this script in privileged user mode to perform the cleanup.}},
-
 			viewLogMessage => 'Select option to view logs for: ',
 			viewMoreLogs => 'Do you want to view more logs(y/n).',
 			removeDirectories => 'Do you want to remove the following directories(y/n)?',
 			DirectoryRemoved => sub { return qq{$_[0] '$_[1]' has been removed successfully.}},
 			DirectoryFileNotEmpty => sub { return qq{System user [$_[0]] does not have sufficient permission to cleanup $_[1] $_[2]. Please run this script in privileged user mode to perform the cleanup.}},
+			doUwant2EnterMountPoint 	=> 'Do you want to enter your mount point manually (y/n)?',
 		#---------------------E -----------------------------#
 			setEncKeyMess => 'Encryption key is set successfully...',
 #			emailNotConfig	=> 	'Could not configure email address.',
@@ -223,6 +223,7 @@ use constant CONST => {
 			useBWinput => 'Enter bandwidth throttle value [1-100]:',
 			errorDisplayLog => 'Error in display log.',
 			AskLinuxPword	=>	sub { return qq{Please enter system user [$_[0]] password:}},
+			EnterMountPoint => 'Enter your mount point: ',
 		#------------------- F ----------------------------#
 			issueWithProxy => 'Found issue with your proxy details or network connectivity.',
 			FulExcld  => "full exclude= ",
@@ -285,6 +286,7 @@ use constant CONST => {
 			invalidBWinput => 'Invalid bandwidth throttle value. Bandwidth throttle must be between 1-100. Please try again.',	
 			IDriveMaintainer	=> 'IDrive Inc.',
 			InvalidZipFile	=> 'Invalid zip file. Please download the expected zip file from the link mentioned below and try again.',
+			InvalidMountPoint => 'Invalid mount point. Please try again.',
 		#------------------- J ----------------------------#
 			JobTerminationScriptName => 'job_termination.pl',	
 			JobTerminateMessage	 => 'job terminated successfully',
@@ -305,11 +307,16 @@ use constant CONST => {
 			loginConfigAgain	=> 'Your account is not configured. Please configure using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 			logoutBackupJob	=> 'Logging out from your account will terminate Manual Backup job. Do you want to continue (y/n)?',
 			logoutRestoreJob => 'Logging out from your account will terminate Manual Restore job. Do you want to continue (y/n)?',
+			logoutExpressBackupJob	=> 'Logging out from your account will terminate Express Backup job. Do you want to continue (y/n)?',			
 			logoutBackupRestoreJob => 'Logging out from your account will terminate Manual Backup and Restore job. Do you want to continue (y/n)?',
+			logoutBackupExpressBackupJob => 'Logging out from your account will terminate Manual Backup and Express Backup. Do you want to continue (y/n)?',
+			logoutExpressBackupRestoreJob => 'Logging out from your account will terminate Manual Express Backup and Restore job. Do you want to continue (y/n)?',
+			logoutBackupExpressBackupRestoreJob => 'Logging out from your account will terminate Manual Backup, Express Backup and Restore job. Do you want to continue (y/n)?',			
 			LocationString => 'LOCATION : ',
 			logDispSuccess => 'Log displayed successfully.',
 			logList => 'Log List:',
 			loginAccount => 'Please login to your account using "'.FILE_NAMES->{loginScript}.'" script and try again.',
+			LoadingMountPoints => 'Loading information for all mount points. Please wait ...',
 		#------------------- M ----------------------------#
 			maxRetryCuttoff	=> 'Unable to set cut off as your maximum retry attempts reached.',	
 			maxRetry	=> 'Your Maximum retry attempts reached. Please try again.',	
@@ -319,6 +326,8 @@ use constant CONST => {
 			maxRetryEmailID		=> 'Your maximum attempt to enter Email ID has reached.',	
 			maxRetryattempt		=> 'Maximum retry attempts reached.',
 			multiUserConfirm => 'Multiple users are using this script package. Do you really want to continue with uninstall operation(y/n)?',
+			mountPointNotExist => 'Mount point does not exist. Please try again.',
+			mountPointDoesntPermission => 'Mount point does not have sufficient permissions. Please try again.',
 		#------------------- N ----------------------------#
 			permissionIssue => 'No proper permission',
 			NoOpRng	=>	'No Schedule Backup/Restore Job is running.',
@@ -332,9 +341,7 @@ use constant CONST => {
 			noSchJob	=> 'There is no scheduled',
 			noChangeServicePath => 'Your service directory remains ',
 			noLogs => 'No logs found. Please try again.',
-
 			noPermissionToKill => sub { return qq{System user [$_[0]] does not have sufficient permission to stop the on going Backup/Restore process. Please run this script in privileged user mode to perform the cleanup.}},
-
 #			noServicePath	=> 'Service directory does not exists. Please run Account_Setting.pl script... ',
 		#------------------- O ----------------------------#
 			operationNotcomplete => 'Operation could not be completed.',
@@ -425,6 +432,7 @@ use constant CONST => {
 			SetBackupListSch   =>      'Setting up your Default Schedule Backupset File as BackupsetFile.txt...',
 			SetRestoreList	=>	'Setting up your Default Manual Restoreset File as RestoresetFile.txt...',
 			SetRestoreListSch  =>      'Setting up your Default Schedule Restoreset File as RestoresetFile.txt...',
+			SetLocalBackupList  =>      'Setting up your Default Manual Local Backupset File as BackupsetFile.txt...',
 			SetFullExclList	=>	'Setting up your Default Full Exclude list File as FullExcludeList.txt...',
 			SetParExclList	=>	'Setting up your Default Partial Exclude list File as PartialExcludeList.txt...',
 			SetRgxExcludeList	=>	'Setting up your Default Regex Exclude list File as RegexExcludeList.txt...',
@@ -445,8 +453,11 @@ use constant CONST => {
 			selectRestoreFromLoc => 'Select Restore From Location from list below :',
 			backupLocationConfigAgain	=> 'Invalid Backup Location. Please Edit your Backup Location using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 			restoreFromLocationConfigAgain	=> 'Invalid Restore From Location. Please Edit your Restore From Location using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
-			restoreFromLocationNotFound	=> 'Restore From Location not found. Please logout and re-configure your account freshly uisng '.FILE_NAMES->{accountSettingsScript}.' and try again.',
+			restoreFromLocationNotFound	=> 'Restore From Location not found. Please logout and re-configure your account freshly using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 			scriptRemoved => sub { return qq{Your $_[0] scripts has been removed successfully.}},			
+			selectMountPoint => 'Select the mount point you want to backup in, from the list mentioned below:',
+			selectedMountNoPerm => 'Selected device does not have permission to write.',
+			serverRootNotFound => 'Your account not configured for express backup. Please logout and re-configure your account freshly using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 		#------------------- T ----------------------------#
 			TotalBckCnsdrdFile	=>	'Files considered for backup : ',
 			TotalBckFile	=>	'Files backed up now : ',
@@ -488,6 +499,7 @@ use constant CONST => {
 			updatingScripts => 'Updating scripts. Please wait...',
 			noServiceLoc	=> 'unable to find service location, please re-configure your account.',
 			UnableToRemoveCron => 'Unable to remove the cron entries.',
+			UnableToFindMountPoint => 'Unable to find mount point. ',
 		#------------------- V ----------------------------#
 			verifyPvt	=>	'Verifying your encryption key...',
 			verifiedPvt	=>	'Verification of encryption key is successful',
@@ -532,6 +544,8 @@ use constant CONST => {
 			YourAuthFailed => 'Authentication Failed.',
 			YourMaxAttemptReached => 'Your maximum attempt reached.',
 			YourHostnameEmpty => 'Your hostname is empty. Please provide the hostname and try again.',
+			YouSelectedBkpLoc => sub { return qq{Your selected mount point to backup your data is '$_[0]'.}},
+			YourPreviousMountPoint => sub { return qq{Your previous mount point is '$_[0]'. Do you want to edit(y/n)?}},
 		#------------------- Z ----------------------------#
 			zippedPackageNotLatest => "Zipped package has version lower than current version. Do you really want to update(y/n)?",
 		

@@ -17,7 +17,7 @@ my @scheduledJobs = ();
 my $unlinkPidFile=0;
 my %idriveUserInfo = ();
 
-my @fileNames = ('Account_Setting.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','Login.pl','Logout.pl','Operations.pl','readme.txt','Restore_Script.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','Edit_Supported_Files.pl','View_Log.pl','Uninstall_Script.pl','.updateVersionInfo','.serviceLocation','freshInstall','.forceupdate','wgetLog.txt','Configuration.pm', 'Helpers.pm','IxHash.pm', 'job_termination.pl', 'Strings.pm');
+my @fileNames = ('Account_Setting.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','Login.pl','Logout.pl','Operations.pl','readme.txt','Restore_Script.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','Edit_Supported_Files.pl','View_Log.pl','Uninstall_Script.pl','.updateVersionInfo','.serviceLocation','freshInstall','.forceupdate','wgetLog.txt','Configuration.pm', 'Helpers.pm','IxHash.pm', 'job_termination.pl', 'Strings.pm','express_backup.pl');
 
 system("clear");
 loadUserData();
@@ -157,7 +157,7 @@ sub getAllRunningJobsPids
 {
 	$pidsToBeKilled = ' ';
 	foreach my $usrProfileDir (@idriveUsersList)  {
-		my @userJobpath = ( "$usrProfileDir/Backup/Scheduled/", "$usrProfileDir/Restore/Scheduled/", "$usrProfileDir/Backup/Manual/", "$usrProfileDir/Restore/Manual/");
+		my @userJobpath = ( "$usrProfileDir/Backup/Scheduled/", "$usrProfileDir/Restore/Scheduled/", "$usrProfileDir/Backup/Manual/", "$usrProfileDir/Restore/Manual/","$usrProfileDir/LocalBackup/Manual/" );
 		for(my $j=0; $j<=$#userJobpath; $j++)
 		{
 			$pidsToBeKilled .= getRunningJobPid($userJobpath[$j]);
@@ -253,6 +253,7 @@ sub removeScriptFiles
 sub removeScriptAndPackageDirectory 
 {
 	$scriptPathRemoved = 0;
+	$pwd = `pwd`;
 	if(isDirectoryEmpty($currentDir)) {
 		$rmCmd = "rm -rf '$currentDir'";	
 		$res = `$rmCmd`;
@@ -263,6 +264,9 @@ sub removeScriptAndPackageDirectory
 		my $idx = rindex($currentDir, "/");
 		$packagePath = substr($currentDir, 0, $idx+1);#Getting package path from script path
 		if($scriptPathRemoved and isDirectoryEmpty($packagePath)) {
+			if($pwd =~ /$packagePath/){
+				chdir("$packagePath/../");
+			}		
 			$rmCmd = "rm -rf '$packagePath'";
 			$res = `$rmCmd`;
 		}

@@ -22,11 +22,14 @@ else{
 			exit(0);
 	}
 }
-
-my $menu	=	{'Backup'  => {1 => ["Edit your Manual Backupset File","$backupsetFilePath"], 2 => ["Edit your Scheduled Backupset File","$backupsetSchFilePath"]},
-			 'Restore' => {6 => ["Edit your Manual Restoreset File","$RestoresetFile"], 7 => ["Edit your Scheduled Restoreset File","$RestoresetSchFile"]},
-			 'Exclude' => {3 => ["Edit your FullExcludeList File","$excludeFullPath"], 4 => ["Edit your PartialExcludeList File","$excludePartialPath"], 5 => ["Edit your RegexExcludeList File","$regexExcludePath"]}
+$menu	=	{'1.Backup'  => {1 => ["Edit your Manual Backupset File","$backupsetFilePath"], 2 => ["Edit your Scheduled Backupset File","$backupsetSchFilePath"]},
+				'2.Express Backup' => {3 => ["Edit your Express Backupset File","$localBackupsetFilePath"]},
+				'3.Exclude' => {4 => ["Edit your FullExcludeList File","$excludeFullPath"], 5 => ["Edit your PartialExcludeList File","$excludePartialPath"], 6 => ["Edit your RegexExcludeList File","$regexExcludePath"]},
+				'4.Restore' => {7 => ["Edit your Manual Restoreset File","$RestoresetFile"], 8 => ["Edit your Scheduled Restoreset File","$RestoresetSchFile"]}			 
+				
 			};
+@menuArray = ['1.Backup','2.Express Backup','3.Exclude','4.Restore'];
+		
 my $filePermission = 0777;
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations Start ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 START:
@@ -37,7 +40,7 @@ print $lineFeed.Constants->CONST->{'EnterChoice'};
 my $userChoice = <STDIN>;
 Chomp(\$userChoice);
 $userChoice =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-my $keyName = returnKeyName($userChoice,['Backup','Exclude','Restore']);#userChoice and array of keyname to be returned
+my $keyName = returnKeyName($userChoice,@menuArray);#userChoice and array of keyname to be returned
 unless ($keyName){
 	print $lineFeed.Constants->CONST->{'InvalidChoice'}.Constants->CONST->{'TryAgain'}.$lineFeed;
 	exit(0);

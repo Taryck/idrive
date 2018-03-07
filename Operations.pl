@@ -125,7 +125,7 @@ operations();
 sub operations
 {
 	my @param = readParamNcronEntryFromOperationsFile();
-	chomp (my $operationName = shift(@param));
+	chomp (our $operationName = shift(@param));
 	#print "operationName:$operationName#\n\n";
 	chomp (@param) if ($operationName ne 'WRITE_TO_CRON');
 	($current_source,$progressSizeOp,$bwThrottle,$backupPathType) = ($param[3],$param[5],$param[7],$param[9]);
@@ -139,22 +139,24 @@ sub operations
 		readFromCrontab();
 		print @linesCrontab;
 		exit;
-	}elsif($operationName eq 'BACKUP_OPERATION'){
-		$jobType = q(BACKUP);
+	}
+	elsif($operationName eq 'BACKUP_OPERATION' or $operationName eq 'LOCAL_BACKUP_OPERATION'){
+		$jobType = q(backup);
+		$jobType = q(localBackup) if($operationName eq 'LOCAL_BACKUP_OPERATION');
 		getCurrentFileSet($param[1]);
 		our ($ctrf,$fileTransferCount) = readTransferRateAndCount();
 		$backupHost = $param[6];
 		getProgressDetais();
-		if($dedup eq 'on'){
-				BackupDedupOutputParse($param[0],$param[1],$param[4],$param[8],$fileTransferCount);
+		if($dedup eq 'on'){			
+			BackupDedupOutputParse($param[0],$param[1],$param[4],$param[8],$fileTransferCount);
 		} else {
-				BackupOutputParse($param[0],$param[1],$param[2],$param[4],$param[8],$fileTransferCount);
+			BackupOutputParse($param[0],$param[1],$param[2],$param[4],$param[8],$fileTransferCount);
 		}
 		subErrorRoutine($param[1]);
-		writeParameterValuesToStatusFile($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$exit_flag,$failedfiles_index);
-	
-	}elsif($operationName eq 'RESTORE_OPERATION'){
-		$jobType = q(RESTORE);
+		writeParameterValuesToStatusFile($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$exit_flag,$failedfiles_index);	
+	}
+	elsif($operationName eq 'RESTORE_OPERATION'){
+		$jobType = q(restore);
 		getCurrentFileSet($param[1]);
 		$restoreHost = $param[6];
         $restoreLocation = $param[7];
@@ -168,7 +170,8 @@ sub operations
 		subErrorRoutine($param[1]);
 		writeParameterValuesToStatusFile($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$exit_flag,$failedfiles_index);
 
-	}else{
+	}
+	else{
 		traceLog("\nfunction not in this file\n", __FILE__, __LINE__);
         return 0;
 	}
@@ -182,15 +185,15 @@ sub operations
 #****************************************************************************************************
 sub readParamNcronEntryFromOperationsFile{
 	if (-e $temp_file){
-                if(!open(TEMP_FILE, "<",$temp_file)){
-                        $errStr = "Could not open file temp_file in Child process: $temp_file, Reason:$!";
-                        traceLog($errStr, __FILE__, __LINE__);
-                        return 0;
-                }
-                my @linestemp_file = <TEMP_FILE>;
-                close TEMP_FILE;
+		if(!open(TEMP_FILE, "<",$temp_file)){
+			$errStr = "Could not open file temp_file in Child process: $temp_file, Reason:$!";
+			traceLog($errStr, __FILE__, __LINE__);
+			return 0;
+		}
+		my @linestemp_file = <TEMP_FILE>;
+		close TEMP_FILE;
 		return @linestemp_file;
-        }
+    }
 }
 #****************************************************************************************************
 #Subroutine Name        : getCurrentFileSet
@@ -259,6 +262,12 @@ sub BackupOutputParse
 	my $currentSize = 0;
 	my $progressDetailsFilePath = "$jobRunningDir/PROGRESS_DETAILS_BACKUP";	
 	my $cumulativeDataTransRate = 0;
+
+	if($operationName eq 'BACKUP_OPERATION'){
+		$initialSlash = '/';
+	} else {
+		$initialSlash = '';
+	}
 	
 	if(open(OUTFILE, ">> $outputFilePath")){
 		chmod $filePermission, $outputFilePath;
@@ -325,7 +334,7 @@ sub BackupOutputParse
 			my $tmpLine = $resultList[$cnt];
 			my @fields = split("\\] \\[",$tmpLine, $fields_in_progress);
 			my $total_fields = @fields;
-			
+
 			if($total_fields >= $fields_in_progress) {
 				$fields[0] =~ s/^.//; # remove starting character [ from first field
 				$fields[$fields_in_progress-1] =~ s/.$//; # remove last character ] from last field
@@ -336,22 +345,23 @@ sub BackupOutputParse
 				$fields[1] =~ s/[\D]+//g;
 				$fields[$fields_in_progress-2] =~ s/^\s+//;
 				
-				my $keyString = "$pathSeparator$fields[$fields_in_progress-1]";
+				my $keyString = "$initialSlash$fields[$fields_in_progress-1]";
 				my $fileSize = convertFileSize($fields[1]);
-				$backupType = $fields[$fields_in_progress-2];
+				my $fileBackupType = $fields[$fields_in_progress-2]; 
+				$backupType = $fileBackupType;
 				$backupType =~ s/FILE IN//;
 				$backupType =~ s/\s+//;
 				
 				my $backupFinishTime = localtime;
 				my $pKeyString = $keyString;
 				
-				if(($relative eq NORELATIVE) and ($fields[$fields_in_progress-2] eq "FULL" or $fields[$fields_in_progress-2] eq "INCREMENTAL")) {
+				if(($relative eq NORELATIVE) and ($fileBackupType eq "FULL" or $fileBackupType eq "INCREMENTAL")) {
 					my $indx = rindex ($pKeyString, '/');
 					$pKeyString = substr($pKeyString, $indx);
 				}
 					
 				if($tmpLine =~ m/$operationComplete/) { 
-					if($fields[$fields_in_progress-2] eq "FILE IN SYNC") { 		# check if file in sync
+					if($fileBackupType eq "FILE IN SYNC") { 		# check if file in sync
 						$fileSyncCount++;
 						if(defined($fileSetHash{$keyString})) {
 							$fileSetHash{$keyString} = 1;
@@ -359,7 +369,7 @@ sub BackupOutputParse
 							$fullPath = getFullPathofFile($keyString);
 						}	
 					}
-					elsif($fields[$fields_in_progress-2] eq "FULL" or $fields[$fields_in_progress-2] eq "INCREMENTAL") {  	# check if file is backing up as full or incremental
+					elsif($fileBackupType eq "FULL" or $fileBackupType eq "INCREMENTAL") {  	# check if file is backing up as full or incremental
 						$fileBackupCount++;
 						if(defined($fileSetHash{$keyString})) {
 							$fileSetHash{$keyString} = 1;
@@ -373,7 +383,6 @@ sub BackupOutputParse
 					}
 					$parseCount++;
 				} 
-				
 			
 				if($totalSize eq Constants->CONST->{'CalCulate'}) {
 					if(open(FILESIZE, "<$fileForSize")) {
@@ -480,6 +489,32 @@ sub BackupDedupOutputParse
 	my $progressDetailsFilePath = "$jobRunningDir/PROGRESS_DETAILS_BACKUP";	
 	my $cumulativeDataTransRate = 0;
 	
+	if($operationName eq 'BACKUP_OPERATION'){
+		$syncFieldsInProgress = 21;
+		$syncBkpTypePos  = 4;
+		$syncTrfPos   = 8;
+		$syncFNamePos = 2;
+		
+		$fullFieldsInProgress = 23;
+		$fullBkpTypePos  = 6;
+		$fullTrfPos   = 10;
+		$fullFNamePos = 2;
+		
+		$initialSlash = '/';
+	} else {
+		$syncFieldsInProgress = 27;
+		$syncBkpTypePos  = 10;
+		$syncTrfPos   = 14;
+		$syncFNamePos = 2;
+		
+		$fullFieldsInProgress = 31;
+		$fullBkpTypePos  = 14;
+		$fullTrfPos   = 18;
+		$fullFNamePos = 2;
+		
+		$initialSlash = '';
+	}
+	
 	if(open(OUTFILE, ">> $outputFilePath")){
 		chmod $filePermission, $outputFilePath;
 	}
@@ -529,7 +564,7 @@ sub BackupDedupOutputParse
 			$buffer = $lastLine . $buffer;
 		}
 		
-		my @resultList = split /\n/, $buffer;
+		my @resultList = split /\n/, $buffer;		
 		my $bufIndex = @resultList;
 		
 		if($buffer !~ /\n$/) {      #keep last line of buffer only when it not ends with newline.
@@ -543,20 +578,21 @@ sub BackupDedupOutputParse
 		for(my $cnt = 0; $cnt < $bufIndex; $cnt++) {
 			my $tmpLine = $resultList[$cnt];
 			if($tmpLine =~ /FILE IN SYNC/) {
-				$fields_in_progress = 21;
-				$typePos = 4;
-				$trfPos  = 8;
+				$fields_in_progress = $syncFieldsInProgress;
+				$typePos  = $syncBkpTypePos;
+				$trfPos   = $syncTrfPos;
+				$fNamePos = $syncFNamePos;
 			} elsif($tmpLine =~ /FULL/ or $tmpLine =~ /INCREMENTAL/) {
-				$fields_in_progress = 23;
-				$typePos  = 6;
-				$trfPos   = 10;
+				$fields_in_progress = $fullFieldsInProgress;
+				$typePos  = $fullBkpTypePos;
+				$trfPos   = $fullTrfPos;
+				$fNamePos = $fullFNamePos;
 			}
 			
 			my @fields = split("\"",$tmpLine,$fields_in_progress);
 			my $total_fields = @fields;
-		
 			if($total_fields >= $fields_in_progress) {
-				my $keyString = "$pathSeparator$fields[$fields_in_progress-2]";
+				my $keyString = $initialSlash.$fields[($fields_in_progress-$fNamePos)];
 				my $fileSize = convertFileSize($fields[3]);
 				$backupType = $fields[($fields_in_progress-$typePos)];
 				$backupType =~ s/FILE IN//;
@@ -591,7 +627,7 @@ sub BackupDedupOutputParse
 					}
 					$parseCount++;
 				} 
-							
+				
 				if($totalSize eq Constants->CONST->{'CalCulate'}) {
 					if(open(FILESIZE, "<$fileForSize")) {
 						$totalSize = <FILESIZE>;
@@ -819,7 +855,7 @@ sub checkretryAttempt
 	
 	@linesBackupErrorFile = <TEMPERRORFILE>;
 	close TEMPERRORFILE;
-
+	traceLog(@linesBackupErrorFile, __FILE__, __LINE__);
 	chomp(@linesBackupErrorFile);
 	for(my $i = 0; $i<= $#linesBackupErrorFile; $i++) {
 		$linesBackupErrorFile[$i] =~ s/^\s+|\s+$//g;
@@ -844,7 +880,7 @@ sub checkretryAttempt
 				$jn= 'scheduled' if ($flagToCheckSchdule);
 				my $jobTerminationPath = $currentDir.'/'.Constants->FILE_NAMES->{jobTerminationScript}; 
 				system("perl \'$jobTerminationPath\' \'$jn\_$jobType\' \'$userName\' 1>/dev/null 2>/dev/null");
-			
+
 				$exit_flag = "1-$errStr";
 				unlink($pwdPath) if($errStr =~ /password mismatch|encryption verification failed/i);
 				return 0;
@@ -936,6 +972,7 @@ sub getFinalErrorFile
 				#try to find a match between start and end point of error file
 				for(;$j <= $last_index; $j++){
 					if($individual_errorfileContents[$j] =~ /$failedfile/){
+						chomp($individual_errorfileContents[$j]);
 						$individual_errorfileContents[$j] =~ s/\s+\[$failedfile\]/\./;
 						print ERROR_FINAL "[".(localtime)."] [FAILED] [$failedfiles_array[$i]] Reason : $individual_errorfileContents[$j]".$lineFeed;
 						$matched = 1;

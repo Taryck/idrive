@@ -24,14 +24,17 @@ else{
 	}
 }
 
-my $menu        =       {'Backup'  => {1 => ["View logs for Manual Backup","$usrProfileDir/Backup/Manual/LOGS"],
-				       2 => ["View logs for Scheduled Backup","$usrProfileDir/Backup/Scheduled/LOGS"]},
-                         'Restore' => {3 => ["View logs for Manual Restore","$usrProfileDir/Restore/Manual/LOGS"], 
-				       4 => ["View logs for Scheduled Restore","$usrProfileDir/Restore/Scheduled/LOGS"]},
-                        };
+$menu  = {'1.Backup'  => {1 => ["View logs for Manual Backup","$usrProfileDir/Backup/Manual/LOGS"],
+				2 => ["View logs for Scheduled Backup","$usrProfileDir/Backup/Scheduled/LOGS"]},
+			'2.Express Backup'  => {3 => ["View logs for Express Backup","$usrProfileDir/LocalBackup/Manual/LOGS"]},
+			'3.Restore' => {4 => ["View logs for Manual Restore","$usrProfileDir/Restore/Manual/LOGS"], 
+				5 => ["View logs for Scheduled Restore","$usrProfileDir/Restore/Scheduled/LOGS"]}			
+			};
+@menuArray = ['1.Backup','2.Express Backup','3.Restore'];
+			
 my @columnNames = (['S.No.','Time & Date','Status'],[8,30,7]);#Contains two annonymous array one contais table header conter and other spaces related to that.
 my $displayDateMenu = ['1) Last one week','2) Last two weeks','3) Last 30 days','4) Selected date range'];
-my ($maxRangeForMenuChoice,$maxRangeForViewLogChoice) = (4,4);
+my ($maxRangeForMenuChoice,$maxRangeForViewLogChoice) = (5,4);
 my %optionwithLogName = (); 
 my $currentEpochtime = time();
 #++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operation Start ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -41,7 +44,7 @@ print $lineFeed.Constants->CONST->{'EnterChoice'};
 my $userChoice = <STDIN>;
 Chomp(\$userChoice);
 $userChoice =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-my $keyName = ($userChoice <= $maxRangeForMenuChoice) ? returnKeyName($userChoice,['Backup','Restore']) : q();
+my $keyName = ($userChoice <= $maxRangeForMenuChoice) ? returnKeyName($userChoice,@menuArray) : q();
 unless ($keyName){
         print $lineFeed.Constants->CONST->{'InvalidChoice'}.Constants->CONST->{'TryAgain'}.$lineFeed;
         exit(0);
@@ -204,7 +207,7 @@ sub displayLogList{
 #Added By                : Abhishek Verma.
 #****************************************************************************/
 sub openViEditor {
-        my $fileLocation = $_[0]->{$_[1]}->{$_[2]}->[1].'/'.$optionwithLogName{$_[3]};
+    my $fileLocation = $_[0]->{$_[1]}->{$_[2]}->[1].'/'.$optionwithLogName{$_[3]};
 	print $lineFeed.Constants->CONST->{'viClosureMessage'}.$lineFeed;
 	print $lineFeed.Constants->CONST->{'logOpeningMessage'}.$lineFeed;
 	holdScreen2displayMessage(4);	
@@ -272,7 +275,7 @@ sub isLogFilesPresent{
 		print $lineFeed.Constants->CONST->{'noLogs'}.$lineFeed;
 		traceLog($whiteSpace.Constants->CONST->{'noLogs'}.$lineFeed, __FILE__, __LINE__);
 		exit(0);
-	}	
+	}
 }
 
 sub checkDateValidity{

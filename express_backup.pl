@@ -34,7 +34,7 @@ my $cancelFlag = 0;
 my %backupExcludeHash = (); #Hash containing items present in Exclude List#
 my $backupUtfFile = '';
 
-my $maxNumRetryAttempts = 50;
+my $maxNumRetryAttempts = 5;
 my $totalSize = 0;
 my $BackupsetFileTmp = "";
 my $regexStr = '';
@@ -51,7 +51,7 @@ my $prevTime = time();
 my $relativeFileset = "BackupsetFile_Rel";
 my $filesOnly = "BackupsetFile_filesOnly";
 my $noRelativeFileset = "BackupsetFile_NoRel";
-$jobType = "Backup";
+$jobType = "LocalBackup";
 #my $DefaultSet = undef; This variable is not used at any place in the script.
 
 # Index number for arrayParametersStatusFile
@@ -101,14 +101,14 @@ my $perlPath = `which perl`;
 chomp($perlPath);	
 if($perlPath eq ''){
 	$perlPath = '/usr/local/bin/perl';
-}	
+}
 ###################################################
 #The signal handler invoked when SIGINT or SIGTERM#
 #signal is received by the script                 #
 ###################################################
 sub process_term()
 {
-    	#traceLog("$lineFeed Inside process_term--------------------- $lineFeed", __FILE__, __LINE__);
+    #traceLog("$lineFeed Inside process_term--------------------- $lineFeed", __FILE__, __LINE__);
 	my $signame = shift;
 	unlink($pidPath);
 	cancelSubRoutine();
@@ -123,7 +123,7 @@ if(-e $confFilePath) {
 
 getConfigHashValue();
 loadUserData();
-my $BackupsetFile = $backupsetFilePath;
+my $BackupsetFile = $localBackupsetFilePath;
 
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
@@ -157,8 +157,8 @@ if(${ARGV[0]} eq "SCHEDULED") {
 	}
 	else{
 		if(getLoginStatus($pwdPath)){
-                        exit(0);
-                }
+            exit(0);
+        }
 	}
 
 	backupTypeCheck();
@@ -168,9 +168,23 @@ if (! checkIfEvsWorking($dedup)){
         print Constants->CONST->{'EvsProblem'}.$lineFeed;
         exit 0;
 }
+if($dedup eq 'on' and !$serverRoot){
+	print Constants->CONST->{'verifyAccount'}.$lineFeed;
+	%evsDeviceHashOutput = getDeviceList();
+	if(exists($evsDeviceHashOutput{uid}->{$uniqueID})){
+		my %serverRootHash = reverse(%{$evsDeviceHashOutput{server_root}});
+		$serverRoot  = $serverRootHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
+		putParameterValue(\"SERVERROOT",\"$serverRoot",$confFilePath);
+	}
+
+	if(!$serverRoot){
+		print Constants->CONST->{'serverRootNotFound'}.$lineFeed.$lineFeed;
+		exit;
+	}
+}
 #traceLog("$lineFeed File: $curFile ---------------------------------------- $lineFeed", __FILE__, __LINE__);
 #Getting working dir path and loading path to all other files
-$jobRunningDir = "$usrProfilePath/$userName/Backup/$taskType";
+$jobRunningDir = "$usrProfilePath/$userName/$jobType/$taskType";
 
 if(!-d $jobRunningDir) {
 	mkpath($jobRunningDir);
@@ -180,7 +194,7 @@ exit 1 if(!checkEvsStatus(Constants->CONST->{'BackupOp'}));
 #Checking if another job is already in progress
 $pidPath = "$jobRunningDir/pid.txt";
 if(!pidAliveCheck()) {
-	$pidMsg = "$jobType job is already in progress. Please try again later.\n";
+	$pidMsg = "Express backup is already in progress. Please try again later.\n";
 	print $pidMsg;
 	traceLog($pidMsg, __FILE__, __LINE__);
 	exit 1;
@@ -201,11 +215,17 @@ my $incSize = "$jobRunningDir/transferredFileSize.txt";
 my $trfSizeAndCountFile = "$jobRunningDir/trfSizeAndCount.txt";
 $excludeDirPath  = "$jobRunningDir/Excluded";
 $excludedLogFilePath  = "$excludeDirPath/excludedItemsLog.txt";
+my $mountPointFilePath = "$jobRunningDir/mountPoint.txt";
 $errorDir = $jobRunningDir."/ERROR";
-                      
+                     
 # pre cleanup for all intermediate files and folders.
 `rm -rf '$relativeFileset'* '$noRelativeFileset'* '$filesOnly'* '$info_file' '$retryinfo' '$errorDir' '$statusFilePath' '$excludeDirPath' '$incSize' '$failedfiles'*`;
 unlink($progressDetailsFilePath);
+
+our $mountedPath = getMountedPath();
+our $IDriveLocal = "$mountedPath/IDriveLocal";
+our $localUserPath = "$IDriveLocal/$userName";
+
 #Start creating required file/folder
 if(!-d $errorDir) {
 	mkdir($errorDir);
@@ -216,6 +236,7 @@ if(!-d $excludeDirPath) {
 	mkdir($excludeDirPath);
 	chmod $filePermission, $excludeDirPath;
 }
+	
 #getParameterValue(\"PASSWORD",\$hashParameters{PASSWORD});
 #my $encType = checkEncType($flagToCheckSchdule); # This function has been called inside getOperationFile() function.
 my $maximumAttemptMessage = '';
@@ -239,7 +260,7 @@ if ($flagToCheckSchdule == 0 and $silentBackupFlag == 0){
 #	$deviceID = (split('#',$backupHost))[0];
 #}
 $location = (($dedup eq 'on') and $backupHost =~ /#/)?(split('#',$backupHost))[1]:$backupHost;
-getCursorPos() if ($flagToCheckSchdule == 0 and $silentBackupFlag == 0);
+getCursorPos() if ($flagToCheckSchdule == 0 and $silentBackupFlag == 0);	
 $mail_content_head = writeLogHeader($flagToCheckSchdule);
 startBackup();
 exit_cleanup($errStr);
@@ -255,7 +276,8 @@ sub startBackup {
 	loadFullExclude();
 	loadPartialExclude();
 	loadRegexExclude();
-	
+	createLocalBackupDir(); #Creating the local backup location directories
+	createDBPathsXmlFile();	
 	$generateFilesPid = fork();
 
 	if(!defined $generateFilesPid) {
@@ -405,7 +427,7 @@ sub generateBackupsetFiles {
 			if($excludedCount == EXCLUDED_MAX_COUNT) {
 				$excludedCount = 0;
 				createExcludedLogFile30k();
-			}
+			}			
 			next;
 		}
 		Chomp(\$item);		
@@ -597,7 +619,7 @@ sub enumerate {
 		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$item]. Reason: $!".$lineFeed;
 		$excludedCount++;
 		traceLog("Could not open Dir $item, Reason:$!", __FILE__, __LINE__);
-	}	
+	}
 	if($excludedCount == EXCLUDED_MAX_COUNT) {
 		$excludedCount = 0;
 		createExcludedLogFile30k();
@@ -624,7 +646,7 @@ sub cancelSubRoutine()
 		exit 0;
 	} 
 	waitpid($generateFilesPid,0);
-	if($totalFiles == 0 or $totalFiles !~ /\d+/) {
+	if(-e $info_file and ($totalFiles == 0 or $totalFiles !~ /\d+/)) {
 		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
 		$totalFiles = `$fileCountCmd`; 
 		$totalFiles =~ s/TOTALFILES//;
@@ -634,7 +656,7 @@ sub cancelSubRoutine()
 		traceLog(" Unable to get total files count \n", __FILE__, __LINE__);
 	}
 	
-	if($nonExistsCount == 0) {
+	if($nonExistsCount == 0 and -e $info_file) {
 		my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
 		$nonExistsCount = `$nonExistCheckCmd`; 
 		$nonExistsCount =~ s/FAILEDCOUNT//;
@@ -660,7 +682,6 @@ sub cancelSubRoutine()
 			}
 		}
 	}
-	
 	waitpid($pid_OutputProcess, 0);
 	exit_cleanup($errStr);
 }
@@ -687,6 +708,7 @@ sub loadFullExclude {
 	
 	push @excludeArray, $currentDir;
 	push @excludeArray, $idriveServicePath;
+	push @excludeArray, $IDriveLocal;
 	my @qFullExArr; # What is the use of this variable.
 	chomp @excludeArray;
 
@@ -892,6 +914,7 @@ sub exit_cleanup {
 sub checkForExclude {
 	my $element = $_[0];
 	my $returnvalue = 0;
+	
 	###$element the last slash needs to be removed before comparing with hash for full exclude
 	if(exists $backupExcludeHash{$element} or $element =~ m/$fullStr/) {
 		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Full path excluded item.$lineFeed";
@@ -910,7 +933,6 @@ sub checkForExclude {
 		$excludedCount = 0;
 		createExcludedLogFile30k();
 	}
-
 	return $returnvalue;
 }
 
@@ -990,7 +1012,7 @@ sub doBackupOperation()
 	my $parameters = $_[0];
 	#@parameter_list = split / /,$parameters,3;
 	@parameter_list = split /\' \'/,$parameters,3;
-	$backupUtfFile = getOperationFile(Constants->CONST->{'BackupOp'}, $parameter_list[2] ,$parameter_list[1] ,$parameter_list[0]);
+	$backupUtfFile = getOperationFile(Constants->CONST->{'LocalBackupOp'}, $parameter_list[2] ,$parameter_list[1] ,$parameter_list[0]);
 
 	if(!$backupUtfFile) {
 		traceLog("$errStr", __FILE__, __LINE__);
@@ -1012,7 +1034,7 @@ sub doBackupOperation()
 		return BACKUP_PID_FAIL;
 	}
 	
-	if($backupPid == 0) {	
+	if($backupPid == 0) {
 		if( -e $pidPath) {
 			exec($idevsutilCommandLine);
 			$errStr = Constants->CONST->{'DoRstOpErr'}.Constants->CONST->{'ChldFailMsg'};
@@ -1060,8 +1082,9 @@ sub doBackupOperation()
 		$tmpBackupHost =~ s/\'/\'\\''/g;	
 		$fileChildProcessPath = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
 #		$ENV{'OPERATION_PARAM'}=join('::',($tmp_jobRunningDir,$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$curLines,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType,$errorDevNull));
-		my @param = join ("\n",('BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$curLines,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType));
+		my @param = join ("\n",('LOCAL_BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$curLines,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType));
 		writeParamToFile("$tmp_jobRunningDir/operationsfile.txt",@param);
+		traceLog("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");
 		exec("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");		
 		$errStr = Constants->CONST->{'bckProcessFailureMsg'};
 		
@@ -1073,7 +1096,7 @@ sub doBackupOperation()
 		}
 		else {
 			traceLog(Constants->CONST->{'FileOpnErr'}.$whiteSpace.$errorFilePath."1 Reason :$! $lineFeed", __FILE__, __LINE__);
-		}
+		}		
 		
 		exit 1;
 	}
@@ -1240,4 +1263,274 @@ sub updateRetryCount()
 	#assign the latest backedup and synced value to prev.
 	$prevFailedCount = $curFailedCount;
 	$prevTime = $currentTime;
+}
+
+#*********************************************************************************************************
+#Subroutine Name        : getMountedPath 
+#Objective              : This function will return mounted devices list
+#Added By               : Senthil Pandian.
+#*********************************************************************************************************/
+sub getMountedPath
+{
+	our @linkDataList = ();
+	my @mountedPath  = ();
+	my @mountedPathPermission = ();
+	my @fullPathSystemMountPoints = ('/','/dev','/boot','/home','/run','/tmp','/.snapshots','/srv','/opt');
+	my @partPathSystemMountPoints = ('/boot/','/dev/','/sys/','/usr/','/var/','/opt/');
+	
+	my $cmd = "df -k | grep -v Filesystem";
+	my $res = `$cmd`;
+	
+	if($res ne ''){
+		@resData = split("\n", $res);	
+		foreach(@resData) {
+			my @mountArray = (split(/[\s\t]+/, $_,6));
+			my $path = $mountArray[5];
+			my $volumeSize = $mountArray[1]; #size in KB; 512000=500M
+			#if(!-e $path."/System Volume Information/IndexerVolumeGuid" or $path eq '/'){
+			#	next;
+			#}
+			my @matches = grep { /^$path$/ } @fullPathSystemMountPoints;
+			if(scalar(@matches)>0 or $volumeSize<512000){
+				next;
+			}
+			my $matched = 0;
+			foreach(@partPathSystemMountPoints) {
+				my $element = $_;
+				if($path =~ /$element/){
+					$matched = 1;
+					last;			
+				}		
+			}
+			if($matched == 1){ 
+				next; 
+			}		
+			
+			if(-w $path){
+				$permissionMode = 'Writeable';
+			} elsif(-r $path){
+				$permissionMode = 'Read-only';
+			} else {
+				$permissionMode = 'No access';			
+			}
+			push (@mountedPath,$path);
+			push (@mountedPathPermission,$permissionMode);			
+		}
+	}
+	
+	print $lineFeed.$lineFeed.Constants->CONST->{'LoadingMountPoints'}.$lineFeed.$lineFeed;
+	if(scalar(@mountedPath)>0){
+		print Constants->CONST->{'selectMountPoint'}.$lineFeed;
+		my @mountPointcolumnNames = (['S.No','Mount Point','Permissions'],[8,30,15]);
+		my $tableHeader = getTableHeader(@mountPointcolumnNames);
+		my ($tableData,$columnIndex,$serialNumber,$index) = ('',1,1,0);
+		
+		foreach (@mountedPath){
+			$columnIndex = 1;
+			
+			my $mountDevicePath     = $_;
+			my $mountDevicePathPerm = $mountedPathPermission[$index];
+			$index++;
+			$tableData .= $serialNumber;
+			$tableData .= (' ') x ($mountPointcolumnNames[1]->[0] - length($serialNumber));
+	
+			$mountDevicePath = trimData($mountDevicePath,$mountPointcolumnNames[1]->[$columnIndex]) if($columnIndex == 1 or $columnIndex == 3);
+			$tableData .= $mountDevicePath;
+			$tableData .= (' ') x ($mountPointcolumnNames[1]->[$columnIndex] - length($mountDevicePath));
+			$tableData .= $mountDevicePathPerm;
+			$columnIndex++;
+			$tableData .= $lineFeed;
+			$serialNumber += 1;
+			push (@linkDataList,$_);
+		}
+		if ($tableData ne ''){
+			print $tableHeader.$tableData;
+		}		
+	} else {
+		print Constants->CONST->{'UnableToFindMountPoint'};
+		#print 'Please check whether the external disk mounted properly or not.'.$lineFeed;
+	}
+	
+	if(scalar(@linkDataList)>0){
+		my $retryCount = 4;
+		my $userChoice = getUserMenuChoice(scalar(@linkDataList),$retryCount,'Enter the S.No. to select mount point [Note: press \'q\' in case your mount point is not listed above]:','mount');
+		if($userChoice eq 'q' or $userChoice eq 'Q'){
+			@linkDataList = ();
+		} elsif($userChoice ne '') {
+			$localBackupLocationPath = $userChoice;			
+		}
+	}
+	if(scalar(@linkDataList)<=0){
+		if(-e $mountPointFilePath and -s $mountPointFilePath>0){
+			if(!open(FD_READ, "<", $mountPointFilePath)) {
+				my $openErrStr = Constants->CONST->{'FileOpnErr'}." $mountPointFilePath to read, Reason:$!";
+				traceLog($openErrStr, __FILE__, __LINE__);
+			}
+			$localBackupLocationPath = <FD_READ>;			
+			close FD_READ;
+			chomp($localBackupLocationPath);
+			if(!-d $localBackupLocationPath or !-w $localBackupLocationPath){
+				$localBackupLocationPath ='';
+			}
+		}
+		if($localBackupLocationPath){
+			my $mountPointQuery = Constants->CONST->{'YourPreviousMountPoint'}->($localBackupLocationPath);
+			$choice = $userInput;		
+			unless (defined ($userInput)){
+				print $mountPointQuery;
+				$choice = getConfirmationChoice();
+			}
+			if($choice eq 'n' or $choice eq 'N'){
+				goto USEEXISTING;
+			}	
+			
+		} else {
+			my $mountPointQuery = Constants->CONST->{'doUwant2EnterMountPoint'};
+			$choice = $userInput;		
+			unless (defined ($userInput)){
+				print $mountPointQuery;
+				$choice = getConfirmationChoice();
+			}
+			
+			if($choice eq 'n' or $choice eq 'N'){
+				print $lineFeed.Constants->CONST->{'Exit'}.$lineFeed;
+				cancelProcess();
+			}
+		}
+		while ($maxNumRetryAttempts){
+			print $lineFeed.Constants->CONST->{'EnterMountPoint'};
+			$localBackupLocationPath = <STDIN>;
+			Chomp(\$localBackupLocationPath);chomp($localBackupLocationPath);
+			if(!-e "$localBackupLocationPath"){
+				print Constants->CONST->{'mountPointNotExist'}.$lineFeed;
+			} 
+			elsif(!-w "$localBackupLocationPath") {
+				print Constants->CONST->{'mountPointDoesntPermission'}.$lineFeed;
+			} 
+			else {
+				my $tempLoc = $localBackupLocationPath;
+				$tempLoc =~ s/^[\/]+|^[.]+//;
+				if(!$tempLoc) {
+					print Constants->CONST->{'InvalidMountPoint'}.$lineFeed;
+				} else {
+					last;
+				}
+			}
+			$maxNumRetryAttempts -= 1;
+		}
+		if ($maxNumRetryAttempts == 0){
+			print Constants->CONST->{'maxRetry'}.$lineFeed.$lineFeed;
+			cancelProcess();
+		}
+	}
+	print Constants->CONST->{'YouSelectedBkpLoc'}->($localBackupLocationPath).$lineFeed;
+	if($localBackupLocationPath =~ /[\/]$/){
+		chop($localBackupLocationPath);
+	}
+	
+	if(open(MOUNTPOINT, ">",$mountPointFilePath)){
+		print MOUNTPOINT $localBackupLocationPath;
+		close MOUNTPOINT;
+		chmod $filePermission, $mountPointFilePath;
+	} else {
+		my $openErrStr = Constants->CONST->{'FileOpnErr'}." : $mountPointFilePath, Reason $!".$lineFeed;
+		traceLog($openErrStr, __FILE__, __LINE__);
+	}
+USEEXISTING:	
+	return $localBackupLocationPath;
+}
+
+#*********************************************************************************************************
+#Subroutine Name        : createLocalBackupDir 
+#Objective              : This function will create the directories for local backup.
+#Added By               : Senthil Pandian.
+#*********************************************************************************************************/
+sub createLocalBackupDir{
+	if(!-d $IDriveLocal) {
+		if(!mkdir($IDriveLocal)){
+			print "Unable to create directory: $IDriveLocal. Reason:$!".$lineFeed;
+			cancelProcess();
+		}
+		chmod $filePermission, $IDriveLocal;
+	}
+	if(!-d $localUserPath) {
+		if(!mkdir($localUserPath)){
+			print "Unable to create directory: $localUserPath. Reason:$!".$lineFeed;
+			cancelProcess();
+		}
+		chmod $filePermission, $localUserPath;
+	}
+	
+	if($dedup eq 'on'){
+		$backupLocationDir  = "$localUserPath/$serverRoot";
+	} else {
+		$backupLocationDir  = "$localUserPath$backupHost";
+	}
+	
+	if(!-d $backupLocationDir) {
+		mkdir($backupLocationDir);
+		chmod $filePermission, $backupLocationDir;
+	}	
+}
+
+#****************************************************************************************************
+# Subroutine Name         : createDBPathsXmlFile.
+# Objective               : Creating DB paths XML file
+# Added By                : Senthil Pandian
+#*****************************************************************************************************/
+sub createDBPathsXmlFile
+{
+	$xmlFile = $localUserPath."/dbpaths.xml";
+	if ($dedup eq 'off'){
+		return;
+	}
+	if($backupHost and $backupDeviceID){
+		($actualDeviceID,$nickName) = ($backupDeviceID,$backupHost);		
+		$actualDeviceID =~ s/$deviceIdPostfix//;
+		$actualDeviceID =~ s/$deviceIdPrefix//;
+	} else {
+		print Constants->CONST->{'serverRootNotFound'}.$lineFeed.$lineFeed;
+		exit;
+	}
+	
+	$dbPath = "/LDBNEW/$serverRoot/$userName.ibenc";
+	if(-e $xmlFile and  -s $xmlFile>0){
+		open my $fh, '<', $xmlFile;
+		read $fh, my $oldXmlContent, -s $fh;
+		close $fh;
+		$xmlContent = '';
+		
+		if($oldXmlContent =~ /<dbpaths>/i){
+			my @xmlArray = split("\n",$oldXmlContent);
+			if(scalar(@xmlArray)>0){
+				$find = "serverroot=\"$serverRoot\"";
+				$isUpdated = 0;
+				foreach(@xmlArray){
+					$row = $_;
+					if($row =~ /<dbpathinfo/i and $row =~ /$find/i){
+						$row = '<dbpathinfo serverroot="'.$serverRoot.'" deviceid="'.$actualDeviceID.'" nickname="'.$nickName.'" dbpath="'.$dbPath.'" />';
+						$isUpdated = 1;
+					}					
+					if($row =~ /<\/dbpaths>/i){
+						last;
+					}
+					$xmlContent .= $row.$lineFeed;
+				}
+				if($isUpdated == 0){
+					$row = '<dbpathinfo serverroot="'.$serverRoot.'" deviceid="'.$actualDeviceID.'" nickname="'.$nickName.'" dbpath="'.$dbPath.'" />';
+					$xmlContent .= $row.$lineFeed;
+				}
+				$xmlContent .= '</dbpaths>'.$lineFeed;
+			}
+		}
+	} else {
+		$xmlContent  = '<?xml version="1.0" encoding="utf-8"?>'.$lineFeed;
+		$xmlContent .= '<dbpaths>'.$lineFeed;
+		$xmlContent .= '<dbpathinfo serverroot="'.$serverRoot.'" deviceid="'.$actualDeviceID.'" nickname="'.$nickName.'" dbpath="'.$dbPath.'" />'.$lineFeed;
+		$xmlContent .= '</dbpaths>'.$lineFeed;
+	}	
+	open XMLFILE, ">", $xmlFile or (print "Unable to create file: $xmlFile, Reason:$!" and die);
+	print XMLFILE $xmlContent;
+	close XMLFILE;
+	chmod $filePermission, $xmlFile;
 }

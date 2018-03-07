@@ -1,10 +1,9 @@
-﻿								IDrive for Linux
+								IDrive for Linux
 								=================
 
 I. INTRODUCTION
 ================
-Backup and protect your Linux machine data using scripts bundle provided by IDrive. Protect files during transfer and storage, using 256-bit AES encryption 
-with an optional private key.
+Backup and protect your Linux machine data using scripts bundle provided by IDrive. Protect files during transfer and storage, using 256-bit AES encryption with an optional private key.
 
 II. SYSTEM/SOFTWARE REQUIREMENTS
 =================================
@@ -24,21 +23,22 @@ STEP 1: The script bundle can be downloaded from the link
 		4. Configuration.pm
 		5. Constants.pm
 		6. Edit_Supported_Files.pl
-		7. Header.pl
-		8. Helpers.pm
-		9. IxHash.pm
-		10. job_termination.pl
-		11. Login.pl
-		12. Logout.pl
-		13. Operations.pl
-		14. readme.txt
-		15. Restore_Script.pl
-		16. Restore_Version.pl
-		17. Scheduler_Script.pl
-		18. Status_Retrieval_Script.pl
-		19. Strings.pm
-		20. Uninstall_Script.pl
-		21. View_Log.pl
+		7. express_backup.pl
+		8. Header.pl
+		9. Helpers.pm
+		10. IxHash.pm
+		11. job_termination.pl
+		12. Login.pl
+		13. Logout.pl
+		14. Operations.pl
+		15. readme.txt
+		16. Restore_Script.pl
+		17. Restore_Version.pl
+		18. Scheduler_Script.pl
+		19. Status_Retrieval_Script.pl
+		20. Strings.pm
+		21. Uninstall_Script.pl
+		22. View_Log.pl
 	
 STEP 2: Provide appropriate permissions (executable permission) to the scripts
 		Example:  chmod a+x *.pl
@@ -54,63 +54,66 @@ STEP 2: To set up IDrive script bundle locally with your IDrive account, run the
 		
 V. WORKING WITH THE SCRIPTS
 ============================
-Using IDrive scripts, you can perform backup/restore operations, view progress for backup/restore, schedule backup/restore job, view logs files and much more.
+Using IDrive scripts, you can perform backup/express backup/restore operations, view progress for backup/express backup/restore, schedule backup/restore job, view logs files and much more.
 
 STEP 1: Login to your IDrive account
 		If you are not logged in to your IDrive account while setting up your script bundle, run the below command to login.
 		$./Login.pl 
 		
-		Note: Login script is a mandatory script to be executed before performing any operation. This script will authenticate your IDrive account details 
-		and will create a secure session for your backups. 
+		Note: Login script is a mandatory script to be executed before performing any operation. This script will authenticate your IDrive account details	and will create a secure session for your backups. 
 		
-STEP 2: Edit, exclude and schedule the backup/restore set files
-		Before starting backup/restore operation, the user must provide the file/folder list required to backup/restore in backup/restore set file. 
-		To update these details in the backup/restore set file you must execute the below command.
+STEP 2: Edit your exclude files and Backup set files for your immediate or scheduled operations(backup/restore/Express-backup)
+		Before starting an operation(backup/restore/Express-backup), the user must provide the list of files/folders required for the operation (backup/restore/Express-backup).
+		To update the item list in the backup/Express-backup/restore set file you must execute the below command.
 		$./Edit_Supported_Files.pl 
 		
 		The menu option will be displayed. Select option 1 to edit backup set file for your immediate/manual backup. 
 		Respective file will open in vi editor to edit. Add the files/folders that needs to be backed up.
-		Using same script you can update exclude and even schedule backup/restore set file by selecting the desired option.
+		Using same script you can update exclude and even schedule backup/express backup/restore set file by selecting the desired option.
 		
 STEP 3: Immediate/Manual backup
 		You can perform immediate/manual backup using the below command:  
 		$./Backup_Script.pl 
 
 		When you run your backup script, it will reconfirm your backup location and allow you to change it. You can now view the graphical progress bar for your data backing up. 
-		If you want your script not to ask for backup location and not to display progress bar then you can always use “--silent” flag with this command. 
+		If you want your script not to ask for backup location and not to display progress bar then you can always use "--silent" flag with this command. 
 		
 STEP 4:	Immediate/Manual restore
 		You can perform immediate/manual restore using the below command:  
 		$./Restore_Script.pl
 
 		When you run your restore script, it will reconfirm your restore and restore from location and will allow you to change it if required. 
-		You can now view the graphical progress bar for your data restoring. If you want your script not to ask for restore location, restore from location 
-		and not to display progress bar then you can always use “--silent” flag with this command.
+		You can now view the graphical progress bar for your data restoring. If you want your script not to ask for restore location, restore from location and not to display progress bar then you can always use "--silent" flag with this command.
 
-STEP 5:	Schedule backup/restore
+STEP 5: Immediate/Manual express backup
+		Before starting express backup operation, user must connect the external storage device to linux machine & make sure that it mounted properly.
+		You can perform immediate/manual express backup using the below command and follow the instructions:  
+		$./express_backup.pl
+
+STEP 6:	Schedule backup/restore
 		Run the below command to manage your schedule backup/restore job: 
 		$./Scheduler_Script.pl 
 
 		Select the desired menu option to create/edit or delete your schedule backup/restore job and follow the instructions. 
 		In case you want your schedule job to stop automatically at a scheduled time then set the cut-off time as well while following the instructions.
 
-STEP 6: View progress of scheduled backup/restore job 
+STEP 7: View progress of scheduled backup/restore job 
 		To view the progress of scheduled backup or restore operation, run the below command: 
 		$./Status_Retrieval_Script.pl
 
-STEP 7: View/restore previous versions of a file
+STEP 8: View/restore previous versions of a file
 		You can view the list of previous versions of any file and select any version that you want to restore. To retrieve a file with earlier versions, run the below command: 
 		$./Restore_Version.pl 
 
-STEP 8:	Stop ongoing backup/restore operations 
-		To stop an ongoing backup or restore operation, run the below command: 
+STEP 9:	Stop ongoing backup/express backup/restore operations 
+		To stop an ongoing backup or express backup or restore operation, run the below command: 
 		$./job_termination.pl 
 		
-STEP 9: View backup/restore logs
-		You can view the backup or restore log files by running the below command: 
+STEP 10: View backup/express backup/restore logs
+		You can view the backup or restore or express backup log files by running the below command: 
 		$./View_Log.pl
 
-STEP 10: Logout from your IDrive account 
+STEP 11: Logout from your IDrive account 
 		To end the logged in session for your IDrive account, run the below command: 
 		$./Logout.pl
 		
@@ -136,7 +139,7 @@ VII. UNINSTALLING YOUR SCRIPT BUNDLE
 
 VIII. OTHERS
 ============
-		Script bundle have few more supported script files (Header.pl, Constants.pm and Operations.pl) which are used internally by other scripts.
+		Script bundle have few more supported script files (Header.pl, Helpers.pm, Configuration.pm, Constants.pm, IxHash.pm, Strings.pm and Operations.pl) which are used internally by other scripts.
     
 IX. RELEASES
 ================
@@ -318,5 +321,10 @@ IX. RELEASES
 		7.  Fixed the linux binary finding issue in "Account_Setting.pl" script when zip file passed as argument.
 		8.  Fixed the duplicate header display issue in Restore_Version.pl script.
 		9.  Fixed the IDrive account validation issue with fallback logic.
-	
+
+	Build 2.13
+		1.  A new script "express_backup.pl" has been introduced to do express backup.
+		2.  Fixed the scheduled backup/restore operation summary issue when it terminated by cut-off.
+		3.  Fixed the progress bar issue in status retrieval script when scheduled job terminated by cut-off.
+                4.  Fixed the email notification issue when multiple email ids added.
 	======================================================================================

@@ -17,6 +17,7 @@ if($CurrentUser ne "" && -d $usrProfileDir) {
 	$confFilePath = "$usrProfileDir/".Constants->CONST->{'configurationFile'};
 	$ManualBackupPidpath = $usrProfileDir."/Backup/Manual/pid.txt";
 	$ManualRestorePidpath = $usrProfileDir."/Restore/Manual/pid.txt";
+	$ManualExpressBackupPidpath = $usrProfileDir."/LocalBackup/Manual/pid.txt";
 }else{
 	print Constants->CONST->{'LogoutInfo'}.$lineFeed;
 	exit(0);
@@ -36,16 +37,33 @@ finalLogout();
 # Added By                : Abhishek Verma.
 #****************************************************************************/
 sub killOrContinueJob{
-	if ((-e $ManualBackupPidpath) and (-e $ManualRestorePidpath)){
+	if ((-e $ManualBackupPidpath) and (-e $ManualRestorePidpath) and (-e $ManualExpressBackupPidpath)){
+		killJob(Constants->CONST->{'logoutBackupExpressBackupRestoreJob'},'manual_backup');
+		killJob('','manual_restore');
+		killJob('','manual_localBackup');
+	}
+	elsif ((-e $ManualBackupPidpath) and (-e $ManualRestorePidpath)){
 		killJob(Constants->CONST->{'logoutBackupRestoreJob'},'manual_backup');
 		killJob('','manual_restore');
-	}else{
+	}
+	elsif ((-e $ManualBackupPidpath) and (-e $ManualExpressBackupPidpath)){
+		killJob(Constants->CONST->{'logoutBackupExpressBackupJob'},'manual_backup');
+		killJob('','manual_localBackup');
+	}
+	elsif ((-e $ManualRestorePidpath) and (-e $ManualExpressBackupPidpath)){
+		killJob(Constants->CONST->{'logoutExpressBackupRestoreJob'},'manual_restore');
+		killJob('','manual_localBackup');
+	}	
+	else{
 		if(-e $ManualBackupPidpath){
 			killJob(Constants->CONST->{'logoutBackupJob'},'manual_backup');
 		}
 		if(-e $ManualRestorePidpath){
 			killJob(Constants->CONST->{'logoutRestoreJob'},'manual_restore');
 		}
+		if(-e $ManualExpressBackupPidpath){
+			killJob(Constants->CONST->{'logoutExpressBackupJob'},'manual_localBackup');
+		}		
 	}
 }
 
