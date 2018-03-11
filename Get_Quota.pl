@@ -10,6 +10,8 @@ unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
 require 'Header.pl';
 #use Constants 'CONST';
 require Constants;
+# use File::stat;
+# use Time::localtime;
 
 #Configuration File Path#
 system("clear");
@@ -36,13 +38,20 @@ loadUserData();
 if ( substr( $pwdPath, -4) ne "_SCH" ){
 	$pwdPath = $pwdPath."_SCH";
 }
-my %Results = getQuota_HashTable();
-WriteQuotaFile( $usrProfileDir.'/.quota.txt',
-				$filePermission,
-				$Results{totalquota},
-				$Results{usedquota},
-				$Results{remainingquota});
 
+my $file = $usrProfileDir.'/.trace/'.Constants->CONST->{'tracelog'};
+my $last_mod_time = -M $file;		# En jours
+
+if ( $last_mod_time > 0.007 ) {
+# No activity on trace file within 10 minutes
+# => Get fresh Value other wise use exisiting
+	my %Results = getQuota_HashTable();
+	WriteQuotaFile( $usrProfileDir.'/.quota.txt',
+					$filePermission,
+					$Results{totalquota},
+					$Results{usedquota},
+					$Results{remainingquota});
+}
 open QUOTA_FILE, "<", $usrProfileDir.'/.quota.txt' or (traceLog($lineFeed.Constants->CONST->{'ConfMissingErr'}." reason :$! $lineFeed", __FILE__, __LINE__) and die);
 my @QuotaFile = <QUOTA_FILE>;
 close QUOTA_FILE;

@@ -3511,7 +3511,7 @@ sub getQuota_HashTable(){
 # Get a Valid answer
 	do {
 		sleep( $WaitTime );
-		$WaitTime += 50 + rand( 10 );	# Ajoute Entre 50 et 60 secondes au prochain temps d'attente
+		$WaitTime += 120 + rand( 30 );	# Ajoute Entre 50 et 60 secondes au prochain temps d'attente
 		$getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'},$encType);
 		$getQuotaUtfFile =~ s/\'/\'\\''/g;
 		$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
