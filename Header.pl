@@ -1998,7 +1998,12 @@ sub writeLogHeader {
 		$backupMountPath = "Mount Path : $IDriveLocal $lineFeed";
 	}
 
-	my $mailHeadA = $lineFeed."$tempJobType Start Time: ".(localtime)."$lineFeed";
+#======================================================================
+#ENH-003 Logfile name - TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
+#	my $mailHeadA = $lineFeed."$tempJobType Start Time: ".(localtime)."$lineFeed";
+	my $mailHeadA = POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime);
+	$mailHeadA =$lineFeed."$tempJobType Start Time: ".$mailHeadA."$lineFeed";
+#======================================================================
 	my $mailHeadB = '';
 	
 	if($jobType eq "Backup" and $dedup eq 'off') {
@@ -2064,7 +2069,7 @@ sub writeOperationSummary
 						$lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.
 						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
-						$lineFeed.Constants->CONST->{'BckEndTm'}.localtime(). $lineFeed;
+						$lineFeed.Constants->CONST->{'BckEndTm'}.POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime). $lineFeed;
 		
 			$finalSummery .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
@@ -2078,7 +2083,7 @@ sub writeOperationSummary
 						$lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.
 						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
-						$lineFeed.Constants->CONST->{'RstEndTm'}.localtime(). $lineFeed;
+						$lineFeed.Constants->CONST->{'RstEndTm'}.POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime). $lineFeed;
 
 			$finalSummery .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
