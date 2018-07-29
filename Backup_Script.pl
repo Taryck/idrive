@@ -117,12 +117,30 @@ sub process_term()
 	exit(0);
 }
 
+#======================================================================
+#TBE - FIX - for Enh-006 : Add remaining Quota to summary
+$displayCurrentUser = $userName;
+#======================================================================
+
 $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
 
 if(-e $confFilePath) {
 	readConfigurationFile($confFilePath);
 } 
 
+#=====================================================================================================================
+# TBE : ENH-001 - Load local CONFIGURATION_FILE
+# After loading <idrive_path>/userprofile/<my_account>
+# Loads CONFIGURATION_FILE where process is lauched. In scheduled mode :
+# <idrive_path>/userprofile/<my_account>/Backup/Scheduled
+#$confFilePath = $usrProfilePath.'/'.$userName.'/Backup/'.$ARGV[0].'/'.Constants->CONST->{'configurationFile'};
+$confFilePath = $INC[0].'/'.Constants->CONST->{'configurationFile'};
+
+if(-e $confFilePath) {
+	readConfigurationFile($confFilePath);
+}
+#TBE : end of ENH-001
+#=====================================================================================================================
 getConfigHashValue();
 loadUserData();
 my $BackupsetFile = $backupsetFilePath;
@@ -400,7 +418,18 @@ sub generateBackupsetFiles {
 		elsif ($item eq "." or $item eq "..") {
 			next;
 		}
-		elsif( -l $item # File is a symbolic link #
+# =======================================================================
+# TBE : ENH-002 set Root Directory for relative backup
+# if enh-002 is activated then add base_dir to backupset line
+		if($backupBase_Dir ne "") {
+			if(substr($item, 0, 1) eq "/") {
+				$item =~ s/^.//;
+			}
+			$item = $backupBase_Dir . $item;
+		}
+		if( -l $item # File is a symbolic link #
+#		elsif( -l $item # File is a symbolic link #
+# =======================================================================
 			 or -p $item # File is a named pipe #
 			 or -S $item # File is a socket #
 			 or -b $item # File is a block special file #
@@ -428,7 +457,16 @@ sub generateBackupsetFiles {
 				$noRelIndex++;
 				$BackupsetFile_new = $noRelativeFileset."$noRelIndex"; 
 				$filecount = 0;
-				$a = rindex ($item, '/');
+# =======================================================================
+# TBE : ENH-002 set Root Directory for relative backup
+				if($backupBase_Dir eq "") {
+# Original version
+					$a = rindex ($item, '/');
+				} else {
+# if enh-002 is activated define then end of BASE_DIR as the position to define relative name
+					$a = length( $backupBase_Dir ) - 1;
+				}
+# =======================================================================
 				$source[$noRelIndex] = substr($item,0,$a);
 				if($source[$noRelIndex] eq "") {
 					$source[$noRelIndex] = "/";
@@ -1122,11 +1160,20 @@ sub doBackupOperation()
 #******************************************************************************************************************/
 sub getOpStatusNeSubLine()
 {
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+# and simplification
+	my $TBE_status_text = "";
+#======================================================================
 	my $subjectLine= "";
 	my $totalNumFiles = $filesConsideredCount-$failedFilesCount;
 	if($cancelFlag){
 		$status = "ABORTED";
-		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
+		$TBE_status_text = 'Aborted Backup';
+#======================================================================
 	}
 #	elsif($filesConsideredCount == 0){
 #		$status = "FAILURE";
@@ -1135,7 +1182,11 @@ sub getOpStatusNeSubLine()
 	elsif($failedFilesCount == 0 and $filesConsideredCount > 0)
 	{
 		$status = "SUCCESS";
-		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
+		$TBE_status_text = 'Successful Backup';
+#======================================================================
 	}
 	else {
 #		if(($failedFilesCount/$filesConsideredCount)*100 <= 5){				  
@@ -1144,9 +1195,17 @@ sub getOpStatusNeSubLine()
 #		}
 #		else {
 			$status = "FAILURE";
-			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
+			$TBE_status_text = 'Failed Backup';
+#======================================================================
 #		}
 	}
+#======================================================================
+#TBE : ENH-005 : Mail subject information in decresing importance order
+	$subjectLine = "[$TBE_status_text] [$userName] - $taskType Backup Email Notification";
+#======================================================================
 	return ($subjectLine);
 }
 

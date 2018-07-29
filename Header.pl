@@ -75,6 +75,7 @@ my %hashParameters = (
 				       "BWTHROTTLE" => undef,                             
                        "RESTORELOCATION" => undef,
 	    		       "RESTOREFROM" => undef,				
+						"TBE_BASE_DIR" => undef,			# TBE : ENH-002 Add new param : Root Directory for relative backup
 	    		       "BACKUPPATHTYPE" => undef   
                      );
 
@@ -395,6 +396,18 @@ our $defRestoreLocation = qq($usrProfilePath/$userName/Restore_Data);
 #********************************************************************************************************/
 sub loadUserData {
 	$usrProfileDir = "$usrProfilePath/$userName";
+#=====================================================================================================================
+# TBE : ENH-002 set Root Directory for relative backup
+# instead of having only last level of relative
+# when this parameter is set the relative path starts from this point
+# Read the additional Parameter
+	our $backupBase_Dir = $hashParameters{TBE_BASE_DIR};
+# check or add / at the end of BASE_DIR
+	if(substr($backupBase_Dir, -1, 1) ne '/'){
+		$backupBase_Dir .= '/';
+	}
+# TBE : ENH-002 set Root Directory for relative backup
+#=====================================================================================================================
 	if($proxyStr eq ""){
 		$proxyStr = getProxy();
 		if ($proxyStr =~ /(.*?):(.*)\@(.*?):(.*?)$/){
@@ -840,11 +853,22 @@ sub getServerAddr
 #**********************************************************************************
 sub readConfigurationFile
 {
+#=====================================================================================================================
+# TBE : ENH-001 - Load local CONFIGURATION_FILE
+# user local variable for file read, in order to readConfigurationFile to be cummulative
+	my @ConfFile = () ;		# TBE : ENH-001 Temp file content
+#=====================================================================================================================
 	my $confFilePath = $_[0];
 	if ((-e $confFilePath and -s $confFilePath > 0)){
 		chmod $filePermission, $confFilePath;
 		open CONF_FILE, "<", $confFilePath or (traceLog($lineFeed.Constants->CONST->{'ConfMissingErr'}." reason :$! $lineFeed", __FILE__, __LINE__) and die);
-		@linesConfFile = <CONF_FILE>;  
+#=====================================================================================================================
+# TBE : ENH-001 Cummulative content
+#		@linesConfFile = <CONF_FILE>;  
+		@ConfFile = <CONF_FILE>;
+		push (@linesConfFile, @ConfFile);
+# TBE : ENH-001 End of change
+#=====================================================================================================================
 		close CONF_FILE;
 	}
 	else{
@@ -1837,9 +1861,14 @@ sub createLogFiles
 		chmod $filePermission, $logDir;
 	}
 
+#=====================================================================================================================
+# TBE : ENH-003 TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
 #	my $currentTime = localtime;
-	my $currentTime = time;#This function will give the current epoch time.
+#	my $currentTime = time;#This function will give the current epoch time.
 	#previous log file name use to be like 'BACKUP Wed May 17 12:34:47 2017_FAILURE'.Now log name will be '1495007954_SUCCESS'.
+# Correct timestamp string : YYYY-MM-DD_HH-MM-SS
+	my $currentTime = POSIX::strftime("%Y-%m-%d_%H-%M-%S", localtime);
+#=====================================================================================================================
 	$outputFilePath = $logDir.$pathSeparator.$currentTime; 
 	$errorFilePath = $errorDir.$pathSeparator.$errorFileName;
 	$progressDetailsFilePath = $jobRunningDir.$pathSeparator.$progressDetailsFileName;
@@ -2057,16 +2086,23 @@ sub writeOperationSummary
 		$summary .= $lineFeed."Summary: ".$lineFeed;
 		$finalSummery .=  $lineFeed."Summary: ".$lineFeed;
 		Chomp(\$filesConsideredCount);
+#======================================================================
+# TBE : Enh-006 : Add remaining Quota to summary
+		my %quotaDetails = getQuotaDetails();
+		my $TBE_Text = $lineFeed.'Remaining Free space : '. convertFileSize($quotaDetails{remainingQuota});
+#======================================================================
 		if($_[0] eq Constants->CONST->{'BackupOp'}) {
 			$mail_summary .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 						$lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.
+						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 						$lineFeed.Constants->CONST->{'BckEndTm'}.localtime(). $lineFeed;
 		
 			$finalSummery .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
+						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 					       $lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.$lineFeed;
 			
 		} else 	{
@@ -2074,11 +2110,13 @@ sub writeOperationSummary
 						$lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.
+						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 						$lineFeed.Constants->CONST->{'RstEndTm'}.localtime(). $lineFeed;
 
 			$finalSummery .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
+						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 					       $lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.$lineFeed;
 		}
 		if($errStr ne "" &&  $errStr ne "SUCCESS"){
@@ -3379,12 +3417,17 @@ sub headerDisplay{
 	$updateAvailMessage   .= qq(Logged in user :                    );
 	$updateAvailMessage   .= $displayCurrentUser eq '' ? "No Logged In User":$displayCurrentUser; 
 	my %quotaDetails = getQuotaDetails();
-	if (scalar (keys %quotaDetails) == 2){
+#==================================================
+#TBE : ENH-004 - Get Quota, compute remaining quota
+#	if (scalar (keys %quotaDetails) == 2){  #TBE : ENH-004 - fix
 		my $totalQuota = convertFileSize($quotaDetails{totalQuota});
 		my $usedQuota = convertFileSize ($quotaDetails{usedQuota});
+		my $remaining = convertFileSize ($quotaDetails{remainingQuota});			#TBE : ENH-004
 		$updateAvailMessage .= qq(\n----------------                    --------------------------------------------\n);
-		$updateAvailMessage .= qq(Quota Display  :                    $usedQuota(used)/$totalQuota(total));
-	}
+#		$updateAvailMessage .= qq(Quota Display  :                    $usedQuota(used)/$totalQuota(total));
+		$updateAvailMessage .= qq(Quota Display  :  $remaining(free)/$usedQuota(used)/$totalQuota(total));
+#	}
+#==================================================
 	if ($callingScript ne Constants->FILE_NAMES->{checkForUpdateScript} and !isUpdateAvailable()){ # Dont want to call subroutine isUpdateAvailable() in case of calling script is check_for_update.pl
 		$updateAvailMessage .= qq(\n--------------------------------------------------------------------------------\n);
 		$updateAvailMessage .= qq(A new update is available. Run ).Constants->FILE_NAMES->{checkForUpdateScript}.qq( to update to latest package.);
@@ -3494,6 +3537,70 @@ sub isUpdateAvailable {
 	}
 }
 
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+#****************************************************************************
+#Subroutine Name         : getQuota_HashTable 
+#Objective               : This function will get fresh quota information and provide remaining byte count
+#Usage                   : getQuota_HashTable() => %
+#Added By                : Taryck BENSIALI
+#****************************************************************************/
+sub getQuota_HashTable(){
+	my $encType = checkEncType(1);
+	my $WaitTime = 0;
+	my $Continue = 0;
+	my $getQuotaUtfFile = '';
+	my $commandOutput = '';
+	my %evsHashOutput;
+# Get a Valid answer
+	do {
+		sleep( $WaitTime );
+		$WaitTime += 120 + rand( 30 );	# Ajoute Entre 50 et 60 secondes au prochain temps d'attente
+		$getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'},$encType);
+		$getQuotaUtfFile =~ s/\'/\'\\''/g;
+		$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+		traceLog($idevsutilCommandLine."$lineFeed", __FILE__, __LINE__);
+		$commandOutput = `$idevsutilCommandLine &`;
+		%evsHashOutput = parseXMLOutput(\$commandOutput);
+		$Continue = (	($evsHashOutput{message} eq 'ERROR') and ($evsHashOutput{desc} =~ /Try again/) and ($WaitTime < 600)	);
+		traceLog('Outputs : '.$lineFeed.$commandOutput.$lineFeed, __FILE__, __LINE__);
+	} while ($Continue eq 1);
+	if (($evsHashOutput{message} eq 'SUCCESS') and ($evsHashOutput{totalquota} =~/\d+/) and ($evsHashOutput{usedquota} =~/\d+/)){
+		$evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
+		$evsHashOutput{remainingquota} = $evsHashOutput{totalquota} - $evsHashOutput{usedquota};
+
+
+	}
+#	} while (	(	($evsHashOutput{message} eq 'ERROR') and ($evsHashOutput{desc} =~ /Try again/)	)	or ($WaitTime > 600)	);
+	unlink($getQuotaUtfFile);
+	return %evsHashOutput;
+}
+
+#****************************************************************************
+#Subroutine Name         : WriteQuotaFile
+#Objective               : This function will create a quota.txt file based on the quota details provided 
+#Usage                   : WriteQuotaFile()
+#Added By                : Taryck BENSIALI
+#****************************************************************************/
+
+sub WriteQuotaFile($$$$$){
+	my $FileName = shift;
+	my $filePermission = shift;
+	my $totalquota  = shift;
+	my $usedquota = shift;
+	my $remainingquota = shift;
+	
+	open (AQ,'>',$FileName) or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$FileName."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+	chmod $filePermission,$FileName;
+	if ($totalquota =~/\d+/ and $usedquota =~ /\d+/ and $remainingquota =~ /\d+/){
+		print AQ 'totalQuota=' . $totalquota . "\n";
+		print AQ 'usedQuota=' . $usedquota . "\n";
+		print AQ 'remainingQuota=' . $remainingquota . "\n";
+	}
+	close AQ;
+	traceLog('Write File : '.$FileName."$lineFeed", __FILE__, __LINE__);
+}
+#=====================================================================================================================
 #*********************************************************************************************************
 #Subroutine Name         : getQuotaForAccountSettings 
 #Objective               : This function will create a quota.txt file based on the quota details provided
@@ -3504,15 +3611,24 @@ sub getQuotaForAccountSettings
 {
 	my $accountQuota = $_[0];
 	my $quotaUsed = $_[1];
-
-	open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-	chmod $filePermission,$usrProfileDir.'/.quota.txt';
-	if ($accountQuota =~/\d+/ and $quotaUsed =~ /\d+/){
-		$quotaUsed =~ s/(\d+)\".*/$1/isg;
-		print AQ "totalQuota=$accountQuota\n";
-		print AQ "usedQuota=$quotaUsed\n";
-	}
-	close AQ;
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+  my $remainingquota = $accountQuota - $quotaUsed;
+	WriteQuotaFile( $usrProfileDir.'/.quota.txt',
+					$filePermission,
+					$accountQuota,
+					$quotaUsed,
+					$remainingquota);
+# Mutualized code          
+#	open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+#	chmod $filePermission,$usrProfileDir.'/.quota.txt';
+#	if ($accountQuota =~/\d+/ and $quotaUsed =~ /\d+/){
+#		$quotaUsed =~ s/(\d+)\".*/$1/isg;
+#		print AQ "totalQuota=$accountQuota\n";
+#		print AQ "usedQuota=$quotaUsed\n";
+#	}
+#	close AQ;
+#=====================================================================================================================
 }
 
 #****************************************************************************
@@ -3522,22 +3638,36 @@ sub getQuotaForAccountSettings
 #Added By                : Abhishek Verma.
 #****************************************************************************/
 sub getQuota{
-	#my $encType = checkEncType(1);
-	my $getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'});
-	$getQuotaUtfFile =~ s/\'/\'\\''/g;
-	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
-	my $commandOutput = `$idevsutilCommandLine &`;
-	unlink($getQuotaUtfFile);
-	my %evsQuotaHashOutput = parseXMLOutput(\$commandOutput);
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+	my %evsQuotaHashOutput = getQuota_HashTable();
+# Mutualized code
+#	my $encType = checkEncType(1);
+#	my $getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'});
+#	$getQuotaUtfFile =~ s/\'/\'\\''/g;
+#        $idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+#	my $commandOutput = `$idevsutilCommandLine`;
+#        unlink($getQuotaUtfFile);
+#	my %evsQuotaHashOutput = parseXMLOutput(\$commandOutput);
+#=====================================================================================================================
 
 	if (($evsQuotaHashOutput{"message"} eq 'SUCCESS') and ($evsQuotaHashOutput{"totalquota"} =~/\d+/) and ($evsQuotaHashOutput{"usedquota"} =~/\d+/)){
-		open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-		chmod $filePermission,$usrProfileDir.'/.quota.txt';
-		$evsQuotaHashOutput{"usedquota"} =~ s/(\d+)\".*/$1/isg;
-		print AQ "totalQuota=".$evsQuotaHashOutput{"totalquota"}."\n";
-		print AQ "usedQuota=".$evsQuotaHashOutput{"usedquota"}."\n";
+#=====================================================================================================================
+#TBE : ENH-004 - Quota remaining
+		WriteQuotaFile( $usrProfileDir.'/.quota.txt',
+						$filePermission,
+						$evsHashOutput{totalquota},
+						$evsHashOutput{usedquota},
+						$evsHashOutput{remainingquota});
+# Mutualized code
+		# open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+		# chmod $filePermission,$usrProfileDir.'/.quota.txt';
+		# $evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
+		# print AQ "totalQuota=$evsHashOutput{totalquota}\n";
+		# print AQ "usedQuota=$evsHashOutput{usedquota}\n";
+		# close AQ;
+#=====================================================================================================================
 	}
-	close AQ;
 }
 #****************************************************************************
 #Subroutine Name         : getQuotaDetails 
