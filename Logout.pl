@@ -2,12 +2,16 @@
 #########################################################################################
 #Script Name : Logout.pl
 #########################################################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
+
 require 'Header.pl';
 require Constants;
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++Variable Handlings+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-my ($pwdPath,$pvtPath,$confFilePath,$ManualBackupPidpath,$ManualRestorePidpath) = ('') x 5;
+my ($pwdPath,$pvtPath,$confFilePath,$ManualBackupPidpath,$ManualRestorePidpath,$ManualExpressBackupPidpath,$archivePidpath) = ('') x 7;
 my $CurrentUser = getCurrentUser();
 my $usrProfileDir = "$usrProfilePath/$CurrentUser";
 #if the current user dir doesn't exists
@@ -18,6 +22,7 @@ if($CurrentUser ne "" && -d $usrProfileDir) {
 	$ManualBackupPidpath = $usrProfileDir."/Backup/Manual/pid.txt";
 	$ManualRestorePidpath = $usrProfileDir."/Restore/Manual/pid.txt";
 	$ManualExpressBackupPidpath = $usrProfileDir."/LocalBackup/Manual/pid.txt";
+	$archivePidpath		= $usrProfileDir."/Archive/Manual/pid.txt";
 }else{
 	print Constants->CONST->{'LogoutInfo'}.$lineFeed;
 	exit(0);
@@ -37,33 +42,42 @@ finalLogout();
 # Added By                : Abhishek Verma.
 #****************************************************************************/
 sub killOrContinueJob{
-	if ((-e $ManualBackupPidpath) and (-e $ManualRestorePidpath) and (-e $ManualExpressBackupPidpath)){
-		killJob(Constants->CONST->{'logoutBackupExpressBackupRestoreJob'},'manual_backup');
-		killJob('','manual_restore');
-		killJob('','manual_localBackup');
-	}
-	elsif ((-e $ManualBackupPidpath) and (-e $ManualRestorePidpath)){
-		killJob(Constants->CONST->{'logoutBackupRestoreJob'},'manual_backup');
-		killJob('','manual_restore');
-	}
-	elsif ((-e $ManualBackupPidpath) and (-e $ManualExpressBackupPidpath)){
-		killJob(Constants->CONST->{'logoutBackupExpressBackupJob'},'manual_backup');
-		killJob('','manual_localBackup');
-	}
-	elsif ((-e $ManualRestorePidpath) and (-e $ManualExpressBackupPidpath)){
-		killJob(Constants->CONST->{'logoutExpressBackupRestoreJob'},'manual_restore');
-		killJob('','manual_localBackup');
-	}	
-	else{
-		if(-e $ManualBackupPidpath){
-			killJob(Constants->CONST->{'logoutBackupJob'},'manual_backup');
-		}
-		if(-e $ManualRestorePidpath){
-			killJob(Constants->CONST->{'logoutRestoreJob'},'manual_restore');
-		}
-		if(-e $ManualExpressBackupPidpath){
-			killJob(Constants->CONST->{'logoutExpressBackupJob'},'manual_localBackup');
+
+	my @jobNameArr = ('manual_backup','manual_restore','manual_localBackup','manual_archive');
+	my %jobNameHash = ('manual_backup'=>'Backup','manual_restore'=>'Restore','manual_localBackup'=>'Express Backup','manual_archive'=>'Archive cleanup');
+	my %jobsPid = ('manual_backup'=>$ManualBackupPidpath,'manual_restore'=>$ManualRestorePidpath,'manual_localBackup'=>$ManualExpressBackupPidpath,'manual_archive'=>$archivePidpath);
+	my @options;
+	my $msg = '';
+	
+	foreach my $job (@jobNameArr) {
+		if(-e $jobsPid{$job}){			
+			push @options, $job;
 		}		
+	}
+	
+	my $count = 1;
+	$noOfJobs = scalar(@options);
+	if($noOfJobs){
+		foreach my $job (@options){
+			$msg .= $jobNameHash{$job};
+			if($noOfJobs>$count){
+				if(($noOfJobs-1) == $count){
+					$msg .= " and ";
+				} else {
+					$msg .= ", ";
+				}
+			}
+			$count++;
+		}
+	}
+	
+	if(scalar(@options)>0){
+		my $displayMsg = Constants->CONST->{'logoutJob'};
+		   $displayMsg =~ s/<JOBS>/$msg/;
+		foreach(@options){
+			killJob("$displayMsg",$_);
+			$displayMsg = '';
+		}
 	}
 }
 
@@ -86,7 +100,11 @@ sub killJob{
 	}
 	if ($confirmationChoice eq 'y' or $confirmationChoice eq 'Y'){
 		$JobTermCmd = "perl '$jobTerminationScript' '$jobToTerminate'";
-		system($JobTermCmd);
+		my $res = `$JobTermCmd`;
+		if($? != 0 or $res =~ /Operation not permitted/){
+			print Constants->CONST->{'noLogOut'}."System user '$httpuser' ".Constants->CONST->{'noSufficientPermission'}.$lineFeed;
+			exit 0;
+		}
 		if(-e Constants->CONST->{'incorrectPwd'}){
         		print Constants->CONST->{'noLogOut'}.$lineFeed;
 	                traceLog("Error while logging out from the Account.", __FILE__, __LINE__);
@@ -109,17 +127,17 @@ sub finalLogout {
         	unlink ($userTxt);
 	        unlink ($pvtPath);
         	if(${ARGV[0]} ne 1) {#This scape is kept to avoid the message display when logout script is called from Account settings script.
-                	print $lineFeed.Constants->CONST->{'displayUserMessage'}->("\"$CurrentUser\"",Constants->CONST->{'LogoutSuccess'}).$lineFeed;#Logout Success message.
+                print $lineFeed.Constants->CONST->{'displayUserMessage'}->("\"$CurrentUser\"",Constants->CONST->{'LogoutSuccess'}).$lineFeed;#Logout Success message.
         	}
 	}else{
-	        if(${ARGV[0]} ne 1){
-        	        if($! =~ /No such file or directory/) {
-                	        print Constants->CONST->{'LogoutInfo'}.$lineFeed;
-	                } else {
-        	                print $lineFeed.Constants->CONST->{'LogoutErr'}."$!".$lineFeed;
-                	}
-        	}else{
-	                unlink($pvtPath);
-        	}
+		if(${ARGV[0]} ne 1){
+			if($! =~ /No such file or directory/) {
+					print Constants->CONST->{'LogoutInfo'}.$lineFeed;
+			} else {
+					print $lineFeed.Constants->CONST->{'LogoutErr'}."$!".$lineFeed;
+			}
+		}else{
+			unlink($pvtPath);
+		}
 	}
 }

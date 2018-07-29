@@ -3,7 +3,11 @@
 ########################################################################
 #Script Name : Restore_Script.pl
 ########################################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
+
 require 'Header.pl';
 use FileHandle;
 use Sys::Hostname;
@@ -96,7 +100,7 @@ my $restoreUtfFile = '';
 my $generateFilesPid = undef;
 my $prevTime = time();
 my $countErrorFile = 0; 					#Count of files which could not be restored due to specified errors #
-my $maxNumRetryAttempts = 5;				#Maximum number of times the script should try to restore in case of errors#
+my $maxNumRetryAttempts = 1000;				#Maximum number of times the script should try to restore in case of errors#
 my $filesonlycount = 0;
 my $prevFailedCount = 0;
 my $totalSize = 0;
@@ -104,7 +108,7 @@ my $relative = 0;
 my $noRelIndex = 0;
 my $exitStatus = 0;
 my $retrycount = 0;
-my $RestoreItemCheck = "RestoresetFile.txt.item";
+#my $RestoreItemCheck = $jobRunningDir."/"."RestoresetFile.txt.item";
 my $RestoresetFile_new = '';
 
 my $RestoresetFile_relative = "RestoreFileName_Rel";
@@ -140,7 +144,6 @@ my $RestoreFileName = $RestoresetFile;
 
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
-#traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
 
 #Verifying if Restore scheduled or manual job
 my $flagToCheckSchdule = 0;
@@ -172,7 +175,7 @@ if (! checkIfEvsWorking($dedup)){
         print Constants->CONST->{'EvsProblem'}.$lineFeed;
         exit 0;
 }
-traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
+# traceLog(qq(File: $curFile));
 #Defining and creating working directory
 $jobRunningDir = "$usrProfilePath/$userName/Restore/$taskType";
 if(!-d $jobRunningDir) {
@@ -186,11 +189,12 @@ $pidPath = "$jobRunningDir/pid.txt";
 if(!pidAliveCheck()){
 	$pidMsg = "$jobType job is already in progress. Please try again later.\n";
 	print $pidMsg;
-	traceLog($pidMsg, __FILE__, __LINE__);
+	traceLog($pidMsg);
 	exit 1;
 }
 
 #Loading global variables
+my $RestoreItemCheck = $jobRunningDir."/"."RestoresetFile.txt.item"; #"RestoresetFile.txt.item";
 $statusFilePath = "$jobRunningDir/STATUS_FILE";
 $search = "$jobRunningDir/Search";
 my $info_file = "$jobRunningDir/info_file";
@@ -213,7 +217,7 @@ unlink($progressDetailsFilePath);
 if(!-d $errorDir) {
 	my $ret = mkdir($errorDir);
 	if($ret ne 1) {
-		traceLog("Couldn't create $errorDir: $!\n", __FILE__, __LINE__);
+		traceLog("Couldn't create $errorDir: $!");
 		exit 1;
 	}
 	chmod $filePermission, $errorDir;
@@ -224,7 +228,7 @@ if($ARGV[0] eq Constants->CONST->{'versionRestore'}) {
 }
 my $serverAddress = verifyAndLoadServerAddr();
 if ($serverAddress == 0){
-        exit_cleanup($errStr);
+    exit_cleanup($errStr);
 }
 #my $encType = checkEncType($flagToCheckSchdule); # This function has been called inside getOperationFile() function.
 createUpdateBWFile();
@@ -256,7 +260,7 @@ sub startRestore {
 	$generateFilesPid = fork();
 	if(!defined $generateFilesPid) {
 		$errStr = "Unable to start generateRestoresetFiles operation";
-		traceLog("Cannot fork() child process, Reason:$! $lineFeed", __FILE__, __LINE__);
+		traceLog("Cannot fork() child process, Reason:$!");
 		return;
 	}
 	if($generateFilesPid == 0) {
@@ -268,7 +272,7 @@ START:
 	if (-e $info_file){
 		if(!open(FD_READ, "<", $info_file)) {
 			$errStr = Constants->CONST->{'FileOpnErr'}." $info_file to read, Reason:$!";
-			traceLog($errStr, __FILE__, __LINE__);
+			traceLog($errStr);
 			return;
 		}
 	
@@ -316,7 +320,7 @@ START:
 		$totalFiles =~ s/TOTALFILES//;
 		
 		if($totalFiles == 0 or $totalFiles !~ /\d+/){
-			traceLog("\n Unable to get total files count \n", __FILE__, __LINE__);
+			traceLog("Unable to get total files count");
 		}
 	} 
 	
@@ -349,11 +353,11 @@ START:
 #*****************************************************************************************************/
 sub checkRestoreItem {
 	if(!open(RESTORELIST, $RestoreFileName)){
-		traceLog(Constants->CONST->{'FileOpnErr'}." $RestoreFileName , Reason: $!\n", __FILE__, __LINE__);
+		traceLog(Constants->CONST->{'FileOpnErr'}." $RestoreFileName , Reason: $!");
 		return 0;
 	}
 	if(!open(RESTORELISTNEW, ">", $RestoreItemCheck)){
-		traceLog(Constants->CONST->{'FileOpnErr'}." $RestoreItemCheck , Reason: $!\n", __FILE__, __LINE__);
+		traceLog(Constants->CONST->{'FileOpnErr'}." $RestoreItemCheck , Reason: $!");
 		return 0;
 	}
 	$tempRestoreHost = $restoreHost;
@@ -382,7 +386,7 @@ GETSTAT:
 	my $checkItemUtf = getOperationFile( Constants->CONST->{'ItemStatOp'}, $RestoreItemCheck);
 	
 	if(!$checkItemUtf) {
-		traceLog($errStr, __FILE__, __LINE__);
+		traceLog($errStr);
 		return @itemsStat;
 	}
 	
@@ -441,7 +445,7 @@ START:
 #	my $commandOutput = `$idevsutilCommandLine`;
 	# EVS command execute
 	$res = `$idevsutilCommandLine`;
-	traceLog("res - $res\n", __FILE__, __LINE__);	
+	# traceLog(qq(res - $res));	
 
 	if("" ne $res and $res !~ /no version information available/i){
 		$errStr = "search cmd syntax error found\n";
@@ -464,7 +468,7 @@ START:
 	# parse serach output.
 	open OUTFH, "<", $searchOutput or ($errStr = "cannot open :$searchOutput: of search result for $remoteFolder");
 	if($errStr ne ""){
-		traceLog($errStr, __FILE__, __LINE__);
+		traceLog($errStr);
 		return REMOTE_SEARCH_OUTPUT_PARSE_FAIL;
 	}
 
@@ -504,7 +508,7 @@ START:
 			
 			if($filecount == FILE_MAX_COUNT) {
 				if(!createRestoreSetFiles1k()){
-					traceLog($errStr, __FILE__, __LINE__);
+					traceLog($errStr);
 					return REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR;
 				}
 			}				
@@ -548,13 +552,13 @@ START:
 			
 			if($filecount == FILE_MAX_COUNT) {
 				if(!createRestoreSetFiles1k()){
-					traceLog($errStr, __FILE__, __LINE__);
+					# traceLog($errStr);
 					return REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR;
 				}
 			}	
 		}
 	}
-	traceLog($errStr, __FILE__, __LINE__);
+	traceLog($errStr);
 	return REMOTE_SEARCH_SUCCESS;
 }
 
@@ -568,7 +572,7 @@ sub generateRestoresetFiles {
 	if($RestoreFileName =~ m/versionRestore/) {
 		if(!open(RFILE, "<", $RestoreFileName)) {
 			my $errStr = "Couldn't open file $RestoreFileName to read, Reason: $!\n";
-			traceLog($errStr, __FILE__, __LINE__);
+			traceLog($errStr);
 		}
 		
 		my $Rdata = '';
@@ -579,7 +583,7 @@ sub generateRestoresetFiles {
 		close(RFILE); 
 		if(!open(WFILE, ">", $RestoreFileName)) {
 			my $errStr = "Couldn't open file $RestoreFileName to write, Reason: $!\n";
-			traceLog($errStr, __FILE__, __LINE__);
+			traceLog($errStr);
 		}
 		print WFILE $versonedFile.$lineFeed;
 		close(WFILE);
@@ -592,7 +596,7 @@ sub generateRestoresetFiles {
 	} 
 	my $traceExist = $errorDir."/traceExist.txt";
 	if(!open(TRACEERRORFILE, ">>", $traceExist)) {
-		traceLog(Constants->CONST->{'FileOpnErr'}." $traceExist, Reason: $!. $lineFeed", __FILE__, __LINE__);
+		traceLog(Constants->CONST->{'FileOpnErr'}." $traceExist, Reason: $!.");
 	}
 	chmod $filePermission, $traceExist;
 	
@@ -633,7 +637,7 @@ sub generateRestoresetFiles {
 						$current_source = $source[$noRelIndex];
 						if(!open $filehandle, ">>", $RestoresetFile_new){
 							$errStr = "Unable to get list of files to restore.\n";
-							traceLog("\n cannot open $RestoresetFile_new to write ", __FILE__, __LINE__);
+							traceLog("cannot open $RestoresetFile_new to write");
 							goto GENEND;
 						}
 						chmod $filePermission, $RestoresetFile_new;
@@ -641,16 +645,16 @@ sub generateRestoresetFiles {
 					my $resEnumerate = 0;
 					$resEnumerate = enumerateRemote($fields[2]);
 					if(!$resEnumerate){
-						traceLog("$errStr ". $fields[2].$lineFeed, __FILE__, __LINE__);
+						traceLog(qq($errStr $fields[2]));
 						goto GENEND;
 					} 
 					elsif(REMOTE_SEARCH_CMD_ERROR == $resEnumerate or REMOTE_SEARCH_FAIL == $resEnumerate or REMOTE_SEARCH_OUTPUT_PARSE_FAIL == $resEnumerate){
 						my $searchErrMsg = "[".(localtime)."]". "[".$fields[2]."] Failed. Reason: Search has failed for the item.$lineFeed";
-						traceLog("Search command failed due to syntax error for the folder ". $fields[2].$lineFeed, __FILE__, __LINE__);
+						traceLog("Search command failed due to syntax error for the folder ". $fields[2]);
 						appendErrorToUserLog($searchErrMsg);
 					}
 					elsif(REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR == $resEnumerate){
-						traceLog("Error in creating 1k files ". $fields[2].$lineFeed, __FILE__, __LINE__);
+						traceLog("Error in creating 1k files ". $fields[2]);
 						goto GENEND;
 					}
 				
@@ -670,7 +674,7 @@ sub generateRestoresetFiles {
 					# EVS command to execute for properties
 					my $propertiesCmd = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_propertiesFile\'".$whiteSpace.$errorRedirection;
 					my $commandOutput = `$propertiesCmd`;
-					traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
+					# traceLog($commandOutput);
 					
 					unlink $propertiesFile;
 					
@@ -734,24 +738,24 @@ sub generateRestoresetFiles {
 							$current_source = $source[$noRelIndex];
 							if(!open $filehandle, ">>", $RestoresetFile_new){
 								$errStr = "Unable to get list of files to restore.\n";
-        	                                                traceLog("\n cannot open $RestoresetFile_new to write ", __FILE__, __LINE__);
-	                                                        goto GENEND;
+        	                    traceLog("cannot open $RestoresetFile_new to write ");
+	                            goto GENEND;
 							}
 							chmod $filePermission, $RestoresetFile_new;
 						}
 						my $resEnumerate = 0;
 						$resEnumerate = enumerateRemote($fields[1]);
 						if(!$resEnumerate){
-							traceLog("$errStr ". $fields[1].$lineFeed, __FILE__, __LINE__);
+							traceLog(qq($errStr $fields[1]));
 							goto GENEND;
 						} 
 						elsif(REMOTE_SEARCH_CMD_ERROR == $resEnumerate or REMOTE_SEARCH_FAIL == $resEnumerate or REMOTE_SEARCH_OUTPUT_PARSE_FAIL == $resEnumerate){
 							my $searchErrMsg = "[".(localtime)."]". "[".$fields[1]."] Failed. Reason: Search has failed for the item.$lineFeed";
-							traceLog("Search command failed due to syntax error for the folder ". $fields[1].$lineFeed, __FILE__, __LINE__);
+							traceLog("Search command failed due to syntax error for the folder ". $fields[1]);
 							appendErrorToUserLog($searchErrMsg);
 						}
 						elsif(REMOTE_SEARCH_THOUSANDS_FILES_SET_ERROR == $resEnumerate){
-							traceLog("Error in creating 1k files ". $fields[1].$lineFeed, __FILE__, __LINE__);
+							traceLog("Error in creating 1k files ". $fields[1]);
 							goto GENEND;
 						}
 					
@@ -770,7 +774,7 @@ sub generateRestoresetFiles {
 						# EVS command to execute for properties
 						my $propertiesCmd = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_propertiesFile\'".$whiteSpace.$errorRedirection;
 						my $commandOutput = `$propertiesCmd`;
-						traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
+						# traceLog($commandOutput);
 						unlink $propertiesFile;
 						
 						$commandOutput =~ m/(size)(.*)/;
@@ -829,7 +833,7 @@ sub generateRestoresetFiles {
 	close(FD_WRITE);
 	close RESTORE_FILE;
 	
-	open FILESIZE, ">$fileForSize" or traceLog(Constants->CONST->{'FileOpnErr'}." $fileForSize. Reason: $!\n", __FILE__, __LINE__);
+	open FILESIZE, ">$fileForSize" or traceLog(Constants->CONST->{'FileOpnErr'}." $fileForSize. Reason: $!");
 	print FILESIZE "$totalSize";
 	close FILESIZE;
 	chmod $filePermission, $fileForSize;
@@ -858,7 +862,7 @@ sub createRestoreSetFiles1k {
 			
 			close RESTORE_FILE;
 			if(!open RESTORE_FILE, ">", $RestoresetFile_Only) {
-				traceLog(Constants->CONST->{'FileOpnErr'}." $filesOnly to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
+				traceLog(Constants->CONST->{'FileOpnErr'}." $filesOnly to write, Reason: $!.");
 				return 0;
 			}	
 			chmod $filePermission, $RestoresetFile_Only;
@@ -871,7 +875,7 @@ sub createRestoreSetFiles1k {
 			
 			close $filehandle;
 			if(!open $filehandle, ">", $RestoresetFile_new) {
-				traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
+				traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason: $!.");
 				return 0;
 			}	
 			chmod $filePermission, $RestoresetFile_new;
@@ -884,7 +888,7 @@ sub createRestoreSetFiles1k {
 		
 		close RESTORE_FILE;
 		if(!open RESTORE_FILE, ">", $RestoresetFile_new){
-			traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
+			traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason: $!.");
 			return 0;
 		}
 		chmod $filePermission, $RestoresetFile_new;
@@ -915,7 +919,7 @@ sub doRestoreOperation()
 	@parameter_list = split /\' \'/,$parameters, SPLIT_LIMIT_INFO_LINE;
 	$restoreUtfFile = getOperationFile(Constants->CONST->{'RestoreOp'}, $parameter_list[2] ,$parameter_list[1] ,$parameter_list[0]);
 	if(!$restoreUtfFile) {
-		traceLog($errStr, __FILE__, __LINE__);
+		traceLog($errStr);
 		return 0;
 	}
 	my $tmprestoreUtfFile = $restoreUtfFile;
@@ -935,7 +939,7 @@ sub doRestoreOperation()
 			exec($idevsutilCommandLine);
 			$errStr = Constants->CONST->{'DoRstOpErr'}.Constants->CONST->{'ChldFailMsg'};
 			print $errStr;
-			traceLog($errStr, __FILE__, __LINE__);
+			traceLog($errStr);
 			
 			if(open(ERRORFILE, ">> $errorFilePath")) {
 				autoflush ERRORFILE;
@@ -945,7 +949,7 @@ sub doRestoreOperation()
 				chmod $filePermission, $errorFilePath;
 			}
 			else {
-				traceLog($lineFeed.Constants->CONST->{'FileOpnErr'}.$errorFilePath.", Reason:$! $lineFeed", __FILE__, __LINE__);
+				traceLog(Constants->CONST->{'FileOpnErr'}.$errorFilePath.", Reason:$!");
 			}
 		}
 		exit 1;	
@@ -980,13 +984,13 @@ sub doRestoreOperation()
 		$tmpRestoreHost =~ s/\'/\'\\''/g;
 		my $tmpRestoreLoc = $restoreLocation;
 		$tmpRestoreLoc =~ s/\'/\'\\''/g;
-		my @param = join ("\n",('RESTORE_OPERATION',$tmpOpFilePath,$tmpRstSetFile,$parameter_list[1],$tmpSrc,$curLines,$progressSizeOp,$tmpRestoreHost,$tmpRestoreLoc,$silentFlag));
+		my @param = join ("\n",('RESTORE_OPERATION',$tmpOpFilePath,$tmpRstSetFile,$parameter_list[1],$tmpSrc,$progressSizeOp,$tmpRestoreHost,$tmpRestoreLoc,$silentFlag));
 		writeParamToFile("$tmpJobRngDir/operationsfile.txt",@param);
 		exec("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmpJobRngDir\' \'$userName\'");
 
 		$errStr = Constants->CONST->{'rstProcessFailureMsg'};
 		print $errStr.$lineFeed;
-		traceLog($errStr, __FILE__, __LINE__);
+		traceLog($errStr);
 		
 		if (open(ERRORFILE, ">> $errorFilePath")) {
 			autoflush ERRORFILE;
@@ -996,7 +1000,7 @@ sub doRestoreOperation()
 		}
 		else 
 		{
-			traceLog(Constants->CONST->{'FileOpnErr'}.$whiteSpace.$errorFilePath." Reason :$! $lineFeed", __FILE__, __LINE__);
+			traceLog(Constants->CONST->{'FileOpnErr'}.$whiteSpace.$errorFilePath." Reason :$!");
 		}
 	
 		exit 1;
@@ -1013,7 +1017,7 @@ sub doRestoreOperation()
 		}
 		else
 		{
-			traceLog(Constants->CONST->{'FileOpnErr'}." $outputFilePath. Reason: $!", __FILE__, __LINE__);
+			traceLog(Constants->CONST->{'FileOpnErr'}." $outputFilePath. Reason: $!");
 			print  Constants->CONST->{'FileOpnErr'}." $outputFilePath. Reason: $!";
 			return 0;
 		}
@@ -1089,14 +1093,14 @@ sub cancelSubRoutine()
 	if($pidTestFlag eq "GenerateFile")  {
 		
 		#if info file doesn't have TOTALFILE then write to info
-		open FD_WRITE, ">>", $info_file or (traceLog(Constants->CONST->{'FileOpnErr'}." $info_file to write, Reason:$!", __FILE__, __LINE__)); # and die);
+		open FD_WRITE, ">>", $info_file or (traceLog(Constants->CONST->{'FileOpnErr'}." $info_file to write, Reason:$!")); # and die);
 		autoflush FD_WRITE;
 		print FD_WRITE "TOTALFILES $totalFiles\n";
 		print FD_WRITE "FAILEDCOUNT $nonExistsCount\n";
 		close(FD_WRITE);
 		close RESTORE_FILE;
 		exit 0;
-	} 
+	}
 	
 	my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$jobRunningDir\'";
 	$evsRunning = `$evsCmd`;
@@ -1113,7 +1117,7 @@ sub cancelSubRoutine()
 		if(defined($scriptTerm)) {
 			if($scriptTerm != 0 && $scriptTerm ne "") {
 				my $msg = Constants->CONST->{'KilFail'}." Restore\n";
-				traceLog($msg, __FILE__, __LINE__);
+				traceLog($msg);
 			}
 		}
 	}
@@ -1126,7 +1130,7 @@ sub cancelSubRoutine()
 	}	
 
 	if($totalFiles == 0 or $totalFiles !~ /\d+$/){
-		traceLog("\n Unable to get total files count2 \n", __FILE__, __LINE__);
+		traceLog("Unable to get total files count2");
 	}
 	
 	if($nonExistsCount == 0) {
@@ -1156,7 +1160,7 @@ sub exit_cleanup {
 	$failedFilesCount = getParameterValueFromStatusFile('ERROR_COUNT_FILES');
 	$exit_flag = getParameterValueFromStatusFile('EXIT_FLAG_INDEX');
 	if($errStr eq "" and -e $errorFilePath) {
-		open ERR, "<$errorFilePath" or traceLog(Constants->CONST->{'FileOpnErr'}."errorFilePath in exit_cleanup: $errorFilePath, Reason: $!".$lineFeed, __FILE__, __LINE__);
+		open ERR, "<$errorFilePath" or traceLog(Constants->CONST->{'FileOpnErr'}."errorFilePath in exit_cleanup: $errorFilePath, Reason: $!");
 		$errStr .= <ERR>;
 		close(ERR);
 		chomp($errStr);
@@ -1274,18 +1278,18 @@ sub getOpStatusNeSubLine()
 sub restoreRestoresetFileConfiguration()
 {
 	if($RestoresetFile_relative ne "") {
-		unlink <$RestoresetFile_relative*>;
+		unlink <"$RestoresetFile_relative"*>;
 	}
 	if($noRelativeFileset ne "") {
-		unlink <$noRelativeFileset*>;
+		unlink <"$noRelativeFileset"*>;
 	}
 	if($filesOnly ne "") {	
-		unlink <$filesOnly*>;
+		unlink <"$filesOnly"*>;
 	}
 	if($failedfiles ne "") {	
-		unlink <$failedfiles*>;
+		unlink <"$failedfiles"*>;
 	}
-	unlink $info_file;
+	unlink "$info_file";
 }
 
 #*******************************************************************************************************
@@ -1302,7 +1306,7 @@ sub updateServerAddr {
 	}
 	if($tempErrorFileSize > 0) {
 		my $errorPatternServerAddr = "unauthorized user";
-		open EVSERROR, "<", $idevsErrorFile or traceLog("\n Failed to open error.txt Reason : $!\n", __FILE__, __LINE__);
+		open EVSERROR, "<", $idevsErrorFile or traceLog("Failed to open error.txt Reason : $!");
 		$errorContent = <EVSERROR>;
 		close EVSERROR;
 		if($errorContent =~ m/$errorPatternServerAddr/){
@@ -1324,7 +1328,7 @@ sub appendErrorToUserLog()
 {
 	# open log file to append serach failure message.
 	if (!open(OUTFILE, ">> $outputFilePath")) { 
-		traceLog("Could not open file $outputFilePath to append search error message for folder ".$_[0].", Reason:$!$lineFeed", __FILE__, __LINE__);
+		traceLog("Could not open file $outputFilePath to append search error message for folder ".$_[0].", Reason:$!");
 	}
 	else {
 		print OUTFILE $_[0];
@@ -1342,7 +1346,7 @@ sub createRestoreTypeFile {
 	#opening info file for generateBackupsetFiles function to write backup set information and for main process to read that information
 	if(!open(FD_WRITE, ">", $info_file)){
 		$errStr = "Could not open file $info_file to write, Reason:$!\n";
-		traceLog($errStr, __FILE__, __LINE__) and die;
+		traceLog($errStr) and die;
 	}
 	chmod $filePermission, $info_file;
 	
@@ -1351,7 +1355,7 @@ sub createRestoreTypeFile {
 		$RestoresetFile_new =  $RestoresetFile_relative;
 			
 		if(!open RESTORE_FILE, ">>", $RestoresetFile_new) {
-			traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason:$!. $lineFeed", __FILE__, __LINE__);
+			traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason:$!.");
 			print Constants->CONST->{'FileOpnErr'}." $RestoresetFile_new to write, Reason:$!. $lineFeed";
 			exit(1);
 		}
@@ -1362,7 +1366,7 @@ sub createRestoreTypeFile {
 		$RestoresetFile_Only =  $filesOnly;
 		
 		if(!open RESTORE_FILE, ">>", $RestoresetFile_Only) {
-			traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_Only to write, Reason:$!. $lineFeed", __FILE__, __LINE__);
+			traceLog(Constants->CONST->{'FileOpnErr'}." $RestoresetFile_Only to write, Reason:$!.");
 			exit(1);
 		}
 		chmod $filePermission, $RestoresetFile_Only;
@@ -1413,7 +1417,7 @@ sub checkExitError
 	}
 	#check for retry attempt
 	if(!open(TEMPERRORFILE, "< $individual_errorfile")) {
-		traceLog("Could not open file individual_errorfile in checkretryAttempt: $individual_errorfile, Reason:$! $lineFeed", __FILE__, __LINE__);
+		traceLog("Could not open file individual_errorfile in checkretryAttempt: $individual_errorfile, Reason:$!");
 		return 0;
 	}
 	
@@ -1432,13 +1436,15 @@ sub checkExitError
 			if($linesBackupErrorFile[$i] =~ m/$ErrorArgumentsExit[$j]/)
 			{
 				$errStr  = "Operation could not be completed. Reason : $ErrorArgumentsExit[$j].";
-				#$errStr .= "Please login using Login.pl script.";
-				traceLog($errStr, __FILE__, __LINE__);
+				#$errStr .= "Please login using login.pl script.";
+				traceLog($errStr);
 				#kill evs and then exit
-				my $jobTerminationPath = $currentDir.'/'.Constants->FILE_NAMES->{jobTerminationScript}; 
-				system("$perlPath \'$jobTerminationPath\' \'$taskType\_$jobType\' \'$userName\' 1>/dev/null 2>/dev/null");
+				my $jobTerminationPath = $currentDir.'/'.Constants->FILE_NAMES->{jobTerminationScript};
+				my $jobToTerm = lc($taskType."_".$jobType);
+				system("$perlPath \'$jobTerminationPath\' \'$jobToTerm\' \'$userName\' 1>/dev/null 2>/dev/null");
+				
 				$exit_flag = "1-$errStr";
-				unlink($pwdPath);
+				#unlink($pwdPath);
 				return 0;
 			}
 		}	

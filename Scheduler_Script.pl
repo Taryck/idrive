@@ -3,7 +3,10 @@
 #Script Name : Scheduler_Script.pl
 ################################################################################
 
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
+
 require 'Header.pl';
 use File::Copy;
 
@@ -27,11 +30,12 @@ loadUserData();
 #$pvtParam = "PVTKEY";
 #getParameterValue(\$pvtParam, \$hashParameters{$pvtParam});
 #my $pvtKey = $hashParameters{$pvtParam};
-if(getAccountConfStatus($confFilePath,\&headerDisplay)){
+headerDisplay();
+if(getAccountConfStatus($confFilePath)){
 	exit(0);
 }
 else{
-	if(getLoginStatus($pwdPath,\&headerDisplay)){
+	if(getLoginStatus($pwdPath)){
 			exit(0);
 	}
 }
@@ -57,7 +61,7 @@ if($perlPath eq ''){
 
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
-traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
+# traceLog(qq(File: $curFile));
 
 my $workingDir = $currentDir;
 
@@ -87,9 +91,9 @@ system("clear");
 headerDisplay($0);
 PRINTMENU:
 printMainMenu();
-my $mainMenuChoice = getMenuChoice(6);	
+my $mainMenuChoice = getMenuChoice(8);	
 loadType();
-$crontabEntryStatus = checkEntryExistsCrontab();
+$crontabEntryStatus = checkEntryExistsCrontab() if($mainMenuChoice != 8);
 if($mainMenuChoice == 1 || $mainMenuChoice == 3) {
 	if ($mainMenuChoice == 1 and $dedup eq 'on'){
 		print qq{Your Backup Location name is "}.$backupHost.qq{". $lineFeed};
@@ -118,44 +122,103 @@ if($mainMenuChoice == 1 || $mainMenuChoice == 3) {
 	system('stty','echo');
 	print $scheduleMsg;
 	createFileSet();
-} elsif($mainMenuChoice == 2 || $mainMenuChoice == 4) {
+} elsif($mainMenuChoice == 2 || $mainMenuChoice == 4 || $mainMenuChoice == 6) {
 	if(checkEntryExistsCrontab()) {
 		$rmFlag = 1;
-		print $lineFeed.Constants->CONST->{'delExistingSchJob'}." $jobType Job(y/n)?";
-		$confirmationChoice = getConfirmationChoice();
+		if($mainMenuChoice == 6){
+			print $lineFeed.Constants->CONST->{'delExistingArchiveJob'}."(y/n)?";
+		} else {
+			print $lineFeed.Constants->CONST->{'delExistingSchJob'}." ".lc($jobType)." job(y/n)?";
+		}
 		
+		$confirmationChoice = getConfirmationChoice();		
 		if($confirmationChoice eq "y" || $confirmationChoice eq "Y") {
 			removeEntryFromCrontabLines();
 			my $writeFlag = writeToCrontab();
 			if(!$writeFlag) {
-				print "\nUnable to delete Schedule $jobType Job.\n";
+				if($mainMenuChoice == 6){
+					print "\nUnable to delete ".lc(Constants->CONST->{'periodicArchiveCleanup'})." job.".$lineFeed;
+				} else {
+					print "\nUnable to delete Scheduled ".lc($jobType)." job.\n";
+				}				
 			} else {
-				print $lineFeed.$jobType.' '.Constants->CONST->{'jobRemoveSuccess'}.$lineFeed;
+				if($mainMenuChoice == 6){
+					print $lineFeed.Constants->CONST->{'periodicArchiveCleanup'}.' '.Constants->CONST->{'jobRemoveSuccess'}.$lineFeed;
+				} else {			
+					print $lineFeed.$jobType.' '.Constants->CONST->{'jobRemoveSuccess'}.$lineFeed;
+				}
 			}
 		}
 	} else {
-		print $lineFeed.Constants->CONST->{'noSchJob'}." $jobType Job. \n\n";
+		if($mainMenuChoice == 6){
+			print $lineFeed.Constants->CONST->{'noPeriodicJob'}.$lineFeed.$lineFeed;		
+		} else {
+			print $lineFeed.Constants->CONST->{'noSchJob'}." ".lc($jobType)." job.".$lineFeed.$lineFeed;
+		}
 	}
 	system('stty','echo');
-}elsif ($mainMenuChoice == 5){
+} elsif ($mainMenuChoice == 5){
+	backupTypeCheck();
+	unless($relative){
+		print $lineFeed.Constants->CONST->{'backup_type_must_be_mirror'}."\n\n";
+		exit 0;
+	}
+	
+	$scheduleMsg = "\nPeriodic archive cleanup job has been scheduled successfully.\n\n";
+	#If the backup job already exists in crontab#
+	if ($crontabEntryStatus){
+		print $maximumAttemptMessage;
+		exit(0) if($maximumAttemptMessage =~ /verify your proxy details or check connectivity|password mismatch|encryption verification failed|Failed to connect/i);
+		print $lineFeed.Constants->CONST->{'existingPeriodicJob'};
+		print $whiteSpace.Constants->CONST->{'schEditQuery'}.$whiteSpace;
+	
+		$confirmationChoice = getConfirmationChoice();
+		if($confirmationChoice eq "n" || $confirmationChoice eq "N") {  
+			exit;
+		}
+		$scheduleMsg = "\nPeriodic archive cleanup job has been modified successfully.\n\n";
+		$editFlag = 1;
+	}
+	scheduleJob();
+	my $writeFlag = writeToCrontab();
+	if(!$writeFlag) {
+		print $lineFeed.'Periodic cleanup job '.Constants->CONST->{'jobNotSch'}.$lineFeed;
+		exit(1);
+	}
+	system('stty','echo');
+	print $scheduleMsg;
+	
+	if(!-s $backupsetSchFilePath) {
+		print "Note: Your Scheduled backupset file \"$backupsetSchFilePath\" is empty. ".Constants->CONST->{pleaseUpdate}.$lineFeed;
+	}
+	
+} elsif ($mainMenuChoice == 7){
 	displayScheduledJobs($jobType);
 	goto PRINTMENU;
-}elsif ($mainMenuChoice == 6){
+}elsif ($mainMenuChoice == 8){
 	cancelProcess();	
 }
 sub displayScheduledJobs{
-	my ($bCuttoffFlag,$rCuttoffFlag) = ('Off') x 2;
-	my ($bCutMin,$bCutHr,$rCutMin,$rCutHr,$bCutTime,$rCutTime) = (undef) x 6;
+	my ($bCuttoffFlag,$rCuttoffFlag,$aCuttoffFlag) = ('Off') x 3;
+	my ($bCutMin,$bCutHr,$bCutTime,$rCutMin,$rCutHr,$rCutTime,$aCutMin,$aCutHr,$aCutTime) = (undef) x 9;
 	my ($bSchMin,$bSchHr,$bSchFrequency) = (undef) x 3;
 	my ($rSchMin,$rSchHr,$rSchFrequency) = (undef) x 3;
-	my (@schBackData,@schResData) = (()) x 2;
+	my ($aSchMin,$aSchHr,$aSchFrequency) = (undef) x 3;
+	my $startDate = undef;
+	my (@schBackData,@schResData,@schArcData) = (()) x 3;
 	my $tableData = '';
-	my $backupScheduledJob = (split('/',$usrProfilePath))[-1]."/$userName/Backup/Scheduled";
-	my $restoreScheduleJob = (split('/',$usrProfilePath))[-1]."/$userName/Restore/Scheduled";
+
+	#my $backupScheduledJob = (split('/',$usrProfilePath))[-1]."/$userName/Backup/Scheduled";
+	#my $restoreScheduleJob = (split('/',$usrProfilePath))[-1]."/$userName/Restore/Scheduled";
+	my $backupScheduledJob = $usrProfilePath."/$userName/Backup/Scheduled";
+	my $restoreScheduleJob = $usrProfilePath."/$userName/Restore/Scheduled";
+	my $archiveScheduleJob = $usrProfilePath."/$userName/Archive/Scheduled";
+	
 	my $readable = readFromCrontab();
 	if($readable == 0){
 		@linesCrontab = readCrontabAsRoot();
 	}
+
 	my @schBackupJobs = grep /$backupScheduledJob/,@linesCrontab;
 	if (scalar(@schBackupJobs) > 0 ){
 		($bSchMin,$bSchHr,$bSchFrequency) = (split (/ /,$schBackupJobs[0]))[0,1,4];
@@ -163,9 +226,9 @@ sub displayScheduledJobs{
 		if ($schBackupJobs[1] ne ''){
 			$bCuttoffFlag = 'On';
 			($bCutMin,$bCutHr) = (split (/ /,$schBackupJobs[1]))[0,1];
-			$bCutTime = ($bCutMin ne '' and $bCutHr ne '') ? $bCutHr.':'.$bCutMin : '';
 		}
-		@schBackData = ('Backup',$bSchFrequency,"$bSchHr:$bSchMin",$bCuttoffFlag,$bCutTime);
+		$bCutTime = ($bCutMin ne '' and $bCutHr ne '') ? $bCutHr.':'.$bCutMin : 'NA';
+		@schBackData = ('Backup',$bSchFrequency,"$bSchHr:$bSchMin",$bCuttoffFlag,$bCutTime,"NA");
 	}
 	my @schRestoreJobs = grep /$restoreScheduleJob/,@linesCrontab;
 	if (scalar(@schRestoreJobs) > 0){
@@ -174,14 +237,40 @@ sub displayScheduledJobs{
         	if ($schRestoreJobs[1] ne ''){
                 	$rCuttoffFlag = 'On';
 	                ($rCutMin,$rCutHr) = (split (/ /,$schRestoreJobs[1]))[0,1];
-			$rCutTime = ($rCutMin ne '' and $rCutHr ne '') ? $rCutHr.':'.$rCutMin : '';
         	}
-		@schResData = ('Restore',$rSchFrequency,"$rSchHr:$rSchMin",$rCuttoffFlag,$rCutTime);
+			$rCutTime = ($rCutMin ne '' and $rCutHr ne '') ? $rCutHr.':'.$rCutMin : 'NA';
+		@schResData = ('Restore',$rSchFrequency,"$rSchHr:$rSchMin",$rCuttoffFlag,$rCutTime,"NA");
 	}
-	my @columnNames = (['Job Name','Frequency','Scheduled Time','Cut-off','Cut-off Time'],[11,26,16,10,15]);
+	my @schArchiveJobs = grep /$archiveScheduleJob/,@linesCrontab;
+	if (scalar(@schArchiveJobs) > 0){
+		my @cronDataArr      = split(/ /,$schArchiveJobs[0]);
+		my $cronDataArrCount = $#cronDataArr;
+		$aSchMin 		= $cronDataArr[0];
+		$aSchHr  		= $cronDataArr[1];
+		$aSchFrequency  = $cronDataArr[$cronDataArrCount-1];
+		$startDate	    = $cronDataArr[$cronDataArrCount];
+		#($aSchMin,$aSchHr,$aSchFrequency,$startDate) = (split (/ /,$schArchiveJobs[0]))[0,1,12,13];
+		#$aSchFrequency = 'DAILY' if ($aSchFrequency eq '*');
+		$aSchFrequency =~ s/'//g;
+		$aSchFrequency = "Every ".ordinal($aSchFrequency)." Day";
+		if ($schArchiveJobs[1] ne ''){
+				$aCuttoffFlag = 'On';
+				($aCutMin,$aCutHr) = (split (/ /,$schArchiveJobs[1]))[0,1];
+		}
+		else
+		{
+			$aCuttoffFlag = 'NA';
+		}
+		$aCutTime = ($aCutMin ne '' and $aCutHr ne '') ? $aCutHr.':'.$aCutMin : 'NA';
+		$startDate =~ s/'//g;
+		my ($day,$month,$year) = (localtime($startDate))[3,4,5];
+		$startDate  = ($year+1900)."-$month-$day";
+		@schArcData = ('Archive',$aSchFrequency,"$aSchHr:$aSchMin",$aCuttoffFlag,$aCutTime,$startDate);
+	}
+	my @columnNames = (['Job Name','Frequency','Scheduled Time','Cut-off','Cut-off Time','Start Date'],[11,26,16,10,15,15]);
 	my $tableHeader = (getTableHeader(@columnNames));
 	$tableHeader  =~ s/\n$//;
-	my $tableData = getScheduleJobTableData(\@schBackData,\@schResData,$columnNames[1]);
+	my $tableData = getScheduleJobTableData(\@schBackData,\@schResData,\@schArcData,$columnNames[1]);
 	if ($tableData ne ''){
 		print $lineFeed.Constants->CONST->{'scheduleJobDet'}.$lineFeed;
 		print $tableHeader.$lineFeed.$tableData;
@@ -191,9 +280,9 @@ sub displayScheduledJobs{
 	print $lineFeed;	
 }
 sub getScheduleJobTableData{
-	my @displayData = (@{$_[0]},@{$_[1]});
-	my @spacesBtwWords = @{$_[2]};
-	my ($dataInOneLine,$spaceIndex,$tableData) = (5,0,'');
+	my @displayData = (@{$_[0]},@{$_[1]},@{$_[2]});
+	my @spacesBtwWords = @{$_[3]};
+	my ($dataInOneLine,$spaceIndex,$tableData) = (6,0,'');
 	foreach(@displayData){
 		$tableData .= $_;
 		$tableData .= ' ' x ($spacesBtwWords[$spaceIndex] - length($_));
@@ -232,7 +321,11 @@ sub scheduleJob {
 			$dayOptionPresentCrontab = join ",", @dayOptionsPresentCrontab;
 		}
 	}
-	mainOperation();
+	if($mainMenuChoice != 5){
+		mainOperation();
+	} else {
+		getPeriodicDetail();
+	}	
 }
 
 #****************************************************************************************************
@@ -243,13 +336,15 @@ sub scheduleJob {
 sub printMainMenu
 {
 	print Constants->CONST->{'AskOption'}."\n\n";
-#	print "\n";
+	
 	print "1) Schedule Backup Job\n";
 	print "2) Delete Scheduled Backup Job\n";
 	print "3) Schedule Restore Job\n";
 	print "4) Delete Scheduled Restore Job\n";
-	print "5) View Scheduled Jobs\n";
-	print "6) Exit\n";
+	print "5) Periodic Archive Cleanup\n";
+	print "6) Delete Periodic Archive Cleanup\n";
+	print "7) View Scheduled Jobs\n";
+	print "8) Exit\n";
 #	print "\n";
 }
 
@@ -280,7 +375,7 @@ sub getMenuChoice {
 			$choice = <>;
 			Chomp(\$choice);
 			$choice =~ s/^0+(\d+)/$1/g;
-			if($choice =~ m/^\d$/) {
+			if($choice =~ m/^\d+$/) {
 				if($choice < 1 || $choice > $maxVal) {
 					$choice = undef;
 					print Constants->CONST->{'InvalidChoice'}." " if ($count < 3);
@@ -310,21 +405,28 @@ sub loadType {
 	} elsif($mainMenuChoice eq 3 or $mainMenuChoice eq 4) {
 		$jobType = "Restore";
 		$scriptType = Constants->FILE_NAMES->{restoreScript};
+	} elsif($mainMenuChoice eq 5 or $mainMenuChoice eq 6) {
+		$jobType = "Archive";
+		$scriptType = Constants->FILE_NAMES->{archiveCleanupScript};
 	}
 
 	$jobRunningDir = "$usrProfilePath/$userName/$jobType/Scheduled";
 	$checkScriptCronEntry = (split('/',$usrProfilePath))[-1]."/$userName/$jobType/Scheduled";
 	if(!-e $jobRunningDir) {
-		my $ret = mkdir($jobRunningDir);
-		if($ret ne 1) {
+		my $ret = createDirectory($jobRunningDir);
+		if(!-e $jobRunningDir) {
 			print Constants->CONST->{'MkDirErr'}.$jobRunningDir.": $!".$lineFeed;
 			exit 1;
 		}
 	}
 	chmod $filePermission, $jobRunningDir;
-
+	
 	$scriptName = qq{$perlPath "$userScriptLocation/$scriptType"};
-	$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." SCHEDULED $userName";
+	if($mainMenuChoice eq 5 or $mainMenuChoice eq 6) {
+		$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." $userName";
+	} else {
+		$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." SCHEDULED $userName";
+	}
 }
 
 #****************************************************************************************************
@@ -551,7 +653,7 @@ sub getNscheduleCutOff {
 			print Constants->CONST->{'maxRetryCuttoff'}.$lineFeed;
 		}else{# If user enters correct input the cutoff will be scheduled properly
 			$scriptName = qq{$perlPath "$userScriptLocation/}.Constants->FILE_NAMES->{jobTerminationScript}.qq{"};
-			$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." scheduled_$jobType $userName";			
+			$scriptPath = "cd ".qq("$jobRunningDir")."; ".$scriptName." scheduled_".lc($jobType)." $userName";			
 		}
 	}
 }
@@ -595,7 +697,7 @@ sub mainOperation {
                         $cuttOffDailyFlag = 1; #For cutt-off this flag should be initialized with 1 as user enter all days of the week after selecting weekly.
         }
 	if(($mainMenuChoice == 1 || $mainMenuChoice == 3) and $editFlag == 0) {
-		$scheduleMsg = "\n$jobType Job has been scheduled successfully for";
+		$scheduleMsg = "\n$jobType job has been scheduled successfully for";
 	
 		foreach my $value (@daysEntered) {
 			$scheduleMsg .= " $hashDays{$value}";
@@ -610,7 +712,7 @@ sub mainOperation {
 			@daysEnteredCrontab = '*';
 		}
 			
-		$scheduleMsg .= "$jobType Job has been modified successfully to";
+		$scheduleMsg .= "$jobType job has been modified successfully to";
 		
 		#Commented by Senthil for Snigdha_2.11_7_2
 		#foreach my $value (@daysEnteredCrontab) {
@@ -795,7 +897,7 @@ sub readCrontabAsRoot {
 		$command = qq{$perlPath '$operationsScript' '$jobRunningDir'};
 	}
 	
-	traceLog("Read cron entry command: $command", __FILE__, __LINE__);
+	# traceLog("Read cron entry command: $command");
 	my @res = `$command`;
 	unlink($temp);
 	return @res;
@@ -829,7 +931,7 @@ sub writeToCrontab {
 	} else {
 		$command = qq{$perlPath '$operationsScript' '$jobRunningDir'};
 	}
-	traceLog(" Cron entry command: $command", __FILE__, __LINE__);
+	# traceLog("Cron entry command: $command");
 	my $res = system($command);
 	unlink($temp);
 	if($res ne "0") {
@@ -902,7 +1004,7 @@ sub emailNotifyQueries {
 		($notifyFlag, $notifyEmailIds) = ("DISABLED", $configEmailAddress);
 	} else {
 		unless(open NOTIFYFILE, "<", $mailNotifyFlagFile) {
-			traceLog(Constants->CONST->{FileOpenErr}." $mailNotifyFlagFile, Reason: $!".$lineFeed, __FILE__, __LINE__);
+			traceLog(Constants->CONST->{FileOpenErr}." $mailNotifyFlagFile, Reason: $!");
 			print $lineFeed.$whiteSpace.Constants->CONST->{'failedMailNotifyGet'}.$lineFeed;
 			exit(1);
 		}
@@ -918,7 +1020,7 @@ sub emailNotifyQueries {
 	}
 	
 	unless(open ENABLEFILE, ">", $mailNotifyFlagFile) {
-		traceLog(Constants->CONST->{FileOpenErr}." $mailNotifyFlagFile, Reason: $!".$lineFeed, __FILE__, __LINE__);
+		traceLog(Constants->CONST->{FileOpenErr}." $mailNotifyFlagFile, Reason: $!");
 		print $lineFeed.$whiteSpace.Constants->CONST->{'failedMailNotifySet'}.$lineFeed;
 		exit(1);
 	}
@@ -935,7 +1037,9 @@ sub emailNotifyQueries {
 		} 
 		
 		if($notifyEmailIds) {
-			print $lineFeed.Constants->CONST->{'existingEmail'}.$notifyEmailIds.$lineFeed;
+			my $emailValue = $notifyEmailIds;
+			#substr($emailValue,-1,1,".");
+			print $lineFeed.Constants->CONST->{'existingEmail'}.$emailValue.".".$lineFeed;
 			print $lineFeed.Constants->CONST->{'editQuery'}.$whiteSpace;
 			$confirmationChoice = getConfirmationChoice();
 			if($confirmationChoice eq "n" or $confirmationChoice eq "N") {
@@ -1034,4 +1138,109 @@ sub emailNotifyQueries {
 		print ENABLEFILE "DISABLED\n";
 	}
 	close(ENABLEFILE);
+}
+
+#****************************************************************************
+# Subroutine Name         : getPeriodicDetail.
+# Objective               : 
+# Added By                : Senthil Pandian
+#****************************************************************************/
+sub getPeriodicDetail {
+	my $per  = getPercentageLimit();
+	my $days = getNumberOfDays();
+	if($editFlag) {
+		removeEntryFromCrontabLines();
+	}
+	my ($sec,$minute,$hour,$mday,$month,$year,$wday,$yday,$isdst) = localtime;
+	$year   = $year+1900;
+	$month  = $month+1;
+	#my $datestring = "$year-$month-$mday";
+	my $datestring = time;
+	$scriptPath .= " '$per' '$days' '$datestring'";
+	$numArguments = 7;
+	if(length $minute == 1) {
+		$minute = "0".$minute;  
+	}
+	$entryCrontabString = createCrontabEntry(\$scriptPath, \$minute, \$hour);
+	push(@linesCrontab, $entryCrontabString);
+}
+
+#****************************************************************************************************
+# Subroutine Name         : getPercentageLimit.
+# Objective               : Subroutine to get the percentage for consider
+# Added By                : Senthil Pandian
+#*****************************************************************************************************/
+sub getPercentageLimit
+{
+	if(!$selectJobTermination) {
+		print "\nPercentage limit beyond which cleanup will not take place [5-25]\n";
+	}
+	
+	my $ChoosenPer = undef;
+	my $choiceCount = 0;
+	while(!defined $ChoosenPer) { 
+		if ($choiceCount < 4){
+			print "Enter Percentage [5-25]: ";
+			chomp($ChoosenPer = <>);
+			Chomp(\$ChoosenPer);
+			if($ChoosenPer eq "" or $ChoosenPer =~ m/\D/ or $ChoosenPer < 5 or $ChoosenPer > 25 or $ChoosenPer !~ m/^[0-9]{1,2}$/) {
+				$ChoosenPer = undef;
+				print Constants->CONST->{'InvalidChoice'}." " if ($choiceCount < 3);
+			}
+			else {
+				if(length $ChoosenPer > 1 && $ChoosenPer =~ m/^0/) {
+					$ChoosenPer = substr $ChoosenPer, 1;  
+				}
+				return $ChoosenPer;
+			}
+		}else{
+			print Constants->CONST->{'maxRetry'}.$lineFeed;
+			exit;
+		}
+		$choiceCount++;	
+	}
+}
+#****************************************************************************************************
+# Subroutine Name         : getNumberOfDays.
+# Objective               : Subroutine to get the number of days of the month
+# Added By                : Senthil Pandian
+#*****************************************************************************************************/
+sub getNumberOfDays
+{
+	if(!$selectJobTermination) {
+		print "\nNumber of days of the month, after which data is automatically cleaned up for your backup set.\n";
+	}
+	
+	my $ChoosenPer = undef;
+	my $choiceCount = 0;
+	while(!defined $ChoosenPer) { 
+		if ($choiceCount < 4){
+			print "Enter the days [10-30]: ";
+			chomp($ChoosenPer = <>);
+			Chomp(\$ChoosenPer);
+			if($ChoosenPer eq "" or $ChoosenPer =~ m/\D/ or $ChoosenPer < 10 or $ChoosenPer > 30 or $ChoosenPer !~ m/^[0-9]{1,2}$/) {
+				$ChoosenPer = undef;
+				print Constants->CONST->{'InvalidChoice'}." " if ($choiceCount < 3);
+			}
+			else {
+				if(length $ChoosenPer > 1 && $ChoosenPer =~ m/^0/) {
+					$ChoosenPer = substr $ChoosenPer, 1;  
+				}
+				return $ChoosenPer;
+			}
+		}else{
+			print Constants->CONST->{'maxRetry'}.$lineFeed;
+			exit;
+		}
+		$choiceCount++;	
+	}
+}
+
+#*****************************************************************************************************
+# Subroutine			: ordinal
+# Objective				: This subroutine to describe the numerical position of an number
+# Added By				: Senthil Pandian
+#****************************************************************************************************/
+sub ordinal {
+  return $_.(qw/th st nd rd/)[/(?<!1)([123])$/ ? $1 : 0] for int shift;
 }

@@ -1,91 +1,67 @@
 #!/usr/bin/perl
-##################################################
-#Edit_Supported_Files.pl
-##################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
-require Constants;
-require 'Header.pl';
-#use strict;
-#use warnings;
-system("clear");
-loadUserData();
-headerDisplay($0);
-my $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
+#*****************************************************************************************************
+# This script is used to edit the supported files like Backup/Restore set files for both normal and scheduled
+# 							Created By: Sabin Cheruvattil													
+#****************************************************************************************************/
+use strict;
+use warnings;
 
-#This if and else block will check the user account configuration details and login details.
+if(__FILE__ =~ /\//) { use lib substr(__FILE__, 0, rindex(__FILE__, '/')) ;	} else { use lib '.' ; }
 
-if(getAccountConfStatus($confFilePath)){
-	exit(0);
-}
-else{
-	if(getLoginStatus($pwdPath)){
-			exit(0);
-	}
-}
-$menu	=	{'1.Backup'  => {1 => ["Edit your Manual Backupset File","$backupsetFilePath"], 2 => ["Edit your Scheduled Backupset File","$backupsetSchFilePath"]},
-				'2.Express Backup' => {3 => ["Edit your Express Backupset File","$localBackupsetFilePath"]},
-				'3.Exclude' => {4 => ["Edit your FullExcludeList File","$excludeFullPath"], 5 => ["Edit your PartialExcludeList File","$excludePartialPath"], 6 => ["Edit your RegexExcludeList File","$regexExcludePath"]},
-				'4.Restore' => {7 => ["Edit your Manual Restoreset File","$RestoresetFile"], 8 => ["Edit your Scheduled Restoreset File","$RestoresetSchFile"]}			 
-				
-			};
-@menuArray = ['1.Backup','2.Express Backup','3.Exclude','4.Restore'];
+use Helpers;
+use Strings;
+use Configuration;
+use File::Basename;
+
+
+init();
+
+#*****************************************************************************************************
+# Subroutine			: init
+# Objective				: This function is entry point for the script
+# Added By				: Sabin Cheruvattil
+# Modified By			: Anil Kumar [04/05/2018]
+#****************************************************************************************************/
+sub init {
+	system('clear');
+	Helpers::loadAppPath();
+	Helpers::loadServicePath() 			or Helpers::retreat('invalid_service_directory');
+	Helpers::loadUsername()				or Helpers::retreat('login_&_try_again');
+	Helpers::loadUserConfiguration()	or Helpers::retreat('your_account_not_configured_properly');
+	Helpers::isLoggedin()            	or Helpers::retreat('login_&_try_again');
+	
+	Helpers::displayHeader();
+	
+	my ($continueMenu, $menuUserChoice, $editFilePath, $maxMenuChoice) = ('y', 0, '', 0);
+	my %menuToPathMap;
+	while($continueMenu eq 'y') {
+		$maxMenuChoice = displayMenu(\%menuToPathMap);
 		
-my $filePermission = 0777;
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations Start ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-START:
-print Constants->CONST->{'AskOption'}.qq($lineFeed$lineFeed);
-displayMenu($menu);
-print $lineFeed.Constants->CONST->{'ctrlc2Exit'}.$lineFeed;
-print $lineFeed.Constants->CONST->{'EnterChoice'};
-my $userChoice = <STDIN>;
-Chomp(\$userChoice);
-$userChoice =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-my $keyName = returnKeyName($userChoice,@menuArray);#userChoice and array of keyname to be returned
-unless ($keyName){
-	print $lineFeed.Constants->CONST->{'InvalidChoice'}.Constants->CONST->{'TryAgain'}.$lineFeed;
-	exit(0);
+		Helpers::display(["\n", '__note_please_press_ctrlc_exit']);
+		$menuUserChoice = Helpers::getUserMenuChoice($maxMenuChoice);
+		$editFilePath 	= Helpers::getUserFilePath($menuToPathMap{$menuUserChoice});
+		($editFilePath ne '')? Helpers::openEditor('edit', $editFilePath) : Helpers::display(['unable_to_open', '. ', 'invalid_file_path', ' ', '["', $editFilePath, '"]']);
+		Helpers::display(['do_you_want_to_edit_any_other_files_yn']);
+		$continueMenu = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+	}
 }
-if (openViEditor($menu,$keyName,$userChoice)){
-	print $lineFeed;
-	goto START;
-}
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations End ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Defining utility functions ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#****************************************************************************
-#Subroutine Name         : openViEditor
-#Objective               : To open vi editor for given file.
-#Usgae                   : openViEditor($menu,$keyName,$userChoice)
-#                        : $menu	: Contains data related to menu operation.
-#                        : $keyName	: name of the key correcponding to user's choice from $menu.
-#                        : $userChoice	: user's choice from $menu.
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub openViEditor {
-	my $fileLocation = $_[0]->{$_[1]}->{$_[2]}->[1];
-	if ($_[2] =~ /^[1267]$/){ # Handle case when schedulebackup / restore set file is not created.
-		if (!-e $fileLocation){
-			$fileLocation =~ /(.*\/)[a-zA-Z0-9.]/;
-			my $scheduleDirLoc = $1;
-			my $mkRes = `mkdir -p '$scheduleDirLoc' $errorRedirection`;
-			open(SETFILE, ">", $fileLocation) or die "Couldn't create $fileLocation, Reason: $!\n";
-	                close(SETFILE);
-        	        chmod $filePermission, $fileLocation;
-		}
+#*****************************************************************************************************
+# Subroutine			: displayMenu
+# Objective				: Helps to display the menu
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub displayMenu {
+	my ($opIndex, $pathIndex) = (1, 1);
+	my @fileMenuOptions;
+	Helpers::display(['menu_options_title', ':', "\n"]);
+	
+	foreach my $mainOperation (keys %Configuration::editFileOptions) {
+		Helpers::display([$mainOperation . '_title', ':']);
+		@fileMenuOptions = sort keys %{$Configuration::editFileOptions{$mainOperation}};
+		Helpers::display([map{qq(\t) . $opIndex++ . ") ", $Locale::strings{'edit_' . $_ . '_file'} . "\n"} @fileMenuOptions], 0);
+		%{$_[0]} = (%{$_[0]}, map{$pathIndex++ => $Configuration::editFileOptions{$mainOperation}{$_}} @fileMenuOptions);
 	}
-	print $lineFeed.Constants->CONST->{'viEditClosureMessage'}.$lineFeed;
-	print $lineFeed.Constants->CONST->{'FileopeningMess'}.$lineFeed;
-	holdScreen2displayMessage(4);
-	#print $lineFeed.Constants->CONST->{'fileEditSuccessfully'}.$lineFeed;
-	my $operationStatus = system "vi '$fileLocation'";
-	if ($operationStatus == 0){
-		print $lineFeed.qq(File "$fileLocation" ).Constants->CONST->{'fileEditSuccessfully'}.$lineFeed;
-		print $lineFeed.Constants->CONST->{'editOtherSupportedFiles'};
-		my $choice = getConfirmationChoice();
-		Chomp($choice);
-		return 1 if ($choice =~/^y$/i);
-	}else{
-		print $lineFeed.Constants->CONST->{'operationNotCompleted'}.qq(Reason : $!\n);
-	}
+	
+	return $opIndex - 1;
 }
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Functions defination End ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

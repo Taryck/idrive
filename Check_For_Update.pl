@@ -1,503 +1,330 @@
 #!/usr/bin/perl
+#*****************************************************************************************************
+# 				This script is used to check update is available or not and manual update
+# 							Created By: Sabin Cheruvattil
+#****************************************************************************************************/
+use strict;
+use warnings;
 
-#################################################################################
-#Script Name : Check_For_Update.pl
-#################################################################################
+if(__FILE__ =~ /\//) { use lib substr(__FILE__, 0, rindex(__FILE__, '/')) ;	} else { use lib '.' ; }
 
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+use Helpers;
+use Strings;
+use Configuration;
+use File::Basename;
+use File::Copy qw(copy);
+use Scalar::Util qw(reftype);
 
-our $lineFeed = undef;
-our $whiteSpace = undef;
-our $confFilePath = undef;
-our $usrProfilePath = undef;
+init();
 
-#use Constants 'CONST';
-require Constants;
-require 'Header.pl';
-
-
-#-----------------------------------------Command Line ARG processing-------------------------------------------
-my $availUpdateStats = $ARGV[0]; #This script is also used to check new version availability. So this variable is used. Requested by isUpdateAvailable() subroutine
-my $forceUpdate = $ARGV[1];
-				# Header.pl
-#---------------------------------------------------------------------------------------------------------------
-
-my $checkUpdateCGI = "https://www1.ibackup.com/cgi-bin/check_version_upgrades_idrive_evs_new.cgi?"; 
-my $curl  = whichPackage(\"curl");
-my $wget  = whichPackage(\"wget");
-my $unzip = whichPackage(\"unzip");
-my $productLink = undef;
-my $latestVersion = undef;
-my $currentVersion = Constants->CONST->{'ScriptBuildVersion'};
-Chomp(\$currentVersion);
-
-my $product = $appType.Constants->CONST->{'Product'};
-#my $currentDir = `pwd`;
-chomp(my $currentDir = $userScriptLocation);
-my $temp = "/tmp";
-my $idriveZip = undef;
-my $idriveDir = undef;
-my $packageDirName = undef;
-my $errMsg = undef;
-my $idriveBackup = qq($temp/$appType).q(_backup);# This folder will be created in /tmp directory to keep the working directory .pl files as backup.
-my $pos = rindex($currentDir, "/");
-my $currentIdriveDir = substr($currentDir, 0, $pos);
-my $wgetLogFile = $currentDir.'/wgetLog.txt';
-my $updateLogFile = $currentDir.'/.updateLog.txt';
-my ($cgiCmd, $wgetCmd) = ('') x 2;
-my $zipPath = undef;
-loadUserData();
-#my $scrptDir = $currentDir;
-my @fileNames = ('Account_Setting.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','Login.pl','Logout.pl','Operations.pl','readme.txt','Restore_Script.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','Edit_Supported_Files.pl','View_Log.pl','Uninstall_Script.pl');
-if(!$currentVersion) {
-	$errMsg = "\n Couldn't extract current version number\n";
-	cleanUp($errMsg);
-}
-
-if($product =~ /IDrive/) {
-	$packageDirName = 'IDrive_for_Linux';
-	$productLink = "https://www.idrivedownloads.com/downloads/linux/download-for-linux/IDrive_for_Linux.zip";
-	#$productLink = "--user=deepak --password=deepak --http-user=deepak --http-password=deepak http://192.168.2.169/svn/linux_repository/trunk/PackagesForTesting/IDriveForLinux/IDrive_for_Linux.zip";
-	$idriveZip = $temp."/"."$packageDirName.zip";
-	$idriveDir = $temp."/$packageDirName";
-} elsif($product =~ /IBackup/) {
-	$packageDirName = 'IBackup_for_Linux';
-	$productLink = "https://www.ibackup.com/online-backup-linux/downloads/download-for-linux/IBackup_for_Linux.zip";
-	#$productLink = "--user=deepak --password=deepak --http-user=deepak --http-password=deepak http://192.168.2.169/svn/linux_repository/trunk/PackagesForTesting/IBackupForLinux/IBackup_for_Linux.zip";
-	$idriveZip = $temp."/"."$packageDirName.zip";
-	$idriveDir = $temp."/$packageDirName";
-} else {
-	$errMsg = "\n Couldn't extract product name\n";
-	cleanUp($errMsg);
-}
-
-system("clear");
-headerDisplay($0);
-		
-#getProxyDetails() if(!($availUpdateStats eq 'availUpdate'));
-getProxyDetails() if(!defined($availUpdateStats));
-
-#if(!defined($availUpdateStats) or $availUpdateStats eq "availUpdate"){
-	#$checkUpdateCGI = $checkUpdateCGI."appln='$product&version=$currentVersion'";
-	$checkUpdateCGI = '"'.$checkUpdateCGI."appln=$product&version=$currentVersion".'"';
-	($cgiCmd, $wgetCmd) = formCmd();
-
-# When argument one is package zip file path
-if($availUpdateStats =~ /.zip/i) {
-	if(!-e $availUpdateStats){
-		$errMsg = $lineFeed.Constants->CONST->{'NotFound'}.$availUpdateStats.$lineFeed;
-		cleanUp($errMsg);
-	}	
-	$zipPath = getZipPath($availUpdateStats);
-}
-elsif(!$forceUpdate && (!defined($availUpdateStats) || ($availUpdateStats eq "availUpdate"))) {			# If force Update is not enabled
-	my $updateExists = checkUpdate();
-
-	if(!$updateExists and !($availUpdateStats eq 'availUpdate')) {
-		$errMsg = $product.Constants->CONST->{'productUptoDate'}.$lineFeed;
-		cleanUp($errMsg);
+#*****************************************************************************************************
+# Subroutine			: init
+# Objective				: This function is entry point for the script
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub init {
+	Helpers::loadAppPath();
+	Helpers::loadServicePath();
+	Helpers::loadUsername();
+	Helpers::loadUserConfiguration(1);
+	
+	my ($packageName, $updateAvailable, $taskParam) =  ('', 0, $ARGV[0]);
+	$taskParam = '' if(!defined($taskParam));
+	
+	if($taskParam =~ /.zip$/i or $taskParam eq ''){
+		system('clear');
+		Helpers::displayHeader();
 	}
-	elsif($availUpdateStats eq 'availUpdate'){#If updated version of scripts are available then create updateVersionInfo and exit.
-		if($updateExists == 1){
-			open (VN,'>', $userScriptLocation.'/.updateVersionInfo'); #VN file handler means version number.
-			print VN Constants->CONST->{'ScriptBuildVersion'}; 
-			close VN;
-			chmod $filePermission,$userScriptLocation.'/.updateVersionInfo';
-		}
-		exit;
-	}
-	print $lineFeed.Constants->CONST->{'verAvlqueryMsg'};
-	my $updateChoice = getConfirmationChoice();
-	if($updateChoice eq "n" || $updateChoice eq "N" ) {
-		$errMsg = "";
-		cleanUp($errMsg);
-	}
-}
-elsif($availUpdateStats ne ""){
-	$errMsg = $lineFeed.Constants->CONST->{'InvalidZipFile'}.$lineFeed.$productLink.$lineFeed.$lineFeed;
-	cleanUp($errMsg);
-}
-
-removeUpdateVersionInfoFile($userScriptLocation.'/.updateVersionInfo');#Remove the given file if exists.
-if(!chdir($temp)) {
-		$errMsg = "Unable to update: $!\n";
-		cleanUp($errMsg);
-}
-print $lineFeed.Constants->CONST->{'updatingScripts'}.$lineFeed;
-cleanUp("INIT");
-updateOperation();
-
-#*************************************************************************************************
-# Subroutine Name		: cleanUp.
-# Objective			: This subroutine cleans up the prexisting files that was created during 
-#				  previous version update check.					
-# Added By			: Dhritikana
-#*************************************************************************************************/
-sub cleanUp {
-	if(-e $idriveZip) {
-		unlink($idriveZip);
-	}
-	#if($_[0] eq "SUCCESS" or $_[0] eq "INIT") { #Commented by Senthil to cleanup for failure case too
-		if($idriveDir ne '/' and -e $idriveDir) {
-			`rm -rf '$idriveDir'`;
-		}
-		if ($idriveBackup ne '/' and -e $idriveBackup){
-			`rm -rf '$idriveBackup'`;
-		}
-		if(-e $temp."/scripts"){
-			`rm -rf $temp/scripts`;
-		}
-		unlink("$wgetLogFile");
-		unlink("unzipLog.txt");
-		unlink ($updateLogFile);
-	#}	
-	if($_[0] ne "SUCCESS"  and $_[0] ne "INIT"){
-		print $_[0];
-		exit;
-	}
-}
-#*************************************************************************************************
-# Subroutine Name		: updateOperation.
-# Objective				: This subroutine updates the version to latest.					
-# Added By				: Dhritikana
-#*************************************************************************************************/
-sub updateOperation {
-	if(defined($availUpdateStats) and $availUpdateStats ne "availUpdate"){
-		my  $packageUnzipLoc = $temp;
-		my $errorFile = "unzip_error";
-			$packageUnzipLoc =~ s/\'/\'\\''/g;
-			$packageUnzipLoc = "'".$packageUnzipLoc."'";
-		my  $packageZipFile  = $zipPath;
-			$packageZipFile  =~ s/\'/\'\\''/g;
-			$packageZipFile  = "'".$packageZipFile."'";
-		my  $optionSwitch    = '-d';
-		my  $outputDevNull   = '1>/dev/null';
-		my  $errorRedirect    = '2>'.$errorFile;
-
-		if($packageZipFile !~ /$packageDirName.zip/){
-			$errMsg = $lineFeed.Constants->CONST->{'InvalidZipFile'}.$lineFeed.$productLink.$lineFeed.$lineFeed;
-			cleanUp($errMsg);			
-		}
-=beg		if(!-e $zipPath){
-			$errMsg = $lineFeed.Constants->CONST->{'NotFound'}.$packageZipFile.$lineFeed;
-			cleanUp($errMsg);			
-		}		
-=cut		
-		$res = system("$unzip -o $packageZipFile $optionSwitch $packageUnzipLoc $outputDevNull $errorRedirect");
-		if(defined($res)) {
-			if($res != 0 && $res ne "") {
-				$error = readErrorFile($errorFile);
-				$errMsg = $lineFeed."".Constants->CONST->{'unzipFailed'}->($ARGV[0]).$error.$lineFeed;
-				unlink($errorFile);
-				cleanUp($errMsg);
-			}
-		}	
+	Helpers::findDependencies(0) or Helpers::retreat('failed');
+	
+	if($taskParam =~ /.zip$/i) {
+		#system('clear');
+		#Helpers::displayHeader();
+		$packageName		= $taskParam;
+		deleteVersionInfoFile();
+		cleanupUpdate('INIT');
 		
-		my $constantsFilePath = $idriveDir."/scripts/".Constants->FILE_NAMES->{ConstantsFile};
-		if(!-e $constantsFilePath){
-			$errMsg = $lineFeed.Constants->CONST->{'InvalidZipFile'}.$lineFeed.$productLink.$lineFeed.$lineFeed;
-			cleanUp($errMsg);
-		}
+		cleanupUpdate($Locale::strings{'file_not_found'} . ' ' . $packageName) if(!-e $packageName);
+		$packageName	= qq(/$Configuration::tmpPath/$Configuration::appPackageName$Configuration::appPackageExt);
+		copy $taskParam, $packageName;
+	} elsif($taskParam eq "checkUpdate") {
+		$updateAvailable 	= checkForUpdate();
+		updateVersionInfoFile()	if($updateAvailable);	
+		exit(0);
+	} elsif($taskParam eq '') {
+		Helpers::askProxyDetails() or Helpers::retreat('failed') unless(Helpers::getUserConfiguration('PROXYIP'));
+		#system('clear');
+		#Helpers::displayHeader();
+		Helpers::display(["\n",'checking_for_updates', '...']);
 		
-		$downloadedVersion = `cat '$constantsFilePath' | grep -m1 "ScriptBuildVersion => '"`;
-		$downloadedVersion = (split(/'/, $downloadedVersion))[1];	
-		Chomp(\$downloadedVersion);
-		my @currentVersionSplit    = split(/\./, $currentVersion);
-		my @downloadedVersionSplit = split(/\./, $downloadedVersion);
-		$i=0;
-		$isLatest=1;
-		foreach $version (@currentVersionSplit){			
-			#print "\nvalue of a: $version\n";
-			#print "downloadedVersionSplit b:".$downloadedVersionSplit[$i]."\n";
-			if($version gt $downloadedVersionSplit[$i]){
-				$isLatest = 0;
-				last;
-			}
-			$i++;
-		}
-		if($isLatest==0){
-			print $lineFeed.Constants->CONST->{'zippedPackageNotLatest'};
-			my $updateChoice = getConfirmationChoice();
-			if($updateChoice eq "n" || $updateChoice eq "N" ) {
-				$errMsg = "";
-				cleanUp($errMsg);
-			}
-		}
-	} else {
-		#Running the wget command
-		`$wgetCmd`;
+		$packageName 		= qq(/$Configuration::tmpPath/$Configuration::appPackageName$Configuration::appPackageExt);
 		
-		# failure handling for wget command
-		open FILE, "<", "$wgetLogFile";
-		my $wgetRes = join("", <FILE>); 
-		close FILE;
+		$updateAvailable 	= checkForUpdate();
+		Helpers::retreat([$Configuration::appType, ' ', 'is_upto_date']) if(!$updateAvailable);
+		deleteVersionInfoFile();
+		cleanupUpdate('INIT');
 		
-		if($wgetRes =~ /failed:|failed: Connection refused|failed: Connection timed out|Giving up/ || $wgetRes eq "") {
-			$errMsg = $lineFeed.Constants->CONST->{'ProxyErr'}."\n";
-			cleanUp($errMsg);
-		} elsif($wgetRes =~ /Unauthorized/) {
-			$errMsg = $lineFeed.Constants->CONST->{'ProxyUserErr'}.$lineFeed;
-			traceLog("$lineFeed WGET for EVS Bin: $wgetRes $lineFeed", __FILE__, __LINE__);
-			cleanUp($errMsg);
-		} elsif($wgetRes =~ /Unable to establish/) {
-			$errMsg = $lineFeed.Constants->CONST->{'WgetSslErr'}.$lineFeed;
-			traceLog("$lineFeed WGET for EVS Bin: $wgetRes $lineFeed", __FILE__, __LINE__);
-			cleanUp($errMsg);
-		}
-		
-		if(!-e $idriveZip) {
-			$errMsg .= "\n Update failed. Reason: unable to download package.\n";
-			cleanUp($errMsg);
-		}
-		
-		`unzip '$idriveZip' 2>unzipLog.txt`;
+		cleanupUpdate('') if(Helpers::getAndValidate($Locale::strings{'new_updates_available_want_update'} . ' ', 'YN_choice', 1) eq 'n');
+		Helpers::display(['updating_scripts_wait', '...']);
+	} else{
+		Helpers::retreat(['invalid_parameter', ': ', $taskParam, '. ', 'please_try_again', '.']);
 	}
 	
-	#Creating a temporary idrive_backup directory in /tmp directory to keep the backup of scripts from working directory.
-	my $dirCreateResult = createDirectory($idriveBackup);
-	if ($dirCreateResult ne ''){#error handling if the backup directory in /tmp not created.
-		$errMsg = "\n Unable to create directory $idriveBackup to take backup of old scripts. $dirCreateResult \n";
-		cleanUp($errMsg);
-	}
-	if(-s "unzipLog.txt") {
-		$errMsg = "\n Update failed, Reason: unable to unzip. \n";
-		cleanUp($errMsg);
+	if($taskParam !~ /.zip$/i) {
+		# In case param is not zip then need to download the package to update the scripts
+		cleanupUpdate($Locale::strings{'update_failed_to_download'}) if(!Helpers::download($Configuration::appDownloadURL, qq(/$Configuration::tmpPath)));
+		cleanupUpdate($Locale::strings{'update_failed_to_download'}) if(!-e qq($packageName));
 	}
 	
-	# This section of code will try to create a backup for existing scripts
-	my $res = moveFiles($idriveBackup,$currentDir,\@fileNames);
-	if($res ne '') {
-		# Backup creation failed. Trying to revert the scripts to current location
-		my $res = moveFiles($currentDir,$idriveBackup,\@fileNames);
-		if ($res ne ''){
-			$errMsg = $lineFeed.$whiteSpace."Failed to Update.".$lineFeed;
-			cleanUp($errMsg);
-		}else{
-			unlink ($updateLogFile);
-		}
-	}else{
-		unlink ($updateLogFile);
-	}	
-
-	moveUpdates();
-	cleanUp("SUCCESS");
+	# install updates
+	installUpdates($packageName);
 	
-	#Remove the freshInstall file
-	$freshInstallFile = "$userScriptLocation/freshInstall";
-	unlink($freshInstallFile);
+	# Enable in Future
+	deleteDeprecatedScripts();
 	
-	print Constants->CONST->{'UpdateFinished'}.$lineFeed;
-	#displayReleaseNotes();
-	my $readMePath = $currentDir."/".Constants->FILE_NAMES->{readMeFile};
-	if(`which tac 2>/dev/null`){
-		my @latestFeature = `tac '$readMePath' | grep -m1 -B20 "Build"`;
-		my @rfetures = reverse(@latestFeature);
-		print $lineFeed.Constants->CONST->{'ReleaseNotes'}.$lineFeed."==============".$lineFeed.$lineFeed;
-		print @rfetures;
-	} else {
-		my @lastVer = `tail -50 '$readMePath' | grep "Build"`;
-		my $lastVer = $lastVer[scalar(@lastVer)-1];
-		Chomp(\$lastVer);
-		print $lineFeed.Constants->CONST->{'ReleaseNotes'}.$lineFeed."==============".$lineFeed.$lineFeed;
-		print `cat '$readMePath' | grep -A30 "$lastVer"`;
-	}
-
-}
-#*************************************************************************************************
-# Subroutine Name	: readErrorFile.
-# Objective		    : Read the error file & return the error content.					
-# Added By		    : Deepak
-#*************************************************************************************************/
-sub readErrorFile {
-	open FH, "<", $_[0] or die "Unable to open file\n";
-	@error = <FH>;
-	my $fileContent = join '', @error;
-	close(FH);
-	return $fileContent;
+	Helpers::display(['scripts_updated_successfully']);
+	displayReleaseNotes();
+	
+	cleanupUpdate('');
 }
 
 #*************************************************************************************************
-# Subroutine Name	: checkUpdate.
-# Objective		: check if version update exists for the product.					
-# Added By		: Dhritikana
+# Subroutine		: displayReleaseNotes
+# Objective			: display release notes
+# Added By			: Sabin Cheruvattil
 #*************************************************************************************************/
-sub checkUpdate {
-	if(!($availUpdateStats eq 'availUpdate')){
-		print Constants->CONST->{'CheckVerMsg'}.$lineFeed;
-	}
-	my $cgiPostRes = `$cgiCmd`;
-	chomp($cgiPostRes);
-	if($cgiPostRes eq "Y") {
+sub displayReleaseNotes {
+	my $readMePath = Helpers::getAppPath() . qq(/$Configuration::idriveScripts{'readme'});
+	if(`which tail 2>/dev/null`) {
+		my @lastVersion = `tail -50 '$readMePath' | grep "Build"`;
+		my $lastVersion = $lastVersion[scalar(@lastVersion) - 1];
+		Helpers::Chomp(\$lastVersion);
+		Helpers::display(["\n", 'release_notes', ':', "\n", '=' x 15]);
+		Helpers::display([`cat '$readMePath' | grep -A30 "$lastVersion"`]);
 		return 1;
-	} elsif($cgiPostRes eq "N") {
-		return 0;
-	}elsif($cgiPostRes =~ /.*<h1>Unauthorized \.{3,3}<\/h1>.*/){
-		print $lineFeed.Constants->CONST->{'ProxyUserErr'}.$lineFeed;
-                cleanUp($errMsg);
-	} else {
-		#<Deepak> check with ping command if internet is present. Or display error message "Please check your internet connectivity and try again.
-		my $pingRes = `ping -c2 8.8.8.8`;
-		if($pingRes =~ /connect\: Network is unreachable/) {
-			$errMsg = $pingRes;
-		} elsif($pingRes !~ /0\% packet loss/) { ###TEST
-			$errMsg = "\n Please check your internet connectivity and try again.\n";
-		}else{
-			if ($cgiPostRes eq ''){
-				print $lineFeed.Constants->CONST->{'ProxyUserErr'}.$lineFeed;
-			}
-		}
-		cleanUp($errMsg);
 	}
+	
+	my @features = `tac '$readMePath' | grep -m1 -B20 "Build"`;
+	@features = reverse(@features);
+	Helpers::display(['release_notes', ':', "\n", '=' x 15, "\n", (join "\n", @features)]);
+	return 2;
 }
+
 #*************************************************************************************************
-# Subroutine Name		: moveUpdates.
-# Objective				: This subroutine moves the updated files to the user working folder.					
-# Added By				: Dhritikana
+# Subroutine		: installUpdates
+# Objective			: install downloaded update package
+# Added By			: Sabin Cheruvattil
 #*************************************************************************************************/
-sub moveUpdates {
-	my $moveItem = "$idriveDir/scripts";
-	my $moveBackItemn = "$temp/scripts";
-	my @f;
-	opendir(my $dh, "$moveItem");
-	foreach my $file (readdir($dh))  {
-		push @f, $file if (($file ne '.') and ($file ne '..'));
+sub installUpdates {
+	my $packageName 	= $_[0];
+	my $zipLogFile		= Helpers::getAppPath() . qq(/$Configuration::unzipLog);
+	my $tempDir 		= qq(/$Configuration::tmpPath);
+	`unzip -o '$packageName' -d '$tempDir' 2>'$zipLogFile'`;
+	
+	my $scriptBackupDir	= qq(/$Configuration::tmpPath/$Configuration::appType) . q(_backup);
+	Helpers::createDir($scriptBackupDir);
+	chmod $Configuration::filePermission, $scriptBackupDir;
+	
+	cleanupUpdate($Locale::strings{'update_failed_unable_to_unzip'}) if -s $zipLogFile;
+
+	
+	my $packageDir 	= qq(/$Configuration::tmpPath/$Configuration::appPackageName/scripts);
+	my $constantsFilePath = $packageDir.qq(/$Configuration::idriveScripts{'constants'});
+	my $lineFeed = "\n";
+	if(!-e $constantsFilePath){
+		my $errMsg = $lineFeed.$Locale::strings{'invalid_zip_file'}.$lineFeed.$Configuration::appDownloadURL.$lineFeed.$lineFeed;
+		cleanupUpdate($errMsg);
 	}
+	
+	my $downloadedVersion = `cat '$constantsFilePath' | grep -m1 "ScriptBuildVersion => '"`;
+	$downloadedVersion = (split(/'/, $downloadedVersion))[1];	
+	Helpers::Chomp(\$downloadedVersion);
+	my @currentVersionSplit    = split(/\./, $Configuration::version);
+	my @downloadedVersionSplit = split(/\./, $downloadedVersion);
+	my $i=0;
+	my $isLatest=1;
+	foreach my $version (@currentVersionSplit){			
+		if($version gt $downloadedVersionSplit[$i]){
+			$isLatest = 0;
+			last;
+		}
+		$i++;
+	}
+	if($isLatest==0){
+		print $lineFeed.$Locale::strings{'zipped_package_not_latest'}.$lineFeed;
+		my $updateChoice = Helpers::getAndValidate('enter_your_choice','YN_choice');
+		if($updateChoice eq "n" || $updateChoice eq "N" ) {
+			cleanupUpdate("");
+		}
+	}
+		
+	my @scriptNames;
+	@scriptNames		= (@scriptNames, map{$Configuration::idriveScripts{$_}} keys %Configuration::idriveScripts);
+	
+	# Take a backup
+	my $moveRes 		= moveScripts(Helpers::getAppPath(), $scriptBackupDir, \@scriptNames);
+	if(!$moveRes) {
+		# Backup creation failed. Trying to revert the scripts to current location
+		$moveRes = moveScripts($scriptBackupDir, Helpers::getAppPath(), \@scriptNames);
+		unlink(Helpers::getAppPath() . qq(/$Configuration::updateLog)) if($moveRes);
+		cleanupUpdate($Locale::strings{'failed_to_update'} . '.');
+	}
+	
+	unlink(Helpers::getAppPath() . qq(/$Configuration::updateLog));
+	
+	# Move latest scripts to actual script folder
+	cleanupUpdate($Locale::strings{'failed_to_update'} . '.') if(!moveUpdatedScripts(\@scriptNames));
+	
+	# clear freshInstall file
+	unlink(Helpers::getAppPath() . qq(/$Configuration::freshInstall));
+}
+
+#*************************************************************************************************
+# Subroutine		: moveUpdatedScripts
+# Objective			: Move updated scripts to the user working folder
+# Added By			: Sabin Cheruvattil
+#*************************************************************************************************/
+sub moveUpdatedScripts {
+	my $packageDir 	= qq(/$Configuration::tmpPath/$Configuration::appPackageName/scripts);
+	my $sourceDir 	= Helpers::getAppPath();
+	my @scripts;
+	
+	opendir(my $dh, $packageDir);
+	foreach my $script (readdir($dh)) {
+		push @scripts, $script if($script ne '.' && $script ne '..');
+	}
+
 	closedir $dh;
 
-	my $res = moveFiles($currentDir,$moveItem,\@f);
-	if($res ne '') {
-		my $res = moveFiles($currentDir,$idriveBackup,\@fileNames);
-		if($res ne '') {
-			$errMsg = $lineFeed.$whiteSpace."Failed to Update. Please copy perl libraries from $idriveBackup to $currentDir".$lineFeed;
-			cleanUp($errMsg);
-		} 
+	my $moveRes = moveScripts($packageDir, $sourceDir, \@scripts);
+	if(!$moveRes) {
+		my $scriptBackupDir	= qq(/$Configuration::tmpPath/$Configuration::appType) . q(_backup);
+		my $moveBackRes = moveScripts($scriptBackupDir, $sourceDir, $_[0]);
+		cleanupUpdate(qq($Locale::strings{'failed_to_update'}. $Locale::strings{'please_cp_perl_from'} $scriptBackupDir to $sourceDir)) if(!$moveBackRes);
 	}
-	`chmod 0777 '$currentDir'`;
-	`chmod 0777 '$currentDir/'*`;
+	
+	`chmod $Configuration::filePermissionStr '$sourceDir'`;
+	`chmod $Configuration::filePermissionStr '$sourceDir/'*`;
+	
+	# moveBackRes will show the scprit backup revert failure.
+	# we need to handle the display of update status as well. 
+	# If revert back failed, it would've exit in if(!$moveBackRes) condition itself
+	
+	return $moveRes;
 }
 
 #*************************************************************************************************
-# Subroutine Name		: getConfirmationChoice.
-# Objective				: This subroutine gets user input for yes/no.					
-# Modified By			: Dhritikana
+# Subroutine		: moveScripts
+# Objective			: Helps tp move files between 2 directories
+# Added By			: Sabin Cheruvattil
 #*************************************************************************************************/
-sub getConfirmationChoice {
-	my $choice = undef;
-	my $count = 0;
-	while(!defined $choice) {
-		$count++;
-		if($count eq 4) {
-			print Constants->CONST->{'maxRetry'}.$whiteSpace;
-			exit;
-		}
-		print " ".Constants->CONST->{'EnterChoice'}." ";
-		
-		$choice = <STDIN>;
-		Chomp(\$choice);	
-		if($choice =~ m/^\w$/ && $choice !~ m/^\d$/) {
-			if($choice eq "y" || $choice eq "Y" ||
-				$choice eq "n" || $choice eq "N") {
-			}
-			else {
-				$choice = undef;
-				print " ".Constants->CONST->{'InvalidChoice'}." ";
-			} 
-		}
-		else {
-			$choice = undef;
-			print " ".Constants->CONST->{'InvalidChoice'}." ";
-		}
-		$count++;
-	}  
-	print "\n";
-	return $choice;
-}
-
-#*************************************************************************************************
-# Subroutine Name		: formCmd.
-# Objective				: This subroutine forms wget and curl command based on proxy settings.					
-# Modified By			: Dhritikana
-#*************************************************************************************************/
-sub formCmd {
-	my $curlCmd = undef;
-	my $wgetCmd = undef;
-	if($proxyStr) {
-		my ($uNPword, $ipPort) = split(/\@/, $proxyStr);
-		my @UnP = split(/\:/, $uNPword);
-		$checkUpdateCGI =~ s/https\:\/\///;
-		my $proxyAuth = "";
-		if($UnP[0] ne "") {
-			foreach ($UnP[0], $UnP[1]) {
-				$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
-			}
-			$uNPword = join ":", @UnP;
-			$proxyAuth = "$uNPword\@";
-		} 
-		$curlCmd = "$curl --proxy  https://$proxyAuth$ipPort -s -k $checkUpdateCGI";
-		$wgetCmd = "$wget \"--no-check-certificate\" \"--tries=2\" \"--output-file=$wgetLogFile\" -e \"https_proxy = http://$proxyAuth$ipPort\" $productLink";
-	} else {			
-		$curlCmd = "$curl -s -k $checkUpdateCGI";
-		$wgetCmd = "$wget \"--no-check-certificate\" \"--tries=2\" \"--output-file=$wgetLogFile\" $productLink";
-	}
-	return ($curlCmd, $wgetCmd);	
-}
-#*************************************************************************************************
-# Subroutine Name               : moveFiles 
-# Objective                     : This subroutine will move file between two given location locations.
-# Added By                      : Abhishek Verma
-#*************************************************************************************************/
-sub moveFiles{
-	my $destination		= $_[0];
-	my $source 		= $_[1];
-	my $listOfFiles		= $_[2];
+sub moveScripts {
+	my ($src, $dest, $scripts) = ($_[0], $_[1], $_[2]);
 	my $moveResult		= '';
-        open (UPDATELOG,'>>',$updateLogFile) or die "Unable to open file : $!";
-	chmod $filePermission,$updateLogFile;
-	if ($destination ne '' and $source ne '' and (-e $destination) and (-e $source)){
-		foreach (@{$listOfFiles}){
-			my $fileToTransfer = qq($source/$_);
-			if (-e $fileToTransfer){
-				$moveResult = `mv '$fileToTransfer' '$destination'`;
-				print UPDATELOG "$lineFeed move file : $moveResult  $lineFeed";
-#				traceLog("$lineFeed move file : $moveResult  $lineFeed", __FILE__, __LINE__);
-			}
-			last if ($moveResult ne '');
+
+	return 0 if($dest eq '' || $src eq '' || !-e $dest || !-e $src || reftype($scripts) ne 'ARRAY' || scalar @{$scripts} == 0);
+	
+	open(UPDATELOG, '>>', Helpers::getAppPath() . qq(/$Configuration::updateLog)) or 
+		Helpers::retreat([$Locale::strings{'unable_to_open_file'}, ': ', $!]);
+	chmod $Configuration::filePermission, Helpers::getAppPath() . qq(/$Configuration::updateLog);
+	
+	foreach(@{$scripts}) {
+		my $fileToTransfer = qq($src/$_);
+		if(-e $fileToTransfer) {
+			$moveResult = `mv '$fileToTransfer' '$dest'`;
+			print UPDATELOG qq(\n$Locale::strings{'move_file'}:: $fileToTransfer >> $dest :: $moveResult\n);
 		}
-	}else{
-		$moveResult = -1;
+		
+		last if($moveResult ne '');
 	}
+	
+	Helpers::traceLog($moveResult);
 	close UPDATELOG;
-	return $moveResult;
+	return ($moveResult ne '')? 0 : 1;
 }
+
 #*************************************************************************************************
-# Subroutine Name               : displayReleaseNotes
-# Objective                     : This subroutine reads the release notes array from Constants.pm file and print on the STDOUT.
-# Usage				: displayReleaseNotes()
-# Added By                      : Abhishek Verma
+# Subroutine		: checkForUpdate
+# Objective			: check if version update exists for the product
+# Added By			: Sabin Cheruvattil
 #*************************************************************************************************/
-sub displayReleaseNotes{
-	my $releaseNotes = Constants->CONST->{'ReleaseNotesDetail'};
-	my $releaseContent = '';
-	foreach (@{$releaseNotes}){
-		if ($releaseContent eq ''){
-			 $releaseContent = ": ".$_."\n";
-		}else{
-			 $releaseContent .= "          ".$_."\n";
-		}
+sub checkForUpdate {
+	my %params = (
+		'host'		=> $Configuration::checkUpdateBaseCGI,
+		'method'	=> 'GET',
+		'json'		=> 0
+	);
+	
+	my $cgiResult 	= Helpers::request(%params);
+	unless(ref($cgiResult) eq 'HASH'){
+		return 0;
 	}
-	print Constants->CONST->{'ReleaseNotes'};
-	print $releaseContent."\n";
+	return 1 if($cgiResult->{DATA} eq "Y");
+	return 0 if($cgiResult->{DATA} eq "N");
+	cleanupUpdate($Locale::strings{'kindly_verify_ur_proxy'}) if($cgiResult->{DATA} =~ /.*<h1>Unauthorized \.{3,3}<\/h1>.*/);
+	
+	my $pingRes = `ping -c2 8.8.8.8`;
+	cleanupUpdate($pingRes) if($pingRes =~ /connect\: Network is unreachable/);
+	cleanupUpdate($Locale::strings{'please_check_internet_con_and_try'}) if($pingRes !~ /0\% packet loss/);
+	cleanupUpdate($Locale::strings{'kindly_verify_ur_proxy'}) if($cgiResult->{DATA} eq '');
 }
+
 #*************************************************************************************************
-#Subroutine Name               : removeUpdateVersionInfoFile
-#Objective                     : This subroutine reads the release notes array from Constants.pm file and print on the STDOUT.
-#Usage                         : displayReleaseNotes()
-#Added By                      : Abhishek Verma
+# Subroutine		: deleteDeprecatedScripts
+# Objective			: delete deprecated scripts if present
+# Added By			: Sabin Cheruvattil
 #*************************************************************************************************/
-sub removeUpdateVersionInfoFile{
-	my $fileNameToRemove = shift;
-	my $removeResult = '';
-	if (-e $fileNameToRemove){
-		$removeResult = `rm -f '$fileNameToRemove' $errorDevNull`;
+sub deleteDeprecatedScripts {
+	foreach my $depScript (keys %Configuration::idriveScripts) {
+		unlink(Helpers::getAppPath() . qq(/$Configuration::idriveScripts{$depScript})) if($depScript =~ m/deprecated_/);
 	}
+}
+
+#*************************************************************************************************
+# Subroutine		: cleanupUpdate
+# Objective			: cleanup the update process
+# Added By			: Sabin Cheruvattil
+#*************************************************************************************************/
+sub cleanupUpdate {
+	my $packageName 	= qq(/$Configuration::tmpPath/$Configuration::appPackageName$Configuration::appPackageExt);
+	unlink($packageName) if(-e $packageName);
+	
+	my $packageDir 		= qq(/$Configuration::tmpPath/$Configuration::appPackageName);
+	`rm -rf '$packageDir'` if($packageDir ne '/' && -e $packageDir);
+	
+	my $scriptBackupDir	= qq(/$Configuration::tmpPath/$Configuration::appType) . q(_backup);
+	`rm -rf '$scriptBackupDir'` if($scriptBackupDir ne '/' && -e $scriptBackupDir);
+	
+	`rm -rf $Configuration::tmpPath/scripts` if(-e qq($Configuration::tmpPath/scripts));
+	
+	unlink(Helpers::getAppPath() . qq(/$Configuration::unzipLog));
+	unlink(Helpers::getAppPath() . qq(/$Configuration::updateLog));
+	
+	exit(0) if $_[0] eq '';
+	
+	$Configuration::displayHeader = 0;
+	Helpers::retreat($_[0]) if($_[0] ne 'INIT');
+}
+
+#*************************************************************************************************
+# Subroutine		: updateVersionInfoFile
+# Objective			: update version infomation file
+# Added By			: Sabin Cheruvattil
+#*************************************************************************************************/
+sub updateVersionInfoFile {
+	my $versionInfoFile = Helpers::getAppPath() . '/' . $Configuration::updateVersionInfo;
+	open (VN,'>', $versionInfoFile);
+	print VN $Configuration::version;
+	close VN;
+	chmod $Configuration::filePermission, $versionInfoFile;
+}
+
+#*************************************************************************************************
+# Subroutine		: deleteVersionInfoFile
+# Objective			: clean version infomation file
+# Added By			: Sabin Cheruvattil
+#*************************************************************************************************/
+sub deleteVersionInfoFile {
+	my $versionInfoFile = Helpers::getAppPath() . '/' . $Configuration::updateVersionInfo;
+	`rm -f $versionInfoFile`;
 }

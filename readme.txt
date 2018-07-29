@@ -7,38 +7,43 @@ Backup and protect your Linux machine data using scripts bundle provided by IDri
 
 II. SYSTEM/SOFTWARE REQUIREMENTS
 =================================
-Linux(CentOS/Ubuntu/Fedora/OpenSUSE/FreeBSD/Linux Mint) - 32-bit/64-bit
+Linux(CentOS/Ubuntu/Fedora/OpenSUSE/FreeBSD/Linux Mint/Gentoo) - 32-bit/64-bit
 Perl v5.8 or later
 
 III. SCRIPT DOWNLOAD
 =====================
 STEP 1: The script bundle can be downloaded from the link 		          			
-		"https://www.idrivedownloads.com/downloads/linux/download-for-linux/IDrive_for_Linux.zip".
-		After downloading, extract the zip file in your machine. Current unzipped folder ie IDrive_for_Linux should contain scripts folder. 
+		"https://www.idrivedownloads.com/downloads/linux/download-for-linux/IDriveForLinux.zip".
+		After downloading, extract the zip file in your machine. Current unzipped folder ie IDriveForLinux should contain scripts folder. 
 		Below files will be present in the scripts folder: 
 		
-		1. Account_Setting.pl
-		2. Backup_Script.pl
-		3. Check_For_Update.pl
-		4. Configuration.pm
-		5. Constants.pm
-		6. Edit_Supported_Files.pl
-		7. express_backup.pl
-		8. Header.pl
-		9. Helpers.pm
-		10. IxHash.pm
-		11. job_termination.pl
-		12. Login.pl
-		13. Logout.pl
-		14. Operations.pl
-		15. readme.txt
-		16. Restore_Script.pl
-		17. Restore_Version.pl
-		18. Scheduler_Script.pl
-		19. Status_Retrieval_Script.pl
-		20. Strings.pm
-		21. Uninstall_Script.pl
-		22. View_Log.pl
+		1. account_setting.pl
+		2. archive_cleanup.pl
+		3. Backup_Script.pl
+		4. check_for_update.pl
+		5. Configuration.pm
+		6. Constants.pm
+		7. edit_supported_files.pl
+		8. express_backup.pl
+		9. Header.pl
+		10. Helpers.pm
+		11. IxHash.pm
+		12. JSON.pm
+		13. job_termination.pl
+		14. login.pl
+		15. Logout.pl
+		16. Operations.pl
+		17. readme.txt
+		18. Restore_Script.pl
+		19. restore_version.pl
+		20. Scheduler_Script.pl
+		21. send_error_report.pl
+		22. Status_Retrieval_Script.pl
+		23. Strings.pm
+		24. Uninstall_Script.pl
+		25. utility.pl
+		26. view_log.pl
+		
 	
 STEP 2: Provide appropriate permissions (executable permission) to the scripts
 		Example:  chmod a+x *.pl
@@ -49,7 +54,7 @@ STEP 1: You need to have an IDrive account to use the script bundle to backup yo
 		please sign up and create an account at https://www.idrive.com/idrive/signup .
 			
 STEP 2: To set up IDrive script bundle locally with your IDrive account, run the below command and follow the instructions.
-		$./Account_Setting.pl 
+		$./account_setting.pl 
 		Note: Setting up the script bundle for the first time will ask user to enter the service path. This path will contain user specific data required to perform operations via script bundle. 
 		
 V. WORKING WITH THE SCRIPTS
@@ -58,17 +63,17 @@ Using IDrive scripts, you can perform backup/express backup/restore operations, 
 
 STEP 1: Login to your IDrive account
 		If you are not logged in to your IDrive account while setting up your script bundle, run the below command to login.
-		$./Login.pl 
+		$./login.pl 
 		
 		Note: Login script is a mandatory script to be executed before performing any operation. This script will authenticate your IDrive account details	and will create a secure session for your backups. 
 		
 STEP 2: Edit your exclude files and Backup set files for your immediate or scheduled operations(backup/restore/Express-backup)
 		Before starting an operation(backup/restore/Express-backup), the user must provide the list of files/folders required for the operation (backup/restore/Express-backup).
 		To update the item list in the backup/Express-backup/restore set file you must execute the below command.
-		$./Edit_Supported_Files.pl 
+		$./edit_supported_files.pl 
 		
 		The menu option will be displayed. Select option 1 to edit backup set file for your immediate/manual backup. 
-		Respective file will open in vi editor to edit. Add the files/folders that needs to be backed up.
+		Respective file will open in command line text editor to edit. Add the files/folders that needs to be backed up.
 		Using same script you can update exclude and even schedule backup/express backup/restore set file by selecting the desired option.
 		
 STEP 3: Immediate/Manual backup
@@ -90,12 +95,12 @@ STEP 5: Immediate/Manual express backup
 		You can perform immediate/manual express backup using the below command and follow the instructions:  
 		$./express_backup.pl
 
-STEP 6:	Schedule backup/restore
-		Run the below command to manage your schedule backup/restore job: 
+STEP 6:	Schedule backup/restore/periodic cleanup
+		Run the below command to manage your schedule backup/restore/periodic cleanup job: 
 		$./Scheduler_Script.pl 
 
-		Select the desired menu option to create/edit or delete your schedule backup/restore job and follow the instructions. 
-		In case you want your schedule job to stop automatically at a scheduled time then set the cut-off time as well while following the instructions.
+		Select the desired menu option to create/edit or delete your schedule backup/restore/periodic cleanup job and follow the instructions. 
+		In case you want your scheduled backup/restore job to stop automatically at a scheduled time then set the cut-off time as well while following the instructions.
 
 STEP 7: View progress of scheduled backup/restore job 
 		To view the progress of scheduled backup or restore operation, run the below command: 
@@ -103,17 +108,30 @@ STEP 7: View progress of scheduled backup/restore job
 
 STEP 8: View/restore previous versions of a file
 		You can view the list of previous versions of any file and select any version that you want to restore. To retrieve a file with earlier versions, run the below command: 
-		$./Restore_Version.pl 
+		$./restore_version.pl 
 
 STEP 9:	Stop ongoing backup/express backup/restore operations 
 		To stop an ongoing backup or express backup or restore operation, run the below command: 
 		$./job_termination.pl 
 		
-STEP 10: View backup/express backup/restore logs
-		You can view the backup or restore or express backup log files by running the below command: 
-		$./View_Log.pl
+STEP 10: View backup/express backup/restore/archive cleanup logs
+		You can view the backup or restore or express backup or archive cleanup log files by running the below command: 
+		$./view_log.pl
 
-STEP 11: Logout from your IDrive account 
+STEP 11: Archive cleanup
+		Archive Cleanup compares the files of your local data in the backup set, selected for cleanup, with the files in your IDrive online backup account. It then deletes the files 
+		present in your account but not on your local machine. This feature thus helps you to free up space in your online backup account.  
+		You can run below command for archive cleanup: 
+		$./archive_cleanup.pl
+		
+		When you run your archive cleanup script, you need to enter the percentage limit beyond which cleanup will not take place.
+		Note: Your scheduled backupset will be considered for archive cleanup.
+
+STEP 12: Send error report
+		You can send error report to IDrive support by running the below command: 
+		$./send_error_report.pl
+
+STEP 13: Logout from your IDrive account 
 		To end the logged in session for your IDrive account, run the below command: 
 		$./Logout.pl
 		
@@ -125,7 +143,7 @@ VI. UPDATING YOUR SCRIPT BUNDLE
 		Every script when gets executed displays a header which provide details of logged in IDrive account. Same header also displays information on any newly available script bundle.
 		When you see a line "A new update is available. Run Check_For_Update.pl to update to latest package." means we have released a new improved version of script bundle. 
 		To update to most recent available script bundle please perform the below command and follow the instructions.
-		$./Check_For_Update.pl
+		$./check_for_update.pl
 
 VII. UNINSTALLING YOUR SCRIPT BUNDLE
 ====================================
@@ -139,7 +157,7 @@ VII. UNINSTALLING YOUR SCRIPT BUNDLE
 
 VIII. OTHERS
 ============
-		Script bundle have few more supported script files (Header.pl, Helpers.pm, Configuration.pm, Constants.pm, IxHash.pm, Strings.pm and Operations.pl) which are used internally by other scripts.
+		Script bundle have few more supported script files (Header.pl, Helpers.pm, Configuration.pm, Constants.pm, IxHash.pm, JSON.pm, Strings.pm, Operations.pl and utility.pl) which are used internally by other scripts.
     
 IX. RELEASES
 ================
@@ -327,4 +345,28 @@ IX. RELEASES
 		2.  Fixed the scheduled backup/restore operation summary issue when it terminated by cut-off.
 		3.  Fixed the progress bar issue in status retrieval script when scheduled job terminated by cut-off.
                 4.  Fixed the email notification issue when multiple email ids added.
+
+	Build 2.14
+		1.  Increased the retry attempt count from 5 to 1000 for Backup/Restore operations.
+		2.  Fixed the issue for backup/restore retry in few scenarios.
+
+	Build 2.15
+		1.  Fixed the wrong UID fetching issue for few machines.
+		2.  Fixed the logout script issue when backup/restore operation is in progress.
+		3.  Fixed the restore from location update issue while editing backup location.
+		4.  Fixed the cut-off issue when user logged out.
+
+	Build 2.16
+		1.  A new script "archive_cleanup.pl" has been introduced to delete data from your account if not available locally for your schedule backup set.
+		2.  A new script "send_error_report.pl" has been introduced to send the error report to IDrive support.
+		3.  Redesigned the "Account_Setting.pl" and renamed it to "account_setting.pl".
+		4.  Redesigned the "Login.pl" and renamed it to "login.pl".
+		5.  Redesigned the "Restore_Version.pl" and renamed it to "restore_version.pl".
+		6.  Redesigned the "View_Log.pl" and renamed it to "view_log.pl".
+		7.  Redesigned the "Edit_Supported_Files.pl" and renamed it to "edit_supported_files.pl".
+		8.  Redesigned the "Check_For_Update.pl" and renamed it to "check_for_update.pl".
+		9.  Fixed the backup/restore progress bar display issue w.r.t FreeBSD.
+		10. Fixed the backup failure issue with retry attempt when server connection failed.
+		11. Added support for Gentoo platform.
+
 	======================================================================================

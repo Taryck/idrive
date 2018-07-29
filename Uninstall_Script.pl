@@ -2,7 +2,11 @@
 #####################################################################
 ##Script Name : Uninstall_Script.pl
 ######################################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
+
 require 'Header.pl';
 
 my $curl  = whichPackage(\"curl");
@@ -17,7 +21,7 @@ my @scheduledJobs = ();
 my $unlinkPidFile=0;
 my %idriveUserInfo = ();
 
-my @fileNames = ('Account_Setting.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','Login.pl','Logout.pl','Operations.pl','readme.txt','Restore_Script.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','Edit_Supported_Files.pl','View_Log.pl','Uninstall_Script.pl','.updateVersionInfo','.serviceLocation','freshInstall','.forceupdate','wgetLog.txt','Configuration.pm', 'Helpers.pm','IxHash.pm', 'job_termination.pl', 'Strings.pm','express_backup.pl');
+my @fileNames = ('account_setting.pl','Account_Setting.pl','archive_cleanup.pl','check_for_update.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','job_termination.pl','login.pl','Login.pl','Logout.pl','Operations.pl','readme.txt','Restore_Script.pl','restore_version.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','edit_supported_files.pl','edit_supported_files.pl','View_Log.pl','Uninstall_Script.pl','.updateVersionInfo','.serviceLocation','freshInstall','.forceupdate','wgetLog.txt','Configuration.pm', 'Helpers.pm','IxHash.pm', 'Strings.pm','express_backup.pl','send_error_report.pl', 'JSON.pm', 'utility.pl', 'view_log.pl');
 
 system("clear");
 loadUserData();
@@ -75,7 +79,6 @@ elsif($isAnyOtherUserProcess){
 }
 
 if($noPermission){
-	#print "TraceLog:$errorReason";
 	print $lineFeed.$errorReason.$lineFeed;
 	#print $lineFeed.Constants->CONST->{'noSufficientPermissionToCleanup'}->($user).$errorReason.$lineFeed.$lineFeed;
 	exit;
@@ -178,7 +181,6 @@ sub getUsersInfoToUninstall
 {
 	if(-e $freshInstallFile) {
 		if(!open(FH, "<", $freshInstallFile)) {
-			#traceLog("Not able to open $freshInstallFile, Reason:$! $lineFeed", __FILE__, __LINE__);
 			return;
 		}
 		@idriveUsers = <FH>;
@@ -313,7 +315,7 @@ sub getRunningJobPid
 		my @lines = split(/[\s\t]+/, $_);
 		$evsRunningUserName = $lines[2];
 		if(($user ne "root") and ($evsRunningUserName) and ($user ne $evsRunningUserName)){
-			$isAnyOtherUserProcess = 1;  
+			$isAnyOtherUserProcess = 1;
 		}		
 		my $pid = $lines[3];
 		$toCheckPid = " $pid ";
@@ -338,7 +340,11 @@ sub getRunningJobPid
 # Added By                : Senthil Pandian
 #*****************************************************************************************************/
 sub checkCronEntries {
-	readFromCrontab();
+	my $readable = readFromCrontab();
+	if($readable == 0){
+		print $lineFeed.Constants->CONST->{'DirectoryFileNotEmpty'}->($user, "crontab","entries").$lineFeed.$lineFeed;
+		exit(0);		
+	}
 	my @schJobs = ();
 	return @schJobs = grep /$currentDir/,@linesCrontab;	
 }
@@ -356,20 +362,6 @@ sub removeCronEntries {
 		} else {
 			print $lineFeed.Constants->CONST->{'RemovedCronEntries'}.$lineFeed;
 		}		
-	}
-}
-#****************************************************************************************************
-# Subroutine Name         : readFromCrontab.
-# Objective               : Read entire crontab file.
-# Added By                : Senthil Pandian
-#*****************************************************************************************************/
-sub readFromCrontab {
-	if(open CRONTABFILE, "<", $crontabFilePath){
-		@linesCrontab = <CRONTABFILE>;	
-		close CRONTABFILE;
-	} else {
-		print $lineFeed.Constants->CONST->{'noSufficientPermissionToCleanup'}->($user).$lineFeed.$lineFeed;
-		exit(0);
 	}
 }
 
@@ -394,7 +386,7 @@ sub displayKillMessage{
 		if($isAnyError == 1){
 			print $lineFeed.Constants->CONST->{'KilFail'}.$killError.'.'.$lineFeed;
 		}
-		#traceLog("\nIncorrect password attempt. ".Constants->CONST->{'KilFail'}.$scriptName.$lineFeed, __FILE__, __LINE__);
+
 		if ($createPasswordFlag){
 			open(IP,'>',Constants->CONST->{'incorrectPwd'});
 			close (IP);
@@ -446,7 +438,7 @@ sub writeToCrontab {
 	} else {
 		$command = qq{perl '$operationsScript' '$usrProfilePath'};
 	}
-	#traceLog(" Cron entry command: $command", __FILE__, __LINE__);
+
 	my $res = system($command);
 	#unlink($temp);
 	if($res ne "0") {

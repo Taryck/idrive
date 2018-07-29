@@ -13,9 +13,15 @@ use IO::Handle;
 #use Fcntl;
 use POSIX;
 use Fcntl qw(:flock);
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
+
 #use Constants 'CONST';
 require Constants;
+require Strings;
+
 our $userScriptLocation  = findUserLocation();
 our $logger;
 our $deviceIdPostfix = '4b5z';
@@ -69,7 +75,6 @@ my %hashParameters = (
 				       "BWTHROTTLE" => undef,                             
                        "RESTORELOCATION" => undef,
 	    		       "RESTOREFROM" => undef,				
-						"TBE_BASE_DIR" => undef,			# TBE : ENH-002 Add new param : Root Directory for relative backup
 	    		       "BACKUPPATHTYPE" => undef   
                      );
 
@@ -106,7 +111,18 @@ our $nonExistsCount = 0;
 our $curLines = 0;
 our $cols = 0;
 our $psOption = "-elf";
+our $machineInfo;
+my $freebsdProgress = "";
 getPSoption(); #Getting PS option to get process id.
+#Added for FreeBSD machine's progress bar display
+if($machineInfo eq 'freebsd'){
+	my $latestCulmn = `tput cols`;
+	my $lineCount = 11;
+	for(my $i=0; $i<=$lineCount; $i++){
+		$freebsdProgress .= (' ')x$latestCulmn;
+		$freebsdProgress .= "\n";
+	}
+}
 
 #Path change required 
 our $pidPath = undef;
@@ -156,7 +172,7 @@ our $syncedFiles = 0; #Count of files which are in sync#
 our $failedFilesCount = 0; #Total count of files which could not be backed up/synced #
 #our ($deviceID,$deviceNickName) = ('') x 2;
 our ($restoreDeviceID,$backupDeviceID) = ('') x 2;
-our $uniqueID = getUniqueID().'_1';
+our $uniqueID = getUniqueID();
 
 use constant false => 0;
 use constant true => 1;
@@ -236,6 +252,8 @@ our @ErrorArgumentsRetry = ("idevs error",
                            "unauthorized user",
                            "connection unexpectedly closed",
                            "failed verification -- update",
+						   "user information not found",
+						   "failed to get the host name"
                           );
                           
 # Errors encountered during backup operation for which the script should not retry the backup operation                         
@@ -249,25 +267,25 @@ our @ErrorArgumentsNoRetry = ("No such file or directory",
 							);	
 
 # Errors encountered during backup operation for which the script should not retry the backup operation                         
-our @ErrorArgumentsExit = (  	"encryption verification failed",
-                             	"some files could not be transferred due to quota over limit",
-                             	"skipped-over limit",
-                             	"quota over limit",
-                             	"account is under maintenance",
-                             	"account has been cancelled",
-                             	"account has been expired",
-                             	"PROTOCOL VERSION MISMATCH",
-                            	"password mismatch",
-                             	"out of memory",
-				"failed to get the device information",
-				"Proxy Authentication Required",
-				"No route to host",
-				"Connection refused",
-				#"failed to connect",
-				"Connection timed out",
+our @ErrorArgumentsExit = ( "encryption verification failed",
+							"some files could not be transferred due to quota over limit",
+							"skipped-over limit",
+							"quota over limit",
+							"account is under maintenance",
+							"account has been cancelled",
+							"account has been expired",
+							"PROTOCOL VERSION MISMATCH",
+							"password mismatch",
+							"out of memory",
+							"failed to get the device information",
+							"Proxy Authentication Required",
+							"No route to host",
+							"Connection refused",
+							#"failed to connect",
+							"Connection timed out",
 							"Invalid device id",
 							"not enough free space on device"
-                            );
+                        );
 our $relative = 1;
 our $defaultBw = undef;
 our $defaultEncryptionKey = "DEFAULT";
@@ -292,7 +310,7 @@ our $idevsutilDedupBinaryName = "idevsutil_dedup";#Name of dedup idevsutil binar
 our $idevsutilBinaryPath      = "$idriveServicePath/$idevsutilBinaryName";#Path of idevsutil binary#
 our $idevsutilCommandLine     = undef;
 our $displayCurrentUser       = getCurrentUser();
-our %evsDeviceHashOutput      = ();              
+our %evsDeviceHashOutput      = ();
 #*******************************************************************************************************
 #Global variables for Downloadable Binary Links
 
@@ -328,7 +346,10 @@ our %archiveNames = (EvsBin32 => {
 									zip => "${appType}_Netgear_ARM.zip" },
 						EvsVaultBin32_64 => {
 									folder => "${appType}_Vault_64bit/",
-									zip => "${appType}_Vault_64bit.zip" }
+									zip => "${appType}_Vault_64bit.zip" },
+						EvsSynoAlphine => {
+									folder => "${appType}_synology_Alpine/",
+									zip => "${appType}_synology_Alpine.zip" }									
 					);
 
 our $evsWebPath = "https://www.${appTypeSupport}downloads.com/downloads/linux/download-options/";
@@ -344,6 +365,7 @@ our $EvsQnapArmBin = $evsWebPath.$archiveNames{'EvsQnapArmBin'}{'zip'};
 our $EvsSynoArmBin = $evsWebPath.$archiveNames{'EvsSynoArmBin'}{'zip'};
 our $EvsNetgArmBin = $evsWebPath.$archiveNames{'EvsNetgArmBin'}{'zip'};
 our $EvsVaultBin32_64 = $evsWebPath.$archiveNames{'EvsVaultBin32_64'}{'zip'};
+our $EvsSynoAlphine = $evsWebPath.$archiveNames{'EvsSynoAlphine'}{'zip'};
 
 #CGI Links to verify Account:set number
 #
@@ -373,18 +395,6 @@ our $defRestoreLocation = qq($usrProfilePath/$userName/Restore_Data);
 #********************************************************************************************************/
 sub loadUserData {
 	$usrProfileDir = "$usrProfilePath/$userName";
-#=====================================================================================================================
-# TBE : ENH-002 set Root Directory for relative backup
-# instead of having only last level of relative
-# when this parameter is set the relative path starts from this point
-# Read the additional Parameter
-	our $backupBase_Dir = $hashParameters{TBE_BASE_DIR};
-# check or add / at the end of BASE_DIR
-	if(substr($backupBase_Dir, -1, 1) ne '/'){
-		$backupBase_Dir .= '/';
-	}
-# TBE : ENH-002 set Root Directory for relative backup
-#=====================================================================================================================
 	if($proxyStr eq ""){
 		$proxyStr = getProxy();
 		if ($proxyStr =~ /(.*?):(.*)\@(.*?):(.*?)$/){
@@ -684,7 +694,7 @@ sub createEncodeFile
 
 	my $commandOutput = `$idevsutilCommandLine`;
 	if ($commandOutput =~ /idevsutil: not found/){
-		print "\nPlease reconfigure your account using Account_Setting.pl script or add this functionality to login \n";
+		print "\nPlease reconfigure your account using account_setting.pl script or add this functionality to login \n";
 		exit 0;
 	}
 	traceLog($lineFeed.Constants->CONST->{'CrtEncFile'}.$whiteSpace.$commandOutput.$lineFeed, __FILE__, __LINE__);
@@ -761,7 +771,7 @@ sub getUtf8File
 }
 
 #****************************************************************************************************
-# Subroutine Name		: updateServerAddr.
+# Subroutine Name		: getServerAddr.
 # Objective				: Construction of get-server address evs command and execution.
 #			    			Parse the output and update same in Account Setting File.
 # Added By				: Avinash Kumar.
@@ -830,22 +840,11 @@ sub getServerAddr
 #**********************************************************************************
 sub readConfigurationFile
 {
-#=====================================================================================================================
-# TBE : ENH-001 - Load local CONFIGURATION_FILE
-# user local variable for file read, in order to readConfigurationFile to be cummulative
-	my @ConfFile = () ;		# TBE : ENH-001 Temp file content
-#=====================================================================================================================
 	my $confFilePath = $_[0];
 	if ((-e $confFilePath and -s $confFilePath > 0)){
 		chmod $filePermission, $confFilePath;
 		open CONF_FILE, "<", $confFilePath or (traceLog($lineFeed.Constants->CONST->{'ConfMissingErr'}." reason :$! $lineFeed", __FILE__, __LINE__) and die);
-#=====================================================================================================================
-# TBE : ENH-001 Cummulative content
-#		@linesConfFile = <CONF_FILE>;  
-		@ConfFile = <CONF_FILE>;
-		push (@linesConfFile, @ConfFile);
-# TBE : ENH-001 End of change
-#=====================================================================================================================
+		@linesConfFile = <CONF_FILE>;  
 		close CONF_FILE;
 	}
 	else{
@@ -1206,7 +1205,7 @@ sub getOperationFile
 					$hashEvsParameters{TEMP}.$assignmentOperator.$evsTempDir.$lineFeed.
 					$hashEvsParameters{OUTPUT}.$assignmentOperator.$idevsOutputFile.$lineFeed.
 					$hashEvsParameters{ERROR}.$assignmentOperator.$idevsErrorFile.$lineFeed.
-					$hashEvsParameters{ADDPROGRESS}.$lineFeed.$xmlOutputParam;
+					$hashEvsParameters{ADDPROGRESS}.$lineFeed.$hashEvsParameters{XMLOUTPUT}.$lineFeed;
 					if ($dedup eq 'on'){
 						$utfFile .= $hashEvsParameters{DEVICEID}.$assignmentOperator.$backupDeviceID.$lineFeed;
 					}
@@ -1234,7 +1233,7 @@ sub getOperationFile
 					$hashEvsParameters{TEMP}.$assignmentOperator.$evsTempDir.$lineFeed.
 					$hashEvsParameters{OUTPUT}.$assignmentOperator.$idevsOutputFile.$lineFeed.
 					$hashEvsParameters{ERROR}.$assignmentOperator.$idevsErrorFile.$lineFeed.
-					$hashEvsParameters{ADDPROGRESS}.$lineFeed.$xmlOutputParam;
+					$hashEvsParameters{ADDPROGRESS}.$lineFeed.$hashEvsParameters{XMLOUTPUT}.$lineFeed;
 					if ($dedup eq 'on'){
 						$utfFile .= $hashEvsParameters{DEVICEID}.$assignmentOperator.$restoreDeviceID.$lineFeed;
 					}
@@ -1256,14 +1255,17 @@ sub getOperationFile
    			   $hashEvsParameters{PASSWORD}.$assignmentOperator.$pwdPath.$lineFeed;
 		if($encryptionType =~ m/^$privateEncryptionKey$/i) {
 			$utfFile .= $hashEvsParameters{PVTKEY}.$assignmentOperator.$pvtPath.$lineFeed;
-		}
+			$utfFile .= $hashEvsParameters{DEFLOCAL}.$assignmentOperator.'0'.$lineFeed;
+		}else{
+			$utfFile .= $hashEvsParameters{DEFLOCAL}.$assignmentOperator.'1'.$lineFeed;
+		}		
 		$utfFile .= $hashEvsParameters{PROXY}.$assignmentOperator.$proxyStr.$lineFeed.
 					$hashEvsParameters{ENCODE}.$lineFeed.
 					$relativeAsPerOperation.$lineFeed.
 					$hashEvsParameters{TEMP}.$assignmentOperator.$evsTempDir.$lineFeed.
 					$hashEvsParameters{OUTPUT}.$assignmentOperator.$idevsOutputFile.$lineFeed.
 					$hashEvsParameters{ERROR}.$assignmentOperator.$idevsErrorFile.$lineFeed.
-					$hashEvsParameters{ADDPROGRESS}.$lineFeed.$xmlOutputParam;
+					$hashEvsParameters{ADDPROGRESS}.$lineFeed.$hashEvsParameters{XMLOUTPUT}.$lineFeed;
 					if ($dedup eq 'on'){
 						$utfFile .= $hashEvsParameters{DEVICEID}.$assignmentOperator.$backupDeviceID.$lineFeed;
 					}
@@ -1375,7 +1377,7 @@ sub getOperationFile
 		$serverName.$_[1].$pathSeparator.$lineFeed;
 		print UTF8FILE $utfFile;
 		close UTF8FILE;
-		traceLog($searchUtfPath, __FILE__, __LINE__);
+		#traceLog($searchUtfPath, __FILE__, __LINE__);
 		chmod $filePermission, $searchUtfPath;
 		return $searchUtfPath;
 	}
@@ -1420,10 +1422,10 @@ sub getOperationFile
 		traceLog(Constants->CONST->{'InvalidOp'}."-> $operationType", __FILE__, __LINE__);
 		return;
 	}
-	#traceLog("EVS Command :: $utfFile", __FILE__, __LINE__);	
+
 	print UTF8FILE $utfFile;
 	close UTF8FILE;
-	traceLog("$operationType has been executed", __FILE__, __LINE__);
+	#traceLog("$operationType has been executed", __FILE__, __LINE__);
 	chmod $filePermission, $utfPath;
 	return $utfPath;
 }
@@ -1618,7 +1620,7 @@ sub sendMail
 	foreach ($userName,$pData,$finalAddrList,$subjectLine,$content) {
 		$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
 	}
-	$notifyPath = 'http://webdav.ibackup.com/cgi-bin/Notify_email_ibl';
+	$notifyPath = 'https://webdav.ibackup.com/cgi-bin/Notify_email_ibl';
 	$data = 'username='.$userName.'&password='.$pData.'&to_email='.$finalAddrList.'&subject='.$subjectLine.'&content='.$content;
 	#`curl -d '$data' '$PATH' &>/dev/nul` or print $tHandle "$linefeed Couldn't send mail. $linefeed";
 	my $curlCmd = formSendMailCurlcmd();
@@ -1650,12 +1652,12 @@ sub formSendMailCurlcmd {
 				$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
 			}
 			$uNPword = join ":", @UnP;
-			$cmd = "$curlPath -x http://$uNPword\@$ipPort -d '$data' '$notifyPath'";
+			$cmd = "$curlPath -x http://$uNPword\@$ipPort -s -d '$data' '$notifyPath'";
 		} else {
-			$cmd = "$curlPath -x http://$ipPort -d '$data' '$notifyPath'";
+			$cmd = "$curlPath -x http://$ipPort -s -d '$data' '$notifyPath'";
 		}
 	} else {			
-		$cmd = "$curlPath -d '$data' '$notifyPath'";
+		$cmd = "$curlPath -s -d '$data' '$notifyPath'";
 	}
 	return $cmd;	
 }
@@ -1687,7 +1689,6 @@ sub terminateStatusRetrievalScript
 	my $statusScriptCmd = "ps $psOption | grep $statusScriptName | grep -v grep";
 	
 	my $statusScriptRunning = `$statusScriptCmd`;
-	#traceLog("TESTING :: statusScriptRunning => $statusScriptRunning\n",__FILE__, __LINE__);
 	if($statusScriptRunning ne "") {
 		my @processValues = split /[\s\t]+/, $statusScriptRunning;
 		my $pid = $processValues[3];
@@ -1836,15 +1837,10 @@ sub createLogFiles
 		chmod $filePermission, $logDir;
 	}
 
-#=====================================================================================================================
-# TBE : ENH-003 TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
 #	my $currentTime = localtime;
-#	my $currentTime = time;#This function will give the current epoch time.
+	my $currentTime = time;#This function will give the current epoch time.
 	#previous log file name use to be like 'BACKUP Wed May 17 12:34:47 2017_FAILURE'.Now log name will be '1495007954_SUCCESS'.
-# Correct timestamp string : YYYY-MM-DD_HH-MM-SS
-	my $currentTime = POSIX::strftime("%Y-%m-%d_%H-%M-%S", localtime);
-#=====================================================================================================================
-		$outputFilePath = $logDir.$pathSeparator.$currentTime; 
+	$outputFilePath = $logDir.$pathSeparator.$currentTime; 
 	$errorFilePath = $errorDir.$pathSeparator.$errorFileName;
 	$progressDetailsFilePath = $jobRunningDir.$pathSeparator.$progressDetailsFileName;
 }
@@ -1903,8 +1899,8 @@ sub displayProgressBar
 	return if($_[0] eq ""); #Returning if backup type is empty
 	
 	$SIG{WINCH} = \&changeSizeVal;
-	my $progress = undef;
-	my $cellSize = undef;
+	my $progress = '';
+	my $cellSize = '';
 	my $fullHeader = ($jobType =~ /Backup/i) ? Constants->CONST->{'BackupProgress'} : Constants->CONST->{'RestoreProgress'};
 	my $type = $_[0];
 	my $trnsFileSize = $_[1];
@@ -1912,24 +1908,26 @@ sub displayProgressBar
 	my $TotalSize = $_[3];
 	my $kbps = $_[4];
 	my $fileName = $_[5];
-	$curLines = $_[6];
-	eval{
-		$percent = $incrFileSize/$TotalSize*100; 
-	};
-	$percent = 100 if ($@ =~ /Illegal division by zero/i);
-	$percent =~ s/\..*//;
-	if($percent > 100){
-		$percent = 100;
-	}
+	my $percent = 0;
+	my $totalSizeUnit = '';
+	#$curLines = $_[6];	
 	
-	$progress = "|"x($percent/$progressSizeOp); 
-	my $cellCount = (100-$percent)/$progressSizeOp;
-	$cellCount = $cellCount - int $cellCount ? int $cellCount + 1 : $cellCount;
-	$cellSize = " "x$cellCount;
+	if($TotalSize ne Constants->CONST->{'CalCulate'}){
+		$percent = int($incrFileSize/$TotalSize*100); 
+		$percent = 100	if($percent > 100);
+		$progress = "|"x($percent/$progressSizeOp); 
+		my $cellCount = (100-$percent)/$progressSizeOp;
+		$cellCount = $cellCount - int $cellCount ? int $cellCount + 1 : $cellCount;
+		$cellSize = " "x$cellCount;
+		$totalSizeUnit = convertFileSize($TotalSize);
+		
+	}
+	else{
+		#$totalSizeUnit = convertFileSize($TotalSize);
+		$totalSizeUnit = Constants->CONST->{'CalCulate'};
+	}
 
-	my $totalSizeUnit = convertFileSize($TotalSize);
 	my $fileSizeUnit = convertFileSize($incrFileSize);
-
 	$kbps =~ s/\s+//;
 	$percent = sprintf "%4s", "$percent%";
 	$spAce = " "x6;
@@ -1939,6 +1937,12 @@ sub displayProgressBar
 	my $fileDetailRow = "[$type] [$fileName][$trnsFileSize]";
 	my $strLen  = length $fileDetailRow;
 	$emptySpace = " "x($latestCulmn-$strLen);
+	
+	if($machineInfo eq 'freebsd'){
+		system("tput rc");
+		system("tput ed");	
+		print $freebsdProgress;
+	}
 	
 	system("tput rc");
 	system("tput ed");
@@ -1958,7 +1962,7 @@ sub displayProgressBar
 			print "\nBackup Location    : $backupLoaction\n";
 		} else {
 			print "\nBackup Location    : $backupHost\n";
-			print "Backup Type        : $backupPathType\n";			
+			print "Backup Type        : ".ucfirst($backupPathType)."\n";			
 		}
 		print "Bandwidth Throttle : $bwThrottle%\n";	
 	} else {
@@ -1995,19 +1999,14 @@ sub writeLogHeader {
 	my $backupMountPath = '';
 	if($tempJobType =~ /Local/){
 		$tempJobType =~ s/Local//;
-		$backupMountPath = "Mount Path : $IDriveLocal $lineFeed";
+		$backupMountPath = "Mount Path : $expressLocalDir $lineFeed";
 	}
 
-#======================================================================
-#ENH-003 Logfile name - TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
-#	my $mailHeadA = $lineFeed."$tempJobType Start Time: ".(localtime)."$lineFeed";
-	my $mailHeadA = POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime);
-	$mailHeadA =$lineFeed."$tempJobType Start Time: ".$mailHeadA."$lineFeed";
-#======================================================================
+	my $mailHeadA = $lineFeed."$tempJobType Start Time: ".(localtime)."$lineFeed";
 	my $mailHeadB = '';
 	
 	if($jobType eq "Backup" and $dedup eq 'off') {
-		$mailHeadB = "$tempJobType Type: $backupPathType $tempJobType $lineFeed";
+		$mailHeadB = "$tempJobType Type: ".ucfirst($backupPathType)." $lineFeed";
 	}
 	$mailHeadB .= "Machine Name: $host $lineFeed";
 	$mailHeadB .= "Throttle Value: $bwThrottle% $lineFeed" if ($jobType eq "Backup");
@@ -2042,7 +2041,7 @@ sub writeOperationSummary
 			return;
 		}
 		chmod $filePermission, $outputFilePath;
-	
+
 		if(-d $excludeDirPath) {			
 			$summary .= appendExcludedLogFileContents();			
 		}
@@ -2051,30 +2050,23 @@ sub writeOperationSummary
 			appendErrorFileContents($errorDir);
 			$summary .= $summaryError.$lineFeed;
 			$failedFilesCount += $nonExistsCount;
-		}	
+		}
 	
 		# construct summary message.
 		my $mail_summary = undef;
 		$summary .= $lineFeed."Summary: ".$lineFeed;
 		$finalSummery .=  $lineFeed."Summary: ".$lineFeed;
 		Chomp(\$filesConsideredCount);
-#======================================================================
-# TBE : Enh-006 : Add remaining Quota to summary
-		my %quotaDetails = getQuotaDetails();
-		my $TBE_Text = $lineFeed.'Remaining Free space : '. convertFileSize($quotaDetails{remainingQuota});
-#======================================================================
 		if($_[0] eq Constants->CONST->{'BackupOp'}) {
 			$mail_summary .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 						$lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.
-						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
-						$lineFeed.Constants->CONST->{'BckEndTm'}.POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime). $lineFeed;
+						$lineFeed.Constants->CONST->{'BckEndTm'}.localtime(). $lineFeed;
 		
 			$finalSummery .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
-						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 					       $lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.$lineFeed;
 			
 		} else 	{
@@ -2082,13 +2074,11 @@ sub writeOperationSummary
 						$lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.
-						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
-						$lineFeed.Constants->CONST->{'RstEndTm'}.POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime). $lineFeed;
+						$lineFeed.Constants->CONST->{'RstEndTm'}.localtime(). $lineFeed;
 
 			$finalSummery .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
 					       $lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
-						$lineFeed.$TBE_Text.$lineFeed.		# TBE : Enh-006
 					       $lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.$lineFeed;
 		}
 		if($errStr ne "" &&  $errStr ne "SUCCESS"){
@@ -2151,6 +2141,7 @@ sub pidAliveCheck {
 	if(!flock(PIDFILE, 2|4)) {
 		return 0;
 	}
+	autoflush PIDFILE;
 	print PIDFILE $$;
 	chmod $filePermission, $pidPath;	
 	return 1;
@@ -2184,18 +2175,17 @@ sub backupTypeCheck {
 sub getCursorPos {
 	system('stty', '-echo');
 	my $x='';
+	my $inputTerminationChar = $/;
+	
 	system "stty cbreak </dev/tty >/dev/tty 2>&1";
 	print "\e[6n";
-	$x=getc STDIN;
-	$x.=getc STDIN;
-	$x.=getc STDIN;
-	$x.=getc STDIN;
-	$x.=getc STDIN;
-	$x.=getc STDIN;
-	system "stty -cbreak </dev/tty >/dev/tty 2>&1";
-	($curLines, $cols)=$x=~m/(\d+)\;(\d+)/;
-	system('stty', 'echo');
+	$/ = "R";
+	$x = <STDIN>;
+	$/ = $inputTerminationChar;
 	
+	system "stty -cbreak </dev/tty >/dev/tty 2>&1";	
+	my ($curLines, $cols)=$x=~m/(\d+)\;(\d+)/;
+	system('stty', 'echo');
 	my $totalLines = `tput lines`;
 	chomp($totalLines);
 	my $threshold = $totalLines-11;
@@ -2209,9 +2199,10 @@ sub getCursorPos {
 	}
 	
 	changeSizeVal();
+	print $lineFeed;
 	system("tput sc");
 	print "\n$_[0]" if ($_[0] ne '');	
-	print $lineFeed.Constants->CONST->{'PrepFileMsg'}.$lineFeed;
+	print Constants->CONST->{'PrepFileMsg'}.$lineFeed;
 }
 
 #****************************************************************************************************
@@ -2265,8 +2256,15 @@ sub emptyLocationsQueries {
 			if (runningJobHandler($jobType,'Scheduled',$userName,$usrProfilePath)){#This check will allow to change location only if backup job is not running.
 				#get user backup location
 				print Constants->CONST->{'AskLocforBackup'};
-				while ($currentBackupLocation !~ /[^\s\/]+/g){
-				        print Constants->CONST->{'InvLocInput'}.Constants->CONST->{'locationQuery'} if ($backupLocationCheckCount>0);
+				while ($currentBackupLocation !~ /^(?=.{4,64}$)^[A-Za-z0-9_\-]+$/){
+				#while ($currentBackupLocation !~ /[^\s\/]+/g){
+						
+						if ($backupLocationCheckCount>0){
+							print Constants->CONST->{'InvLocInput'};
+							#print Constants->CONST->{'locationQuery'} ;
+							#print $lineFeed.Constants->CONST->{'AskLocforBackupInRetry'}.' '.Constants->CONST->{'BackupLocNoteDedup'}.': ';
+							print $lineFeed.$Locale::strings{'enter_your_backup_location_optional'}.': ';
+						}
         				$currentBackupLocation = getLocationInput("backupHost");
 	        			if ($backupLocationCheckCount == 3) {
         	        			$currentBackupLocation = q{Invalid Location};
@@ -2387,13 +2385,13 @@ sub emptyLocationsQueries {
 		}
 	} 
 	elsif($jobType eq "Restore") {
-		my $existCheck = 0;
+		my ($existCheck, $restoreLocationCheckCount) = (0) x 2;
 		my $tempRestoreHost = $restoreHost; #to keep data of $restoreHost variable unchanged while checking location validity.
-		my $currentRestoreLocation='';
-		my $restoreLocationCheckCount = 0;
+		my ($currentRestoreLocation, $locName) = ('') x 2;
+		
 		$choice = 'y';
 		if($dedup eq 'off' or ($dedup eq 'on' and $restoreHost ne '' )){
-			my $locName = (($restoreHost eq $hostName) or (substr($restoreHost, 1) eq $hostName)) ? q{default Restore} : q{Restore};
+			$locName = (($restoreHost eq $hostName) or (substr($restoreHost, 1) eq $hostName)) ? q{default Restore} : q{Restore};
 			my $restoreLocationMess = qq{\nYour $locName From Location is "$restoreHost". }.Constants->CONST->{'editQuery'};
 			if($backupHost eq $restoreHost){
 				$restoreLocationMess = qq{\nAs per your Backup Location your $locName From Location is "$backupHost". }.Constants->CONST->{'editQuery'};
@@ -2517,6 +2515,7 @@ sub emptyLocationsQueries {
 						unlink($pidPath) if(-e $pidPath);
 						exit(0);
 					}
+					checkAndLinkBucketSilently(); #Added to update UID silently
 					print $lineFeed.Constants->CONST->{'selectRestoreFromLoc'}.$lineFeed;
 					my @devicesToLink = displayDeviceList(\%evsDeviceHashOutput,\@columnNames);
 					my $userChoice = getUserMenuChoice(scalar(@devicesToLink),4);
@@ -2550,8 +2549,8 @@ sub appLogout{
 	if (-e $_[0] and -f $_[0]){
 		if (!open(EF,'<',$_[0])){ #EF means error file handler.
 			traceLog("Failed to open $_[0], Reason:$! $lineFeed", __FILE__, __LINE__);
-        	        print "Failed to open $statusFilePath, Reason:$! $lineFeed";
-	                cancelProcess();
+        	print "Failed to open $statusFilePath, Reason:$! $lineFeed";
+	        cancelProcess();
 		}
 		chop($errorMessage = <EF>);
 		close(EF);
@@ -2670,7 +2669,8 @@ sub askRestoreLocation{
         		        cancelProcess();
         		}
 		}else{
-			print Constants->CONST->{'InvRestoreLoc'}.qq(. Reason : "$restoreLocation" ).Constants->CONST->{'notExists'}.'. '.Constants->CONST->{'TryAgain'}.$lineFeed;
+			#print Constants->CONST->{'InvRestoreLoc'}.qq(. Reason : "$restoreLocation" ).Constants->CONST->{'notExists'}.'. '.Constants->CONST->{'TryAgain'}.$lineFeed;
+			print Constants->CONST->{'YourRestoreLocationNotExist'}.$lineFeed;
 			cancelProcess();
 		}
 		print Constants->CONST->{'restoreLocNoChange'}.qq( "$restoreLocation".$lineFeed);
@@ -2689,7 +2689,7 @@ sub askRestoreLocation{
 sub getConfirmationChoice {
 	$_[0] =~ s/.*\/(.*?)/$1/;	
 	my $finalMessage  = $_[0] eq Constants->FILE_NAMES->{accountSettingsScript} ? $_[1] : Constants->CONST->{'TryAgain'};
-#	$finalMessage = q(Please try to login using 'Login.pl');
+#	$finalMessage = q(Please try to login using 'login.pl');
 	my $confirmChoice = undef;
 	my $count = 0;	
 	while(!defined $confirmChoice) {
@@ -2977,9 +2977,9 @@ sub displayFinalSummary{
 		my $fileSummary = join ("\n",@fileSummary);
 #		if ($jobStatus eq 'SUCCESS' or $jobStatus eq 'SUCCESS*'){
 		if ($jobStatus eq 'SUCCESS'){
-			$jobStatus = qq($jobType has completed.); 
+			$jobStatus = qq($jobType has been completed.); 
 		}elsif($jobStatus eq 'FAILURE' or $jobStatus eq 'ABORTED'){
-			$jobStatus = defined ($errString) ? $errString : qq($jobType has failed.);
+			$jobStatus = defined ($errString) ? $errString : qq($jobType has been failed.);
 		}	
 		print qq(\n$jobStatus\n$fileSummary\n\n$logFilePath\n);
 		unlink($finalSummaryFile);
@@ -3086,8 +3086,8 @@ sub runningJobHandler{
 			my $JobTermCmd = "perl  '$jobTerminationScript' manual_$jobType $username";
 			my $res = system($JobTermCmd);
 			if($res != 0){
-                        	traceLog("Error in terminating Manual Restore job.", __FILE__, __LINE__);
-                	}else{
+                traceLog("Error in terminating Manual Restore job.", __FILE__, __LINE__);
+            }else{
 #				print qq(\n $jobType ).Constants->CONST->{'JobTerminateMessage'}.$lineFeed;
 				$changeLocationStatus = 1;
 			}
@@ -3279,8 +3279,8 @@ sub getRestoreLocation{
 	clearSpecialChar(\$_[0]);
 	my $userMessage = $_[0] eq Constants->FILE_NAMES->{accountSettingsScript} ? $lineFeed.Constants->CONST->{'AskRestoreLoc'} 
 							: $_[1];
-        print $userMessage;
-        $restoreLocation = getLocationInput("rloc");
+    print $userMessage;
+    $restoreLocation = getLocationInput("rloc");
 }
 #**********************************************************************************************
 #Sbroutine Name         : Chomp(REFERENCE_TO_VARIABLE);
@@ -3379,16 +3379,13 @@ sub headerDisplay{
 	$updateAvailMessage   .= qq(Logged in user :                    );
 	$updateAvailMessage   .= $displayCurrentUser eq '' ? "No Logged In User":$displayCurrentUser; 
 	my %quotaDetails = getQuotaDetails();
-#TBE : ENH-004 - Get Quota, compute remaining quota
-#	if (scalar (keys %quotaDetails) == 2){  #TBE : ENH-004 - fix
+	if (scalar (keys %quotaDetails) == 2){
 		my $totalQuota = convertFileSize($quotaDetails{totalQuota});
 		my $usedQuota = convertFileSize ($quotaDetails{usedQuota});
-		my $remaining = convertFileSize ($quotaDetails{remainingQuota});			#TBE : ENH-004
 		$updateAvailMessage .= qq(\n----------------                    --------------------------------------------\n);
-#		$updateAvailMessage .= qq(Quota Display  :                    $usedQuota(used)/$totalQuota(total));
-		$updateAvailMessage .= qq(Quota Display  :  $remaining(free)/$usedQuota(used)/$totalQuota(total));
-#	}
-	if ($callingScript ne Constants->FILE_NAMES->{checkForUpdateScript} and !isUpdateAvailable()){ # Dont want to call subroutine isUpdateAvailable() in case of calling script is Check_For_Update.pl
+		$updateAvailMessage .= qq(Quota Display  :                    $usedQuota(used)/$totalQuota(total));
+	}
+	if ($callingScript ne Constants->FILE_NAMES->{checkForUpdateScript} and !isUpdateAvailable()){ # Dont want to call subroutine isUpdateAvailable() in case of calling script is check_for_update.pl
 		$updateAvailMessage .= qq(\n--------------------------------------------------------------------------------\n);
 		$updateAvailMessage .= qq(A new update is available. Run ).Constants->FILE_NAMES->{checkForUpdateScript}.qq( to update to latest package.);
 	}
@@ -3452,11 +3449,13 @@ sub createServicePath{
                         
 sub validateUserName{
 	my $validUserPattern = 0;
-	if ($_[0] =~ /^(?=.{4,20}$)(?!.*[_]{2})(?!\s+)[a-z0-9_]+$/){
-		$validUserPattern = 1;
-	}elsif(validEmailAddress($_[0])){
+	#if ($_[0] =~ /^(?=.{4,20}$)(?!.*[_]{2})(?!\s+)[a-z0-9_]+$/){
+	if ($_[0] =~ /^[a-z0-9\@_.-]{4,50}$/){
 		$validUserPattern = 1;
 	}
+	#elsif(validEmailAddress($_[0])){
+	#	$validUserPattern = 1;
+	#}
 	return $validUserPattern;
 }
 
@@ -3472,94 +3471,29 @@ sub validatePassword{
 }
 
 #****************************************************************************
-#Subroutine Name         : isUpdateAvailable 
-#Objective               : To check if update is available, create a file with .updateVersionInfo and write the current version.
-#Usgae                   : isUpdateAvailable()
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub isUpdateAvailable{
-	my $check4updateScript = "'$userScriptLocation/" . Constants->FILE_NAMES->{checkForUpdateScript} . "' availUpdate";
-	unless (-e "$userScriptLocation/.forceupdate") {
-		`perl $check4updateScript 1`;
-		open(my $f, '>', "$userScriptLocation/.forceupdate");
-		close($f);
-	}
+# Subroutine Name			: isUpdateAvailable 
+# Objective					: To check if update is available, create a file with .updateVersionInfo and write the current version.
+# Usgae						: isUpdateAvailable
+# Added By					: Abhishek Verma
+# Modified By				: Sabin Cheruvattil
+#****************************************************************************
+sub isUpdateAvailable {
+	my $check4updateScript	= "'$userScriptLocation/" . Constants->FILE_NAMES->{checkForUpdateScript} . "'";
 	my $updateAvailStats = '';
-	if (-e $userScriptLocation.'/.updateVersionInfo' and -s $userScriptLocation.'/.updateVersionInfo' > 0){
+	$check4updateScript 	= qq($check4updateScript checkUpdate);
+	if(-e $userScriptLocation.'/.updateVersionInfo' and -s $userScriptLocation.'/.updateVersionInfo' > 0) {
 		return 0; #True
-	}else{
-	#	chomp($updateAvailStats = `perl $check4updateScript $usrProfileDir`);
-		open (CHECKUPDATE,"perl $check4updateScript '$usrProfileDir'|") or die "Failed to create process: $!\n"; #Making Asynchronous call to Check_For_Update.pl.
-		if (-e $userScriptLocation.'/.updateVersionInfo' and -s $userScriptLocation.'/.updateVersionInfo' > 0){
+	} else {
+		# chomp($updateAvailStats = `perl $check4updateScript $usrProfileDir`);
+		open (CHECKUPDATE, "perl $check4updateScript |") or die "Failed to create process: $!\n"; #Making Asynchronous call to check_for_update.pl
+		if (-e $userScriptLocation.'/.updateVersionInfo' and -s $userScriptLocation.'/.updateVersionInfo' > 0) {
 			return 0;
-		}else{
-			return 1;
 		}
+		
+		return 1;
 	}
 }
 
-#=====================================================================================================================
-#TBE : ENH-004 - Quota remaining
-#****************************************************************************
-#Subroutine Name         : getQuota_HashTable 
-#Objective               : This function will get fresh quota information and provide remaining byte count
-#Usage                   : getQuota_HashTable() => %
-#Added By                : Taryck BENSIALI
-#****************************************************************************/
-sub getQuota_HashTable(){
-	my $encType = checkEncType(1);
-	my $WaitTime = 0;
-	my $Continue = 0;
-	my $getQuotaUtfFile = '';
-	my $commandOutput = '';
-	my %evsHashOutput;
-# Get a Valid answer
-	do {
-		sleep( $WaitTime );
-		$WaitTime += 120 + rand( 30 );	# Ajoute Entre 50 et 60 secondes au prochain temps d'attente
-		$getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'},$encType);
-		$getQuotaUtfFile =~ s/\'/\'\\''/g;
-		$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
-		traceLog($idevsutilCommandLine."$lineFeed", __FILE__, __LINE__);
-		$commandOutput = `$idevsutilCommandLine &`;
-		%evsHashOutput = parseXMLOutput(\$commandOutput);
-		$Continue = (	($evsHashOutput{message} eq 'ERROR') and ($evsHashOutput{desc} =~ /Try again/) and ($WaitTime < 600)	);
-		traceLog('Outputs : '.$lineFeed.$commandOutput.$lineFeed, __FILE__, __LINE__);
-	} while ($Continue eq 1);
-	if (($evsHashOutput{message} eq 'SUCCESS') and ($evsHashOutput{totalquota} =~/\d+/) and ($evsHashOutput{usedquota} =~/\d+/)){
-		$evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
-		$evsHashOutput{remainingquota} = $evsHashOutput{totalquota} - $evsHashOutput{usedquota};
-	}
-#	} while (	(	($evsHashOutput{message} eq 'ERROR') and ($evsHashOutput{desc} =~ /Try again/)	)	or ($WaitTime > 600)	);
-	unlink($getQuotaUtfFile);
-	return %evsHashOutput;
-}
-
-#****************************************************************************
-#Subroutine Name         : WriteQuotaFile
-#Objective               : This function will create a quota.txt file based on the quota details provided 
-#Usage                   : WriteQuotaFile()
-#Added By                : Taryck BENSIALI
-#****************************************************************************/
-
-sub WriteQuotaFile($$$$$){
-	my $FileName = shift;
-	my $filePermission = shift;
-	my $totalquota  = shift;
-	my $usedquota = shift;
-	my $remainingquota = shift;
-	
-	open (AQ,'>',$FileName) or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$FileName."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-	chmod $filePermission,$FileName;
-	if ($totalquota =~/\d+/ and $usedquota =~ /\d+/ and $remainingquota =~ /\d+/){
-		print AQ 'totalQuota=' . $totalquota . "\n";
-		print AQ 'usedQuota=' . $usedquota . "\n";
-		print AQ 'remainingQuota=' . $remainingquota . "\n";
-	}
-	close AQ;
-	traceLog('Write File : '.$FileName."$lineFeed", __FILE__, __LINE__);
-}
-#=====================================================================================================================
 #*********************************************************************************************************
 #Subroutine Name         : getQuotaForAccountSettings 
 #Objective               : This function will create a quota.txt file based on the quota details provided
@@ -3570,24 +3504,15 @@ sub getQuotaForAccountSettings
 {
 	my $accountQuota = $_[0];
 	my $quotaUsed = $_[1];
-#=====================================================================================================================
-#TBE : ENH-004 - Quota remaining
-  my $remainingquota = $accountQuota - $quotaUsed;
-	WriteQuotaFile( $usrProfileDir.'/.quota.txt',
-					$filePermission,
-					$accountQuota,
-					$quotaUsed,
-					$remainingquota);
-# Mutualized code          
-#	open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-#	chmod $filePermission,$usrProfileDir.'/.quota.txt';
-#	if ($accountQuota =~/\d+/ and $quotaUsed =~ /\d+/){
-#		$quotaUsed =~ s/(\d+)\".*/$1/isg;
-#		print AQ "totalQuota=$accountQuota\n";
-#		print AQ "usedQuota=$quotaUsed\n";
-#	}
-#	close AQ;
-#=====================================================================================================================
+
+	open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+	chmod $filePermission,$usrProfileDir.'/.quota.txt';
+	if ($accountQuota =~/\d+/ and $quotaUsed =~ /\d+/){
+		$quotaUsed =~ s/(\d+)\".*/$1/isg;
+		print AQ "totalQuota=$accountQuota\n";
+		print AQ "usedQuota=$quotaUsed\n";
+	}
+	close AQ;
 }
 
 #****************************************************************************
@@ -3597,35 +3522,22 @@ sub getQuotaForAccountSettings
 #Added By                : Abhishek Verma.
 #****************************************************************************/
 sub getQuota{
-#=====================================================================================================================
-#TBE : ENH-004 - Quota remaining
-	my %evsQuotaHashOutput = getQuota_HashTable();
-# Mutualized code
-#	my $encType = checkEncType(1);
-#	my $getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'});
-#	$getQuotaUtfFile =~ s/\'/\'\\''/g;
-#        $idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
-#	my $commandOutput = `$idevsutilCommandLine`;
-#        unlink($getQuotaUtfFile);
-#	my %evsQuotaHashOutput = parseXMLOutput(\$commandOutput);
-#=====================================================================================================================
+	#my $encType = checkEncType(1);
+	my $getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'});
+	$getQuotaUtfFile =~ s/\'/\'\\''/g;
+	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+	my $commandOutput = `$idevsutilCommandLine &`;
+	unlink($getQuotaUtfFile);
+	my %evsQuotaHashOutput = parseXMLOutput(\$commandOutput);
+
 	if (($evsQuotaHashOutput{"message"} eq 'SUCCESS') and ($evsQuotaHashOutput{"totalquota"} =~/\d+/) and ($evsQuotaHashOutput{"usedquota"} =~/\d+/)){
-#=====================================================================================================================
-#TBE : ENH-004 - Quota remaining
-		WriteQuotaFile( $usrProfileDir.'/.quota.txt',
-						$filePermission,
-						$evsHashOutput{totalquota},
-						$evsHashOutput{usedquota},
-						$evsHashOutput{remainingquota});
-# Mutualized code
-		# open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-		# chmod $filePermission,$usrProfileDir.'/.quota.txt';
-		# $evsHashOutput{usedquota} =~ s/(\d+)\".*/$1/isg;
-		# print AQ "totalQuota=$evsHashOutput{totalquota}\n";
-		# print AQ "usedQuota=$evsHashOutput{usedquota}\n";
-		# close AQ;
-#=====================================================================================================================
+		open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+		chmod $filePermission,$usrProfileDir.'/.quota.txt';
+		$evsQuotaHashOutput{"usedquota"} =~ s/(\d+)\".*/$1/isg;
+		print AQ "totalQuota=".$evsQuotaHashOutput{"totalquota"}."\n";
+		print AQ "usedQuota=".$evsQuotaHashOutput{"usedquota"}."\n";
 	}
+	close AQ;
 }
 #****************************************************************************
 #Subroutine Name         : getQuotaDetails 
@@ -3709,11 +3621,11 @@ sub displayMenu{
 sub returnKeyName{
     my $userChoice = $_[0];
 	my @keyName2Return = @{$_[1]};
-
-	if(scalar(@keyName2Return)>3){
+	my $totalChoice = $_[2];
+	if($totalChoice==8){
         $keyName = $userChoice =~ /^1$|^2$/ ? $keyName2Return[0]:$userChoice =~ /^3$/ ? $keyName2Return[1]:$userChoice =~ /^4$|^5$|^6$/ ? $keyName2Return[2]:$userChoice =~ /^7$|^8$/ ? $keyName2Return[3]:'';
 	} else {
-        $keyName = $userChoice =~ /^1$|^2$/ ? $keyName2Return[0] : $userChoice =~ /^3$/ ? $keyName2Return[1]  :$userChoice =~ /^4$|^5$/ ? $keyName2Return[2] :'';
+        $keyName = $userChoice =~ /^1$|^2$/ ? $keyName2Return[0] : $userChoice =~ /^3$/ ? $keyName2Return[1]  :$userChoice =~ /^4$|^5$/ ? $keyName2Return[2]: $userChoice =~ /^6$|^7$/ ? $keyName2Return[3] :'';
 	}
     return $keyName;
 }
@@ -3789,7 +3701,7 @@ sub getLoginStatus{
 		
 		$displayHeader->($0) if (defined ($displayHeader));
 		print Constants->CONST->{'PlLogin'}.$whiteSpace.qq{$appType}.$whiteSpace.Constants->CONST->{'AccLogin'}.$lineFeed;
-                traceLog(Constants->CONST->{'PlLogin'}.$whiteSpace.$appType.$whiteSpace.Constants->CONST->{'AccLogin'}.$lineFeed, __FILE__, __LINE__);
+        traceLog(Constants->CONST->{'PlLogin'}.$whiteSpace.$appType.$whiteSpace.Constants->CONST->{'AccLogin'}.$lineFeed, __FILE__, __LINE__);
 	}
 	return $loginReq;
 }
@@ -3802,23 +3714,22 @@ sub getLoginStatus{
 #Added By                : Abhishek Verma.
 #****************************************************************************/
 sub getAccountConfStatus{
-        my $confFilePath = shift;
-        my $displayHeader = shift;
-        my $accountConfReq = 1;
+	my $confFilePath = shift;
+	my $displayHeader = shift;
+	my $accountConfReq = 1;
 
 	# checking for account configuration when user is logged in
-	if (($userName ne '' and -e $serviceFileLocation and -s $serviceFileLocation > 0 and -e $usrProfileDir and -e $confFilePath and -s $confFilePath > 0) 
+	if(($userName ne '' and -e $serviceFileLocation and -s $serviceFileLocation > 0 and -e $usrProfileDir and -e $confFilePath and -s $confFilePath > 0) 
 	# checking for account configuration when user is logged out
-	or ($userName eq '' and -e $serviceFileLocation and -s $serviceFileLocation > 0 and -e $usrProfileDir)){
-                $accountConfReq = 0;
-	}	
+	or ($userName eq '' and -e $serviceFileLocation and -s $serviceFileLocation > 0 and -e $usrProfileDir)) {
+		$accountConfReq = 0;
+	}
 
-	if($accountConfReq){
+	if($accountConfReq) {
 		#displaying script header if passed
 		$displayHeader->($0) if (defined ($displayHeader));
-                print Constants->CONST->{'loginConfigAgain'}.$lineFeed;
-                #traceLog(Constants->CONST->{'loginConfigAgain'}.$lineFeed, __FILE__, __LINE__);
-        }
+        print Constants->CONST->{'loginConfigAgain'}.$lineFeed;        
+    }
 	return $accountConfReq;
 }
 #****************************************************************************
@@ -3909,18 +3820,17 @@ sub getTableHeader{
 #Added By               : Abhishek Verma.
 #*********************************************************************************************************/
 sub getDeviceList{
-        my $dedupStatus = shift;
-        my $listDeviceUtfFile = getOperationFile(Constants->CONST->{'ListDeviceOp'});
-        chomp($listDeviceUtfFile);
-        $listDeviceUtfFile =~ s/\'/\'\\''/g;
-        $idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$listDeviceUtfFile."'".$whiteSpace.$errorRedirection;
-        $commandOutput = qx{$idevsutilCommandLine};
-        unlink($listDeviceUtfFile);
-		#	traceLog("DEBUG - getDeviceList command :: $commandOutput", __FILE__, __LINE__);
-		if ($commandOutput =~ /password\s+mismatch|encryption verification failed|Unable to proceed; private encryption key must be between 4 and 256 characters in length/i){
-			return $commandOutput;
-		}	
-        return parseXMLOutput(\$commandOutput,Constants->CONST->{'parseDeviceList'});
+	my $dedupStatus = shift;
+	my $listDeviceUtfFile = getOperationFile(Constants->CONST->{'ListDeviceOp'});
+	chomp($listDeviceUtfFile);
+	$listDeviceUtfFile =~ s/\'/\'\\''/g;
+	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$listDeviceUtfFile."'".$whiteSpace.$errorRedirection;
+	$commandOutput = qx{$idevsutilCommandLine};
+	unlink($listDeviceUtfFile);
+	if ($commandOutput =~ /password\s+mismatch|encryption verification failed|Unable to proceed; private encryption key must be between 4 and 256 characters in length/i){
+		return $commandOutput;
+	}	
+	return parseXMLOutput(\$commandOutput,Constants->CONST->{'parseDeviceList'});
 }
 #*********************************************************************************************************
 #Subroutine Name        : displayDeviceList 
@@ -4026,11 +3936,7 @@ sub getUserMenuChoice{
 		$retryCount -= 1;
     }
 	if ($retryCount == 0 or  $userChoice eq ''){
-		if($bucketOrMount eq 'mount'){
-			print Constants->CONST->{'maxRetry'}.$lineFeed.$lineFeed;
-		} else {
-			print Constants->CONST->{'maxRetryCuttoff'}.' '.Constants->CONST->{'pleaseTryAgain'}.$lineFeed.$lineFeed;
-		}
+		print Constants->CONST->{'maxRetry'}.$lineFeed.$lineFeed;
         cancelProcess();	
 	}
     return $userChoice;
@@ -4043,9 +3949,18 @@ sub getUserMenuChoice{
 #*********************************************************************************************************/
 sub linkBucket {
 	#$encType = checkEncType(1) if($encType eq "");
-	my $linkToData = shift;
-	my $linkForRestore = shift if (scalar(@_)>-1);
-	my ($deviceID,$deviceNickName) = ($deviceIdPrefix.$linkToData->{device_id}.$deviceIdPostfix,$linkToData->{nick_name});
+	#my $linkToData = shift;
+	#my $linkForRestore = shift if (scalar(@_)>-1);
+	
+	$configFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
+	my $deviceID = shift;
+	my $deviceNickName = shift;
+	my $isSameDeviceID = shift;
+	if($deviceID eq '' or $deviceNickName eq ''){
+		return 0;
+	}
+	#my ($deviceID,$deviceNickName) = ($deviceIdPrefix.$linkToData->{device_id}.$deviceIdPostfix,$linkToData->{nick_name});
+	
 	my $linkBucketUtfFile = getOperationFile(Constants->CONST->{'LinkBucketOp'},$deviceID,$deviceNickName);
 	chomp($linkBucketUtfFile);
 	$linkBucketUtfFile =~ s/\'/\'\\''/g;
@@ -4058,9 +3973,17 @@ sub linkBucket {
 		$' =~ /device_id="(.*?)".*?server_root="(.*?)".*?nick_name="(.*?)".*/;
 		$deviceID   = $deviceIdPrefix.$1.$deviceIdPostfix;
 		$backupHost = $restoreHost =  "$deviceID#$3";
-		# BackupLocation = "DeviceID#Nickname" Eg: "D01500371120000812023#/dedup1
-		print Constants->CONST->{'BackupLocMsg'}.$whiteSpace."\"$3\"".$lineFeed;
 		$serverRoot = $2;
+		# BackupLocation = "DeviceID#Nickname" Eg: "D01500371120000812023#/dedup1
+		if(defined($isSameDeviceID)){	
+			if($isSameDeviceID){
+				putParameterValue(\"RESTOREFROM",\"$restoreHost",$configFilePath);
+			}
+			putParameterValue(\"BACKUPLOCATION",\"$backupHost",$configFilePath);
+			putParameterValue(\"SERVERROOT",\"$serverRoot",$configFilePath);			
+		} else {
+			print Constants->CONST->{'BackupLocMsg'}.$whiteSpace."\"$3\"".$lineFeed;
+		}
 	}
 }
 #*********************************************************************************************************
@@ -4070,30 +3993,39 @@ sub linkBucket {
 #Added By               : Abhishek Verma.
 #*********************************************************************************************************/
 sub getUniqueID{
-	my $ifConfigFile = "/sbin/ifconfig";
-	my $ethernetAddrIndex = -1;
-	my $getLinuxFlavour = `cat /etc/*-release 2>/dev/null`;
-	if($getLinuxFlavour eq ''){
-		my $machineArch = `uname -a`;
-		chomp($machineArch);
-		if($machineArch =~ /freebsd/i){
-			$getLinuxFlavour = "freebsd";
-			$uidRes = `$ifConfigFile | grep ether |sed -n 1p|sed s/://g`;
-			$ethernetAddrIndex = 2;			
-		}
+	my $cmd;
+	my $ifConfigPath = `which ifconfig 2>/dev/null`;
+	chomp($ifConfigPath);
+	if($ifConfigPath ne '') {
+		$cmd = 'ifconfig -a';
 	}
-	else 
-	{		
-		$ethernetAddrIndex = 2 if($getLinuxFlavour =~ /fedora/i);
-		if(-e $ifConfigFile){
-			$uidRes = `$ifConfigFile | grep Ethernet |sed -n 1p|sed s/://g`;
-		} else {
-			$uidRes = `ip addr show | grep ether |sed -n 1p|sed s/[:/]//g`;
-			$ethernetAddrIndex = 2;
+	elsif (-f '/sbin/ifconfig') {
+		$cmd = '/sbin/ifconfig -a';
 		}
+	elsif (-f '/sbin/ip') {
+		$cmd = '/sbin/ip addr';
 	}
-	my $uniqueID =(split(/\s+/,$uidRes))[$ethernetAddrIndex];
-    return 'Linux'.$uniqueID;
+	else {
+		print "Unable to find MAC Address.".$lineFeed;
+		return 0;
+	}
+
+	my $result = `$cmd`;
+	my @macAddr = $result =~ /HWaddr [a-fA-F0-9:]{17}|[a-fA-F0-9]{12}/g;
+	if (@macAddr) {
+		$macAddr[0] =~ s/HWaddr |:|-//g;
+		#traceLog("NEW UID: $macAddr[0]", __FILE__, __LINE__);
+		return ($muid = ('Linux' . $macAddr[0]));
+	}
+
+	@macAddr = $result =~ /ether [a-fA-F0-9:]{17}|[a-fA-F0-9]{12}/g;
+	if (@macAddr) {
+		#traceLog("NEW UID: $macAddr[0]", __FILE__, __LINE__);
+		$macAddr[0] =~ s/ether |:|-//g;
+		return ($muid = ('Linux' . $macAddr[0]));
+	}
+
+	return 0;
 }
 #*********************************************************************************************************
 #Subroutine Name        : checkIfEvsWorking
@@ -4127,33 +4059,46 @@ sub checkDeviceID{
 	%evsDeviceHashOutput = getDeviceList();
 	return 0 if (keys %evsDeviceHashOutput == 1);
 	my $totalElements = keys %evsDeviceHashOutput;
+	my $needToUpdateRestFrom =0;
+	   $needToUpdateRestFrom =1 if($backupLoc eq $restoreFrom);
+	
+	my %deviceIdHash = reverse(%{$evsDeviceHashOutput{device_id}});
+	my %nickNameHash = reverse(%{$evsDeviceHashOutput{nick_name}});
+	my %serverRootHash = reverse(%{$evsDeviceHashOutput{server_root}});
+	my %uniqueIdHash = reverse(%{$evsDeviceHashOutput{uid}});
 
-        if ($totalElements == 1 or $totalElements == 0){
+    if ($totalElements == 1 or $totalElements == 0){
 		my ($listDeviceMessage) = keys %evsDeviceHashOutput;
 		if ($listDeviceMessage =~ 'No devices found' or $totalElements == 0){
 			getBucketName();
 			createBucket();
 		}
-        }
-	elsif(exists ($evsDeviceHashOutput{uid}->{$uniqueID})){#Verifying if the unique id exists in the list of devices. If true find the corresponding device id and write that to key "BACKUPLOCATION" and "RESTOREFROM" of configuration file respectively.
+		return;
+    }
+	else{
+		checkAndLinkBucketSilently();
+    }
+		
+	if(exists($evsDeviceHashOutput{uid}->{$uniqueID})){#Verifying if the unique id exists in the list of devices. If true find the corresponding device id and write that to key "BACKUPLOCATION" and "RESTOREFROM" of configuration file respectively.
 		my $locationQuery = '';
 	    my $choice = '';
 
-        my %deviceIdHash = reverse(%{$evsDeviceHashOutput{device_id}});
-		my %nickNameHash = reverse(%{$evsDeviceHashOutput{nick_name}});
-		my %serverRootHash = reverse(%{$evsDeviceHashOutput{server_root}});
+		%deviceIdHash = reverse(%{$evsDeviceHashOutput{device_id}});
+		%nickNameHash = reverse(%{$evsDeviceHashOutput{nick_name}});
+		%serverRootHash = reverse(%{$evsDeviceHashOutput{server_root}});	
 		
         my $deviceId = $deviceIdHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
 		my $nickName = $nickNameHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
 		$serverRoot  = $serverRootHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
 		
 		$nickName =~ s/(.*)_\d+/$1/;
-            	$deviceId = $deviceIdPrefix.$deviceId.$deviceIdPostfix;
+        $deviceId = $deviceIdPrefix.$deviceId.$deviceIdPostfix;
 		my $deviceID = '';
 		if (defined ($backupHost)){
 				($deviceID,$backupHost) = split ('#',$backupHost);
 				$deviceID = $deviceId if($deviceID ne $deviceId); 			#If difference is found in device ID between One present in Config file and the other we found under list device. 
 			}
+
 			if ($deviceID eq '' or $backupHost eq ''){
 				($deviceID,$backupHost) = ($deviceId,$nickName);
 			}
@@ -4167,6 +4112,10 @@ sub checkDeviceID{
 			if($choice eq 'y' or $choice eq 'Y'){
 				getBucketName($backupHost);
 				nickUpdate($deviceID);
+			#Added to update the nick name of Restore From if it is same
+			if($needToUpdateRestFrom){
+				$restoreHost = $backupHost;
+			}
 			}
 			else{
 				$backupHost = "$deviceID#$backupHost";
@@ -4198,12 +4147,16 @@ sub createOrLinkBucket{
 		print $lineFeed;
 		if ($retryCount <= 0){
 			print Constants->CONST->{'maxRetry'}.$lineFeed;
-                        traceLog($lineFeed.Constants->CONST->{'maxRetry'}.$lineFeed, __FILE__, __LINE__);
-                        cancelProcess();	
+            #traceLog($lineFeed.Constants->CONST->{'maxRetry'}.$lineFeed, __FILE__, __LINE__);
+            cancelProcess();	
 		}
 		my $userChoice = getUserMenuChoice(scalar(@devicesToLink),$retryCount,Constants->CONST->{'selectDevice'});
-		linkBucket($devicesToLink[--$userChoice]) if ($userChoice ne '');
-        }
+		if ($userChoice ne ''){
+			my $linkToData = $devicesToLink[--$userChoice];
+			my ($deviceID,$deviceNickName) = ($deviceIdPrefix.$linkToData->{device_id}.$deviceIdPostfix,$linkToData->{nick_name});
+			linkBucket($deviceID,$deviceNickName);
+		}
+    }
 }
 #*********************************************************************************************************
 #Subroutine Name        : getBucketName
@@ -4213,40 +4166,42 @@ sub createOrLinkBucket{
 #*********************************************************************************************************/
 sub getBucketName{
 	my $oldBackupLocName = shift;
-        my $retryCount = 4;
-        while($retryCount){
-        #       print $lineFeed.Constants->CONST->{'AskBackupLoc'}.': ';
-                print $lineFeed.Constants->CONST->{'AskBackupLoc'}.' '.Constants->CONST->{'BackupLocNoteDedup'}.': ';
-                my $backupHostTemp = getLocationInput();
+	my $retryCount = 4;
+	while($retryCount){
+		#print $lineFeed.Constants->CONST->{'AskBackupLoc'}.': ';
+		#print $lineFeed.Constants->CONST->{'AskBackupLoc'}.' '.Constants->CONST->{'BackupLocNoteDedup'}.': ';
+		print $lineFeed.$Locale::strings{'enter_your_backup_location_optional'}.': ';
+		my $backupHostTemp = getLocationInput();
 		Chomp(\$backupHostTemp);#This will trim the spaces or tab from string
-                if ($backupHostTemp =~ /^(?=.{4,64}$)^[A-Za-z0-9_\-\.\s]+$/ or $backupHostTemp eq ''){
-                        if($backupHostTemp ne "") {
-                                $backupHost = $backupHostTemp;
-                        }elsif($backupHostTemp eq '' and defined($oldBackupLocName)){#if some backup loc name is already configured and user press enter key then the same should be restored.
+		#if ($backupHostTemp =~ /^(?=.{4,64}$)^[A-Za-z0-9_\-\.\s]+$/ or $backupHostTemp eq ''){
+		if ($backupHostTemp =~ /^(?=.{4,64}$)^[A-Za-z0-9_\-]+$/ or $backupHostTemp eq ''){
+			if($backupHostTemp ne "") {
+				$backupHost = $backupHostTemp;
+			}elsif($backupHostTemp eq '' and defined($oldBackupLocName)){#if some backup loc name is already configured and user press enter key then the same should be restored.
 				$backupHost = $oldBackupLocName;
-                        }else{
-                                $backupHost = `hostname`;
-                                chomp($backupHost);
-                                print Constants->CONST->{'messDefaultBackupLoc'}.qq( "$backupHost").$lineFeed;
-                        }
-                        print Constants->CONST->{'SetBackupLoc'}.$lineFeed;
-                        if(substr($backupHost, 0, 1) eq "/") {
-                                $backupHost = s/^["]?\///;
-                        }
-                        last;
-                }else{
-                        $retryCount -= 1;
-                        print Constants->CONST->{'BackupLocInvalidDedup'}.qq( "$backupHostTemp". );
+			}else{
+				$backupHost = `hostname`;
+				chomp($backupHost);
+				print Constants->CONST->{'messDefaultBackupLoc'}.qq( "$backupHost").$lineFeed;
+			}
+			print Constants->CONST->{'SetBackupLoc'}.$lineFeed;
+			if(substr($backupHost, 0, 1) eq "/") {
+				$backupHost = s/^["]?\///;
+			}
+			last;
+		}else{
+			$retryCount -= 1;
+			print Constants->CONST->{'BackupLocInvalidDedup'}.qq( "$backupHostTemp". );
 			if ($backupHostTemp !~ /^(?=.{4,64}$)/){
 				print Constants->CONST->{'BucketLength'}.$lineFeed;
 			}
-                        undef ($backupHostTemp);
-                }
-        }
-        if ($retryCount == 0 and !(defined $backupHostTemp)){
-                print $lineFeed.Constants->CONST->{'BackupLocRetryDedup'}.$lineFeed;
-                cancelProcess();
-        }
+			undef ($backupHostTemp);
+		}
+	}
+	if ($retryCount == 0 and !(defined $backupHostTemp)){
+		print $lineFeed.Constants->CONST->{'BackupLocRetryDedup'}.$lineFeed;
+		cancelProcess();
+	}
 }
 #*********************************************************************************************************
 #Subroutine Name        : createBucket
@@ -4293,7 +4248,7 @@ sub nickUpdate {
 	if ($commandOutput =~ /status=["]success["]/i){
 			$' =~ /nick_name=["](.*?)["].*/;
 			$backupHost = "$deviceID#$1"; # BackupLocation = "DeviceID#Nickname"
-			$restoreHost=$1;
+		#$restoreHost=$1; #Commented by Senthil : 07-May-2018
 			print Constants->CONST->{'BackupLocMsg'}.$whiteSpace."\"$1\"".$lineFeed;
 			holdScreen2displayMessage(2);
 	}
@@ -4367,6 +4322,7 @@ sub verifyPvtKey {
 			$retType = getDeviceList();
 		}
         }
+		checkAndLinkBucketSilently() if($dedup eq 'on'); #Added to update UID silently
         print Constants->CONST->{'verifiedPvt'}.$lineFeed;
 }
 
@@ -4431,10 +4387,26 @@ sub replaceXMLcharacters
 #**************************************************************************************************************************
 sub checkPreReq{
 	my ($fileName,$jobType,$taskType,$reason) = @_;
+	my $isEmpty = 0;
 	if((!-e $fileName) or (!-s $fileName)) {
+		$isEmpty = 1;
+	} 
+	elsif(-s $fileName > 0 && -s $fileName <= 50){
+		if(!open(OUTFH, "< $fileName")) {
+			traceLog($Locale::strings{'failed_to_open_file'}.":$fileName, Reason:$!");
+		}		
+		my $buffer = <OUTFH>;
+		close OUTFH;		
+		Chomp(\$buffer);
+		if($buffer eq ''){
+			$isEmpty = 1;
+		}
+		close(OUTFH);	
+	}
+	
+	if($isEmpty){
 		my $errStr = "Your $jobType"."set file \"$fileName\" is empty. ".Constants->CONST->{pleaseUpdate}.$lineFeed; # Added by Abhishek Verma.
-		print $errStr;
-		#traceLog("$errStr\n", __FILE__, __LINE__);
+		print $errStr if(lc($taskType) eq 'manual');
 		$subjectLine = "$taskType $jobType Email Notification "."[$userName]"." [Failed $jobType]";
 		$status = "FAILURE";
 		sendMail($subjectLine,$reason,$fileName);
@@ -4485,7 +4457,7 @@ sub configAccount {
                                 $retVal = checkPvtKeyCondtions($pvt);
                         }else{
                                 print $lineFeed.Constants->CONST->{'TryAgain'}.$lineFeed;
-                                traceLog($lineFeed.$whiteSpace.Constants->CONST->{'TryAgain'}.$lineFeed, __FILE__, __LINE__);
+                                #traceLog($lineFeed.$whiteSpace.Constants->CONST->{'TryAgain'}.$lineFeed, __FILE__, __LINE__);
                                 cancelProcess();
                         }
                         $countPvtInput++;
@@ -4502,7 +4474,7 @@ sub configAccount {
 
         $idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$configUtf8File."'".$whiteSpace.$errorRedirection;
         my $commandOutput = `$idevsutilCommandLine`;
-        traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
+        #traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
         unlink $configUtf8File;
 }
 #***********************************************************************************
@@ -4511,28 +4483,28 @@ sub configAccount {
 # Added By                : Dhritikana
 #************************************************************************************/
 sub confirmPvtKey {
-        my $pvt = shift;
-        my $count = 0;
-        while($count < 4) {
-                print $lineFeed.Constants->CONST->{'AskPvtAgain'}.$lineFeed;
-                system('stty','-echo');
-                my $pvtKeyAgin = getInput();
-                system('stty','echo');
-                $count++;
-                if($pvt ne $pvtKeyAgin) {
-                        print $lineFeed.Constants->CONST->{'PvtErr'}.$lineFeed;
-                        #$count++;
-                } else {
-                        print $lineFeed.Constants->CONST->{'ConfirmPvt'}.$lineFeed;
-						print $lineFeed.Constants->CONST->{'setEncKeyMess'}.$lineFeed;
-                        last;
-                }
-                if($count eq 3) {
-                        print $lineFeed.Constants->CONST->{'TryAgain'}.$lineFeed;
-                        traceLog($lineFeed.$whiteSpace.Constants->CONST->{'TryAgain'}.$lineFeed, __FILE__, __LINE__);
-                        cancelProcess();
-                }
-        }
+	my $pvt = shift;
+	my $count = 0;
+	while($count < 4) {
+		print $lineFeed.Constants->CONST->{'AskPvtAgain'}.$lineFeed;
+		system('stty','-echo');
+		my $pvtKeyAgin = getInput();
+		system('stty','echo');
+		$count++;
+		if($pvt ne $pvtKeyAgin) {
+			print $lineFeed.Constants->CONST->{'PvtErr'}.$lineFeed;
+			#$count++;
+		} else {
+			print $lineFeed.Constants->CONST->{'ConfirmPvt'}.$lineFeed;
+			print $lineFeed.Constants->CONST->{'setEncKeyMess'}.$lineFeed;
+			last;
+		}
+		if($count eq 3) {
+			print $lineFeed.Constants->CONST->{'TryAgain'}.$lineFeed;
+            #traceLog($lineFeed.$whiteSpace.Constants->CONST->{'TryAgain'}.$lineFeed, __FILE__, __LINE__);
+			cancelProcess();
+		}
+	}
 }
 #**********************************************************************************************************
 # Subroutine Name         : setAccount
@@ -4726,7 +4698,6 @@ sub updateUserDetail {
 	
 	my $data = 'username='.$encodedUname.'&password='.$encodedPwod.'&device_name='.$device_name.'&device_id='.$uniqueID.'&enabled='.$enabled.'&os='.$encodedOS.'&version='.$currentVersion;
 	#print "CGI URL:$IDriveUserInoCGI$data\n\n";
-	#traceLog("CGI URL:$IDriveUserInoCGI$data");
 	$res 	 = getCurlOutput($IDriveUserInoCGI,$data);
 	if($res =~ /Error:/){
 		#print "Failed to update user detail: $res\n";
@@ -4734,7 +4705,7 @@ sub updateUserDetail {
 		return 0;
 	}
 	#print "CGI output:$res\n\n";
-	traceLog("CGI output:$res") if($enabled ==1);
+	#traceLog("CGI output:$res") if($enabled ==1);
 	if($res =~ /success/i){
 		return 1;
 	}
@@ -4776,10 +4747,11 @@ sub getZipPath{
 #Added By                      : Senthil Pandian
 #*************************************************************************************************/
 sub getPSoption{
-	my $machineInfo = `uname -a`;
+	$machineInfo = `uname -a`;
 	chomp($machineInfo);
 	if($machineInfo =~ /freebsd/i){
 		$psOption = "-auxww";
+		$machineInfo = 'freebsd';
 	}
 }
 
@@ -4870,5 +4842,73 @@ sub appendExcludedLogFileContents
 		rmtree($exclude_dir);
 	}
 	return $excludeLogSummary;
+}
+
+#****************************************************************************************************
+# Subroutine Name         : checkAndLinkBucketSilently
+# Objective               : This subroutine will link the bucket silently if machine's UID having '_1'
+# Modified By             : Senthil Pandian
+#*****************************************************************************************************/
+sub checkAndLinkBucketSilently
+{
+	my %ConfFileValues = getConfigHashValue();
+	my $actualDeviceID;
+	my $backupLoc = $ConfFileValues{'BACKUPLOCATION'};
+	my $restoreFrom = $ConfFileValues{'RESTOREFROM'};
+	my $needToUpdateRestFrom =0;	
+	   $needToUpdateRestFrom =1 if($backupLoc eq $restoreFrom);
+	
+	my %deviceIdHash = reverse(%{$evsDeviceHashOutput{device_id}});
+	my %nickNameHash = reverse(%{$evsDeviceHashOutput{nick_name}});
+	
+	if (defined ($backupLoc) and $backupLoc ne ''){
+		#print "backupHost:$backupHost\n";
+		($deviceID,$backupHost) = split ('#',$backupLoc);
+		$actualDeviceID = $deviceID;
+		$actualDeviceID =~ s/$deviceIdPostfix//;
+		$actualDeviceID =~ s/$deviceIdPrefix//;
+	}
+	
+	if(!defined($backupHost) or $backupHost eq '' or !defined($evsDeviceHashOutput{device_id}->{$actualDeviceID})){
+		#elsif(no <your device id> or <your device id != received ids>){
+		$isExistFlag = exists ($evsDeviceHashOutput{uid}->{$uniqueID});
+		if(!$isExistFlag){
+			#$uniqueID detech _1
+			$isExistFlag = exists ($evsDeviceHashOutput{uid}->{$uniqueID."_1"});
+			if($isExistFlag){
+				#//function to update to valid one
+				my $deviceId = $deviceIdHash{$evsDeviceHashOutput{uid}->{$uniqueID."_1"}};
+				my $nickName = $nickNameHash{$evsDeviceHashOutput{uid}->{$uniqueID."_1"}};
+				$nickName =~ s/(.*)_\d+/$1/;
+				$deviceId = $deviceIdPrefix.$deviceId.$deviceIdPostfix;
+				linkBucket($deviceId,$nickName,$needToUpdateRestFrom);
+				%evsDeviceHashOutput = getDeviceList();
+			}
+		} else {
+			#Updating CONFIGURATION_FILE if the device id/nickname not present
+			my $deviceId = $deviceIdHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
+			my $nickName = $nickNameHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
+			$nickName =~ s/(.*)_\d+/$1/;
+			$deviceID   = $deviceIdPrefix.$deviceId.$deviceIdPostfix;
+			$backupHost = $restoreHost =  "$deviceID#$nickName";
+			$configFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
+			if($needToUpdateRestFrom){
+				putParameterValue(\"RESTOREFROM",\"$restoreHost",$configFilePath);
+			}
+			putParameterValue(\"BACKUPLOCATION",\"$backupHost",$configFilePath);
+		}
+	} 
+	elsif(defined($evsDeviceHashOutput{device_id}->{$actualDeviceID})){
+		#elsif(<your device id == received ids>){
+		#//but uid of one differ from other then function call to correct UID
+		if(!defined($evsDeviceHashOutput{uid}->{$uniqueID})){
+			my $deviceId = $deviceIdHash{$evsDeviceHashOutput{uid}->{$uniqueID."_1"}};
+			my $nickName = $nickNameHash{$evsDeviceHashOutput{uid}->{$uniqueID."_1"}};
+			$nickName =~ s/(.*)_\d+/$1/;	
+			$deviceId = $deviceIdPrefix.$deviceId.$deviceIdPostfix;
+			linkBucket($deviceId,$nickName,$needToUpdateRestFrom);
+			%evsDeviceHashOutput = getDeviceList();
+		}
+	}
 }
 1;

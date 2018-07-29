@@ -3,7 +3,10 @@
 #######################################################################
 #Script Name : Backup_Script.pl
 #######################################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
 
 require 'Header.pl';
 use FileHandle;
@@ -34,7 +37,7 @@ my $cancelFlag = 0;
 my %backupExcludeHash = (); #Hash containing items present in Exclude List#
 my $backupUtfFile = '';
 
-my $maxNumRetryAttempts = 5;
+my $maxNumRetryAttempts = 1000;
 my $totalSize = 0;
 my $BackupsetFileTmp = "";
 my $regexStr = '';
@@ -72,7 +75,7 @@ my @commandArgs = qw(--silent SCHEDULED);
 if ($#ARGV >= 0){
 	if(!validateCommandArgs(\@ARGV,\@commandArgs)){
 		print Constants->CONST->{'InvalidCmdArg'}.$lineFeed;
-	        cancelProcess();
+	    cancelProcess();
 	}
 }
 # Status File Parameters
@@ -117,9 +120,9 @@ sub process_term()
 
 $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
 
-if(-e $confFilePath) {
-	readConfigurationFile($confFilePath);
-} 
+#if(-e $confFilePath) {
+#	readConfigurationFile($confFilePath);
+#} 
 
 getConfigHashValue();
 loadUserData();
@@ -174,9 +177,10 @@ if($dedup eq 'on' and !$serverRoot){
 	if(exists($evsDeviceHashOutput{uid}->{$uniqueID})){
 		my %serverRootHash = reverse(%{$evsDeviceHashOutput{server_root}});
 		$serverRoot  = $serverRootHash{$evsDeviceHashOutput{uid}->{$uniqueID}};
+		traceLog("Failed to update servere root value. Reason:".$serverRoot ."\n",__FILE__, __LINE__);
 		putParameterValue(\"SERVERROOT",\"$serverRoot",$confFilePath);
 	}
-
+	
 	if(!$serverRoot){
 		print Constants->CONST->{'serverRootNotFound'}.$lineFeed.$lineFeed;
 		exit;
@@ -222,9 +226,10 @@ $errorDir = $jobRunningDir."/ERROR";
 `rm -rf '$relativeFileset'* '$noRelativeFileset'* '$filesOnly'* '$info_file' '$retryinfo' '$errorDir' '$statusFilePath' '$excludeDirPath' '$incSize' '$failedfiles'*`;
 unlink($progressDetailsFilePath);
 
-our $mountedPath = getMountedPath();
-our $IDriveLocal = "$mountedPath/IDriveLocal";
-our $localUserPath = "$IDriveLocal/$userName";
+our $mountedPath 	 = getMountedPath();
+our $expressLocalDir = "$mountedPath/IDriveLocal";
+	$expressLocalDir = "$mountedPath/IBackupLocal" if($appType eq 'IBackup');
+our $localUserPath   = "$expressLocalDir/$userName";
 
 #Start creating required file/folder
 if(!-d $errorDir) {
@@ -708,7 +713,7 @@ sub loadFullExclude {
 	
 	push @excludeArray, $currentDir;
 	push @excludeArray, $idriveServicePath;
-	push @excludeArray, $IDriveLocal;
+	push @excludeArray, $expressLocalDir;
 	my @qFullExArr; # What is the use of this variable.
 	chomp @excludeArray;
 
@@ -1082,7 +1087,7 @@ sub doBackupOperation()
 		$tmpBackupHost =~ s/\'/\'\\''/g;	
 		$fileChildProcessPath = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
 #		$ENV{'OPERATION_PARAM'}=join('::',($tmp_jobRunningDir,$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$curLines,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType,$errorDevNull));
-		my @param = join ("\n",('LOCAL_BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$curLines,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType));
+		my @param = join ("\n",('LOCAL_BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType));
 		writeParamToFile("$tmp_jobRunningDir/operationsfile.txt",@param);
 		traceLog("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");
 		exec("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");		
@@ -1397,7 +1402,8 @@ sub getMountedPath
 				cancelProcess();
 			}
 		}
-		while ($maxNumRetryAttempts){
+		my $retryCount = 4;
+		while ($retryCount){
 			print $lineFeed.Constants->CONST->{'EnterMountPoint'};
 			$localBackupLocationPath = <STDIN>;
 			Chomp(\$localBackupLocationPath);chomp($localBackupLocationPath);
@@ -1416,9 +1422,9 @@ sub getMountedPath
 					last;
 				}
 			}
-			$maxNumRetryAttempts -= 1;
+			$retryCount -= 1;
 		}
-		if ($maxNumRetryAttempts == 0){
+		if ($retryCount == 0){
 			print Constants->CONST->{'maxRetry'}.$lineFeed.$lineFeed;
 			cancelProcess();
 		}
@@ -1446,12 +1452,12 @@ USEEXISTING:
 #Added By               : Senthil Pandian.
 #*********************************************************************************************************/
 sub createLocalBackupDir{
-	if(!-d $IDriveLocal) {
-		if(!mkdir($IDriveLocal)){
-			print "Unable to create directory: $IDriveLocal. Reason:$!".$lineFeed;
+	if(!-d $expressLocalDir) {
+		if(!mkdir($expressLocalDir)){
+			print "Unable to create directory: $expressLocalDir. Reason:$!".$lineFeed;
 			cancelProcess();
 		}
-		chmod $filePermission, $IDriveLocal;
+		chmod $filePermission, $expressLocalDir;
 	}
 	if(!-d $localUserPath) {
 		if(!mkdir($localUserPath)){
@@ -1533,4 +1539,17 @@ sub createDBPathsXmlFile
 	print XMLFILE $xmlContent;
 	close XMLFILE;
 	chmod $filePermission, $xmlFile;
+}
+#*******************************************************************************
+# Cancelling the process and removing the intermediate files/folders
+#
+# Added By: Senthil Pandian
+#*******************************************************************************
+sub cancelProcess {
+	#Default Cleanup
+	system('stty','echo');
+	unlink($idevsOutputFile);
+	unlink($idevsErrorFile);
+	unlink($pidPath);
+	exit 1;
 }

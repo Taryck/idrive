@@ -1,285 +1,347 @@
 #!/usr/bin/perl
-##################################################
-#Script Name : View_Log.pl
-##################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+#*****************************************************************************************************
+# 						This scritp is used to view the selected logs									
+# 							Created By: Sabin Cheruvattil												
+#****************************************************************************************************/
+use strict;
+use warnings;
+
+if(__FILE__ =~ /\//) { use lib substr(__FILE__, 0, rindex(__FILE__, '/')) ;	} else { use lib '.' ; }
+
+use Helpers;
+use Strings;
+use Configuration;
 use Time::Local;
-require Constants;
-require 'Header.pl';
-#use strict;
-#use warnings;
-system("clear");
-loadUserData();
-headerDisplay($0);
-my $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
+use File::Basename;
 
-#This if and else block will check the user account configuration details and login details.
+tie(my %dateMenuChoices, 'Tie::IxHash', '1' => 'last_one_week', '2' => 'last_two_weeks', '3' => 'last_30_days', '4' => 'selected_date_range');
 
-if(getAccountConfStatus($confFilePath)){
-	exit(0);
-}
-else{
-	if(getLoginStatus($pwdPath)){
-			exit(0);
+my (%logMenuToPathMap, %optionwithLogName);
+
+init();
+
+#*****************************************************************************************************
+# Subroutine			: init
+# Objective				: This function is entry point for the script
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub init {
+	system('clear');
+	Helpers::loadAppPath();
+	Helpers::loadServicePath() 			or Helpers::retreat('invalid_service_directory');
+	Helpers::loadUsername()				or Helpers::retreat('login_&_try_again');
+	Helpers::loadUserConfiguration()	or Helpers::retreat('your_account_not_configured_properly');
+	Helpers::isLoggedin()            	or Helpers::retreat('login_&_try_again');
+	
+	Helpers::displayHeader();
+	
+	# show log menu and get the input from user
+	my $maxMenuChoice = displayLogMenu();
+	my $userMenuChoice = Helpers::getUserMenuChoice($maxMenuChoice);
+	
+	my $logDir			= Helpers::getUserFilePath($logMenuToPathMap{$userMenuChoice});
+	my %logFileList		= getLogsList($logDir);
+	
+	# make sure the logs are present for the selected job type: backup, restore, express backup
+	Helpers::retreat(["\n", 'no_logs_found', '.', ' ', 'please_try_again', '.']) unless scalar keys %logFileList;
+	
+	# show date menu and get inputs from user
+	displayDateMenu();
+	my $userDateChoice	= Helpers::getUserMenuChoice(scalar keys %dateMenuChoices);
+	my ($startEpoch, $endEpoch) = ('', '');
+	if($userDateChoice == 4) {
+		# Convert start and end time to epoch
+		($startEpoch, $endEpoch) = getUserDateRange();
+	} else {
+		($startEpoch, $endEpoch) = getStartAndEndEpochTime($userDateChoice);
 	}
+	
+	# show logs
+	my ($logFileChoice, $viewLogConf) = ('', 'n');
+	do {
+		# show log list
+		my $displayLogCount = displayLogList(\%logFileList, $startEpoch, $endEpoch);
+		Helpers::display(["\n", '__note_please_press_ctrlc_exit']);
+
+		$logFileChoice = getChoiceToViewLog($logFileChoice);
+		Helpers::openEditor('view', qq($logDir$optionwithLogName{$logFileChoice}));
+		if($displayLogCount > 1) {
+			Helpers::display(['do_you_want_to_view_more_logs_yn', "\n"]);
+			$viewLogConf = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+		}
+	} while($viewLogConf eq 'y');
+	
+	exit;
 }
 
-$menu  = {'1.Backup'  => {1 => ["View logs for Manual Backup","$usrProfileDir/Backup/Manual/LOGS"],
-				2 => ["View logs for Scheduled Backup","$usrProfileDir/Backup/Scheduled/LOGS"]},
-			'2.Express Backup'  => {3 => ["View logs for Express Backup","$usrProfileDir/LocalBackup/Manual/LOGS"]},
-			'3.Restore' => {4 => ["View logs for Manual Restore","$usrProfileDir/Restore/Manual/LOGS"], 
-				5 => ["View logs for Scheduled Restore","$usrProfileDir/Restore/Scheduled/LOGS"]}			
-			};
-@menuArray = ['1.Backup','2.Express Backup','3.Restore'];
-			
-my @columnNames = (['S.No.','Time & Date','Status'],[8,30,7]);#Contains two annonymous array one contais table header conter and other spaces related to that.
-my $displayDateMenu = ['1) Last one week','2) Last two weeks','3) Last 30 days','4) Selected date range'];
-my ($maxRangeForMenuChoice,$maxRangeForViewLogChoice) = (5,4);
-my %optionwithLogName = (); 
-my $currentEpochtime = time();
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operation Start ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-print $lineFeed.Constants->CONST->{'AskOption'}.qq($lineFeed$lineFeed);
-displayMenu($menu);
-print $lineFeed.Constants->CONST->{'EnterChoice'};
-my $userChoice = <STDIN>;
-Chomp(\$userChoice);
-$userChoice =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-my $keyName = ($userChoice <= $maxRangeForMenuChoice) ? returnKeyName($userChoice,@menuArray) : q();
-unless ($keyName){
-        print $lineFeed.Constants->CONST->{'InvalidChoice'}.Constants->CONST->{'TryAgain'}.$lineFeed;
-        exit(0);
-}
-my %logFileList = isLogFilesPresent();#this will check if log is present for the selected Job, i.e. Manual Backup/restore and scheduled backup/restore.
-
-			## Logic to handle date range scenario. ##
-
-my $userDateChoice = '';
-my $userDateChoiceCount = 4;
-print $lineFeed.Constants->CONST->{'viewLogMessage'}.$lineFeed;
-displayMenu($displayDateMenu);
-while($userDateChoiceCount != 0 and $userDateChoice eq ''){
-	print $lineFeed.$lineFeed.Constants->CONST->{'EnterChoice'};
-	$userDateChoice = <STDIN>;
-	Chomp(\$userDateChoice);
-	$userDateChoice =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-        if(($userDateChoice eq '') or ($userDateChoice > 4 or $userDateChoice <= 0) or $userDateChoice !~ /\d+/ or $userDateChoice =~ /\s+/){
-                print Constants->CONST->{'InvalidChoice'}.$whiteSpace;
-                $userDateChoice = '';
-        }
-	$userDateChoiceCount--;
-}
-if($userDateChoiceCount == 0 and $userDateChoice eq ''){
-	print Constants->CONST->{'TryAgain'}.$lineFeed;
-        exit(0);
-}
-my ($startEpoch,$endEpoch) = ('') x 2;
-if ($userDateChoice =~/^0?4$/){#This code will take start date and end date input from user.
-	#This function will take date input from user by calling getUserDateRange() . Convert it to epoch time and assign to global variables $startEpoch,$endEpoch respectively. All the basic error handling is done in this function.
-	convertUserDateToEpoch();
-}else{
-	($startEpoch,$endEpoch) = getStartAndEndEpochTime($userDateChoice);
-}
-			## Logic to handle date range scenario End. ##
-viewLogFile();
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations End +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Defining utility functions ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-#****************************************************************************
-#Subroutine Name         : viewLogFile 
-#Objective               : To select the log which user wants to view and open in vi editor .
-#Usgae                   : viewLogFile()
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub viewLogFile{
-	my $showLogs = 1;
-	while ($showLogs){# This loop is to display the log list again and again.
-		displayLogList(\@columnNames,\%logFileList); #This function will display the log list.
-		print Constants->CONST->{'ctrlc2Exit'}.$lineFeed;
-		my $logFileChoice = '';
-		getChoiceToViewLog(\$logFileChoice);
-		openViEditor($menu,$keyName,$userChoice,$logFileChoice);
-		print $lineFeed.Constants->CONST->{'viewMoreLogs'};
-		my $viewLogconfirmation = getConfirmationChoice();
-		if ($viewLogconfirmation eq 'N' or $viewLogconfirmation eq 'n'){
-			$showLogs = 0;
+#*****************************************************************************************************
+# Subroutine			: getUserDate
+# Objective				: This subroutine will get the date from the user
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub getUserDate {
+	my($dateMessage, $date, $choiceRetry) = (shift, '', 0);
+	while($choiceRetry < $Configuration::maxChoiceRetry) {
+		Helpers::display(["\n", $dateMessage, ': '], 0);
+		$date 	= Helpers::getUserChoice();
+		$date	=~ s/^[\s\t]+|[\s\t]+$//g;
+		
+		$choiceRetry++;
+		if($date eq '') {
+			Helpers::checkRetryAndExit($choiceRetry, 0);
+			Helpers::display(["\n", 'cannot_be_empty', '.', ' ', 'please_try_again', '.']);
+		} elsif(!Helpers::validateDatePattern($date) || !isValidDate($date)) {
+			Helpers::checkRetryAndExit($choiceRetry, 1);
+			Helpers::display(["\n", 'invalid_date_or_format', '.', ' ', 'please_try_again', '.']);
+		} else {
+			last;
 		}
 	}
+	
+	return $date;
 }
 
-#****************************************************************************
-#Subroutine Name         : getChoiceToViewLog(\logFileChoice)
-#Objective               : Get user choice to view log file. A scalar referece is passed to avoid explicit return statement.
-#Usgae                   : getChoiceToViewLog(\$logFileChoice)
-#			   where : $logFileChoice : This variable contains the serial number corresponding to which user wants to view the log.
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub getChoiceToViewLog{
-	my $logFileChoice = shift;
-	my $userViewLogInputCount = 4;
-	while ($userViewLogInputCount != 0 and ${$logFileChoice} eq ''){#This while loop is for user retry count.
-                print $lineFeed.Constants->CONST->{'logChoice'};
-                ${$logFileChoice} = <STDIN>;
-                Chomp($logFileChoice);
-                ${$logFileChoice} =~ s/^0+(\d+)/$1/g;#removing initial zero from the user input for given choice.
-                if((${$logFileChoice} eq '') or (${$logFileChoice} > (scalar (keys %optionwithLogName)) or ${$logFileChoice} <= 0) or ${$logFileChoice} !~ /^\d+$/ or ${$logFileChoice} =~ /\s+/){
-                        print $lineFeed.Constants->CONST->{'InvalidChoice'}.$whiteSpace;
-                	${$logFileChoice} = '';
-                }
-        	$userViewLogInputCount--;
+#****************************************************************************************************
+# Subroutine Name			: getUserDateRange
+# Objective					: This subroutine will get the date range from the user.
+# Added By					: Sabin Cheruvattil
+#****************************************************************************************************/
+sub getUserDateRange {
+	my($startDate, $endDate) = ('') x 2;
+	my($errorMessage, $choiceRetry) = ('', 0);
+	
+	while($choiceRetry < $Configuration::maxChoiceRetry) {
+		$startDate 	= getUserDate('enter_log_start_date__');
+		$endDate	= getUserDate('enter_log_end_date__');
+		
+		$choiceRetry++;
+		if(!validateUsersDateRange(\$startDate, \$endDate, \$errorMessage)) {
+			($startDate, $endDate) = ('') x 2;
+			Helpers::checkRetryAndExit($choiceRetry, 1);
+			Helpers::display(["\n", $errorMessage, '. ', 'please_try_again', '.']);
+		} else {
+			last;
+		}
 	}
-        if ($userViewLogInputCount == 0 and ${$logFileChoice} eq ''){
-	        print Constants->CONST->{'TryAgain'}.$lineFeed;
-                exit(0);
-        }
+	
+	return ($startDate, $endDate);
 }
-#****************************************************************************
-#Subroutine Name         : getLogFileNames
-#Objective               : To get the log file names in a hash where timestamp will be the key and log status will be the value.
-#			   Note: log name is the combination of timestamp and log status, timestamp_status. Eg:1495015819_SUCCESS
-#Usgae                   : getLogFileNames($menu,$keyName,$userChoice)
-#                        : $menu	: A data structure which contains content for menu display and location related to displayed option from where data can be fetched.
-#                          $keyName	: Name of the key which is related to user. Eg : Backup or Restore.   
-#                          $userChoice	: Option selected by user. This will be used to find the location from where log files can be fetched.
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub getLogFileNames{
-	my $logFileLocation = $_[0]->{$_[1]}->{$_[2]}->[1];#HashRef->{keyName}->{keyName}->[arrRefIndex]
-	my @logFiles = ();
-	my %timestampStatus = ();
-	if (-e $logFileLocation){
-		@logFiles = `ls '$logFileLocation'`; #This is done to process ls command at one shot, if used with map processing of ls will continue till all the file processing has been completed.
-		%timestampStatus = map {m/(\d+)_([A-Z]+)/} @logFiles;
-		return %timestampStatus;
-	}else{
-		print $lineFeed.Constants->CONST->{'noLogs'}.$lineFeed;
-		traceLog($whiteSpace.Constants->CONST->{'noLogs'}.$lineFeed, __FILE__, __LINE__);
-		cancelProcess();
+
+#****************************************************************************************************
+# Subroutine Name			: getChoiceToViewLog
+# Objective					: Get user choice to view log file
+# Added By					: Abhishek Verma
+# Modified By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub getChoiceToViewLog {
+	my($dateMessage, $choiceRetry, $logFileChoice) = (shift, 0, 0);
+	while($choiceRetry < $Configuration::maxChoiceRetry) {
+		Helpers::display(["\n", 'enter_sno_to_view_log', ': '], 0);
+		$logFileChoice	= Helpers::getUserChoice();
+		$logFileChoice	=~ s/^[\s\t]+|[\s\t]+$//g;
+		$logFileChoice	=~ s/^0+(\d+)/$1/g;
+		
+		$choiceRetry++;
+		if($logFileChoice eq '') {
+			Helpers::checkRetryAndExit($choiceRetry, 0);
+			Helpers::display(["\n", 'cannot_be_empty', '.', ' ', 'please_try_again', '.']);
+		} elsif($logFileChoice !~ m/^\d+$/ || $logFileChoice > scalar keys %optionwithLogName || $logFileChoice <= 0) {
+			Helpers::checkRetryAndExit($choiceRetry);
+			$logFileChoice = '';
+			Helpers::display(['invalid_choice', '.', ' ', 'please_try_again', '.']);
+		} else {
+			last;
+		}
 	}
+	
+	return $logFileChoice;
 }
-#****************************************************************************
-#Subroutine Name         : displayLogList
-#Objective               : To print the list of available logs in the of date & time when log was generated and status.
-#Usgae                   : displayLogList(\@columnNames,\%logFileList)
-#                        : @columnNames       : second index array ref is used to give the spaces between the data.
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub displayLogList{
-	my @columnNames = @{$_[0]};
-	my %logFileList = %{$_[1]};
+
+#*****************************************************************************************************
+# Subroutine			: openViEditor
+# Objective				: To open vi editor for given file.
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub openViEditor {
+    my $fileLocation = $_[0];
+	Helpers::display(["\n", 'press_esc_q_and_enter_to_exit_vi_editor']);
+	Helpers::display(["\n", 'opening_log_file', '...']);
+	sleep(2);
+	
+	my $logdisplayStatus = system("vi '$fileLocation'");
+	if($logdisplayStatus == 0) {
+		Helpers::display(["\n", 'log_displayed_successfully', '.']);
+		return;
+	}
+	
+	Helpers::display(["\n", 'error_in_display_log', '. ', ucfirst($Locale::strings{'reason'}), ': ', $!]);
+}
+
+#*****************************************************************************************************
+# Subroutine			: displayLogList
+# Objective				: To print the list of available logs in the of date & time when log was generated and status.
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub displayLogList {
+	my %logFileList = %{$_[0]};
+	my ($startEpoch, $endEpoch) = ($_[1], $_[2]);
+	my @columnNames = (['S.No.', 'Time & Date', 'Status'], [8, 30, 7]);
 	my $tableHeader = getTableHeader(@columnNames);
-	my ($displayCount,$spaceIndex,$tableContent)= (1,0,'');#$displayCount is serial number which will be displayed. $spaceIndex is used to print number of required spaces as in @columnNames array.
-	foreach (sort {$b <=> $a} keys %logFileList){
-		if ((($startEpoch <= $_) and ( $endEpoch >= $_))){
-			$tableContent .= $displayCount;
-			$tableContent .= (' ') x ($columnNames[1]->[$spaceIndex] - length($displayCount));#(total_space - used_space by data) will be used to keep separation between 2 data
+	my ($displayCount, $spaceIndex, $tableContent) = (1, 0, '');
+	
+	foreach(sort {$b <=> $a} keys %logFileList) {
+		if((($startEpoch <= $_) && ($endEpoch >= $_))) {
+			$tableContent 	.= $displayCount;
+			# (total_space - used_space by data) will be used to keep separation between 2 data
+			$tableContent 	.= qq( ) x ($columnNames[1]->[$spaceIndex] - length($displayCount));
 			$spaceIndex++;
-			$tableContent .= localtime($_);
-			$tableContent .= (' ') x ($columnNames[1]->[$spaceIndex] - length(localtime($_)));#(total_space - used_space by data) will be used to keep separation between 2 data
-			$tableContent .= $logFileList{$_};
+			$tableContent 	.= localtime($_);
+			# (total_space - used_space by data) will be used to keep separation between 2 data
+			$tableContent 	.= qq( ) x ($columnNames[1]->[$spaceIndex] - length(localtime($_)));
+			$tableContent 	.= $logFileList{$_};
 			$spaceIndex++;
-			$tableContent .= (' ') x ($columnNames[1]->[$spaceIndex] - length($logFileList{$_}));#(total_space - used_space by data) will be used to keep separationbetween 2 data
-			$tableContent .= $lineFeed;
-			$optionwithLogName{$displayCount} = $_.'_'.$logFileList{$_};#creating another hash which contain searial number and logname as key and value pair so that later it can be used to display the log file.
+			# (total_space - used_space by data) will be used to keep separation between 2 data
+			$tableContent 	.= qq( ) x ($columnNames[1]->[$spaceIndex] - length($logFileList{$_}));
+			$tableContent 	.= qq(\n);
+			#creating another hash which contain serial number and log name as key and value pair so that later it can be used to display the log file.
+			$optionwithLogName{$displayCount} = $_ . '_' . $logFileList{$_};
 			$spaceIndex = 0;
 			$displayCount++;	
 		}
 	}
-	if ($tableContent ne ''){
-		print $lineFeed.Constants->CONST->{'logList'}.$lineFeed;;
-		print $tableHeader.$tableContent.$lineFeed;
-	}else{
-		print $lineFeed.Constants->CONST->{'noLogs'}.$lineFeed;
-		traceLog($whiteSpace.Constants->CONST->{'noLogs'}.$lineFeed, __FILE__, __LINE__);
-		cancelProcess();		
+	
+	if($tableContent ne '') {
+		Helpers::display(["\n", 'log_list', ':']);
+		Helpers::display([$tableHeader . $tableContent], 0);
+	} else {
+		Helpers::retreat(["\n", 'no_logs_found', '.', ' ', 'please_try_again', '.']);
 	}
+	
+	return $displayCount - 1;
 }
 
-#****************************************************************************
-#Subroutine Name         : openViEditor
-#Objective               : To open vi editor for given file.
-#Usgae                   : openViEditor($menu,$keyName,$userChoice)
-#                        : $menu        : Contains data related to menu operation.
-#                        : $keyName     : name of the key correcponding to user's choice from $menu.
-#                        : $userChoice  : user's choice from $menu.
-#                          $logFileChoice : Name of the logFile which user wants to view.
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub openViEditor {
-    my $fileLocation = $_[0]->{$_[1]}->{$_[2]}->[1].'/'.$optionwithLogName{$_[3]};
-	print $lineFeed.Constants->CONST->{'viClosureMessage'}.$lineFeed;
-	print $lineFeed.Constants->CONST->{'logOpeningMessage'}.$lineFeed;
-	holdScreen2displayMessage(4);	
-	my $logdisplayStatus = system "vi '$fileLocation'";
-	if ($logdisplayStatus == 0){
-		print $lineFeed.Constants->CONST->{'logDispSuccess'}.$lineFeed;
-	}else{
-		print $lineFeed.Constants->CONST->{'errorDisplayLog'}.$whiteSpace."Reason : $!\n";
+#*****************************************************************************************************
+# Subroutine			: getTableHeader
+# Objective				: To get the table header display with column name.
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub getTableHeader {
+	my $logTableHeader 	= qq(=) x (eval(join '+', @{$_[1]})) . qq(\n);
+	for(my $contentIndex = 0; ($contentIndex <= scalar(@{$_[0]}) - 1); $contentIndex++) {
+		#(total_space - used_space by data) will be used to keep separation between 2 data.
+		$logTableHeader .= $_[0]->[$contentIndex] . qq( ) x ($_[1]->[$contentIndex] - length($_[0]->[$contentIndex]));
 	}
-}
-#****************************************************************************
-#Subroutine Name         : convertUserDateToEpoch
-#Objective               : To covert user date to epoch and assign it to lexical variable $startEpoch and $endEpoch.
-#Usage                   : convertUserDateToEpoch()
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub convertUserDateToEpoch{
-        my ($startDate,$endDate,$invalidDateMessage) = ('') x 3;
-        my $inputCount = 3;
-        while($inputCount and ($startDate eq '' or $endDate eq '')){
-                ($startDate,$endDate) = getUserDateRange();
-                if ($startDate ne '' and $endDate ne ''){
-	 		#finding epoch time for given user date under this section and handling some error.
-			$startDate .= ' 00:00:00';
-			$endDate .= ' 23:59:59';
-                        my $stEpochTimeCmd = 'date --date="'.$startDate.'" +%s';
-                        my $edEpochTimeCmd = 'date --date="'.$endDate.'" +%s';
-                        $startEpoch = `$stEpochTimeCmd $errorRedirection`;#$startEpoch global variable
-			Chomp(\$startEpoch);
-			$invalidDateMessage = checkDateValidity($startEpoch);
-                        $endEpoch = `$edEpochTimeCmd $errorRedirection`;#$endEpoch global variable 
-			Chomp(\$endEpoch);
-			$invalidDateMessage .= checkDateValidity($endEpoch);
-			if ($invalidDateMessage ne ''){
-				($startDate,$endDate,$startEpoch,$endEpoch) = ('') x 4;
-				print $invalidDateMessage;
-			}
-			my $currentEpochPlusOne = $currentEpochtime + (1*24*60*60); 
-                        if (($startEpoch > $currentEpochPlusOne) || ($endEpoch > $currentEpochPlusOne)){#Error handling if start date is grater than current date.
-                                ($startDate,$endDate,$startEpoch,$endEpoch) = ('') x 4;
-				print $lineFeed.Constants->CONST->{'stDatEdDateGraterCurrentDate'};
-                        }
-                        if($startEpoch > $endEpoch){#Error hanlding if start date is grater than end date.
-				($startDate,$endDate,$startEpoch,$endEpoch) = ('') x 4;
-				print $lineFeed.Constants->CONST->{'stDateGraterEndDate'};
-                        }
-                }else{
-                        print $lineFeed.Constants->CONST->{'invalidDate'};
-                }
-                $inputCount--;
-        }
-        exit(0) if ($inputCount == 0 and ($startDate eq '' or $endDate eq ''));
-}
-#****************************************************************************
-#Subroutine Name         : isLogFilesPresent
-#Objective               : To check if for selected job i.e Manual/Scheduled Backup/Restore, log file is present or not. If not it will terminate the script by giving user error message else it will return the logfile name hash. Where key will be epoch time when log was created and value will be the status of log file.
-#Usage                   : isLogFilesPresent()
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub isLogFilesPresent{
-	my %logFileList = getLogFileNames($menu,$keyName,$userChoice);
-	if (scalar (keys %logFileList) > 0){
-		return %logFileList;
-	}else{
-		print $lineFeed.Constants->CONST->{'noLogs'}.$lineFeed;
-		traceLog($whiteSpace.Constants->CONST->{'noLogs'}.$lineFeed, __FILE__, __LINE__);
-		exit(0);
-	}
+
+	$logTableHeader 	.= qq(\n) . qq(=) x (eval(join '+', @{$_[1]})) . qq(\n);
+	return $logTableHeader;
 }
 
-sub checkDateValidity{
-	if ($_[0] =~ /.*?(invalid date) \‘(\d{2}\/\d{2}\/\d{4}).*?\’/){
-		return ucfirst($1).': '.$2.$lineFeed;
+#*****************************************************************************************************
+# Subroutine			: isValidDate
+# Objective				: This subroutine will validate the date using system
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub isValidDate {
+	my($date, $epochTimeCmd, $epochCheckMsg) = (shift, '', '');
+	$date			.= ' 00:00:00';
+	$epochTimeCmd 	= 'date --date="' . $date . '" +%s';
+	$epochCheckMsg 	= `$epochTimeCmd 2>&1`;
+	return $epochCheckMsg !~ m/.*?(invalid date) \‘(\d{2}\/\d{2}\/\d{4}).*?\’/;
+}
+
+#*****************************************************************************************************
+# Subroutine			: validateUsersDateRange
+# Objective				: This subroutine will validate the date range
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub validateUsersDateRange {
+	my($startDate, $endDate, $errorMessage) = (shift, shift, shift);
+	my($tmpStart, $tmpEnd) 	= ($$startDate, $$endDate);
+	my $incrementedEpoch 	= time() + (1 * 24 * 60 * 60);
+	
+	$tmpStart		.= ' 00:00:00';
+	$tmpEnd 		.= ' 23:59:59';
+	
+	$$startDate 	= `date --date="$tmpStart" +%s`;
+	$$endDate		= `date --date="$tmpEnd" +%s`;
+	
+	Helpers::Chomp($startDate);
+	Helpers::Chomp($endDate);
+	
+	# Check start date is grater than current date
+	if(($$startDate > $incrementedEpoch) || ($$endDate > $incrementedEpoch)) {
+		$$errorMessage = 'start_date_or_end_date_not_greater';
+		return 0;
 	}
+	
+	# Error hanlding if start date is grater than end date.
+	if($$startDate > $$endDate) {
+		$$errorMessage = 'start_date_should_not_greater_end';
+		return 0;
+	}
+	
+	return 1;
+}
+
+#*****************************************************************************************************
+# Subroutine			: displayLogMenu
+# Objective				: This subroutine displays the log menu
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub displayLogMenu {
+	my ($opIndex, $pathIndex) = (1, 1);
+	my @menuOptions;
+	Helpers::display(["\n", 'menu_options_title', ':', "\n"]);
+	
+	foreach my $mainOperation (keys %Configuration::logMenuAndPaths) {
+		Helpers::display([$mainOperation . '_title', ':']);
+		# @menuOptions = keys $Configuration::logMenuAndPaths{$mainOperation};
+		# @menuOptions = sort @menuOptions;
+		@menuOptions = sort keys %{$Configuration::logMenuAndPaths{$mainOperation}};
+		Helpers::display([map{qq(\t) . $opIndex++ . ") ", $Locale::strings{$_} . "\n"} @menuOptions], 0);
+		%logMenuToPathMap = (%logMenuToPathMap, map{$pathIndex++ => $Configuration::logMenuAndPaths{$mainOperation}{$_}{'path'}} @menuOptions);
+	}
+	
+	return ($opIndex - 1);
+}
+
+#*****************************************************************************************************
+# Subroutine			: displayDateMenu
+# Objective				: This subroutine displays the date options menu
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub displayDateMenu {
+	Helpers::display(["\n", 'select_option_to_view_logs_for', ':']);
+	Helpers::display([map{"\t" . $_ . ") ", $Locale::strings{$dateMenuChoices{$_}} . "\n"} keys %dateMenuChoices], 0);
+}
+
+#*****************************************************************************************************
+# Subroutine			: getLogsList
+# Objective				: This subroutine gathers the list of log files
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub getLogsList {
+	my %timestampStatus = ();
+	my @tempLogFiles;
+	my $logDir = $_[0];
+	if (-e $logDir) {
+		@tempLogFiles = `ls '$logDir'`;
+		%timestampStatus = map {m/(\d+)_([A-Z]+)/} @tempLogFiles;
+	}
+	
+	return %timestampStatus;
+}
+
+#*****************************************************************************************************
+# Subroutine			: getStartAndEndEpochTime
+# Objective				: To return the start and end date epoch time.
+# Added By				: Sabin Cheruvattil
+#****************************************************************************************************/
+sub getStartAndEndEpochTime {
+	# $userChoice => 1) One week before, 2) Two week before, 3) One month before, 4) Given date range
+	my $userOption 			= shift;
+	my $currentTimeStamp 	= time();
+	my $daysToSubstract 	= ($userOption == 1) ? 7 : ($userOption == 2) ? 14 : 30;
+	my $startTimeStamp 		= $currentTimeStamp - ($daysToSubstract * 24 * 60 * 60);
+	return ($startTimeStamp, $currentTimeStamp);
 }

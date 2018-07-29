@@ -23,20 +23,22 @@ our @ISA = qw( Exporter );
 #    use Exporter;
 #}
 
-use constant FILE_NAMES => {	accountSettingsScript => 'Account_Setting.pl',
+use constant FILE_NAMES => {	accountSettingsScript => 'account_setting.pl',
+				archiveCleanupScript => 'archive_cleanup.pl',
 				backupScript => 'Backup_Script.pl',
-				checkForUpdateScript => 'Check_For_Update.pl',
-				editSupportedFilesScript => 'Edit_Supported_Files.pl',
+				checkForUpdateScript => 'check_for_update.pl',
+				editSupportedFilesScript => 'edit_supported_files.pl',
+				expressBackupScript => 'express_backup.pl',
 				jobTerminationScript => 'job_termination.pl',
-				loginScript => 'Login.pl',
+				loginScript => 'login.pl',
 				logoutScript => 'Logout.pl',
 				operationsScript => 'Operations.pl',
 				readMeFile => 'readme.txt',
 				restoreScript => 'Restore_Script.pl',
-				restoreVersion => 'Restore_Version.pl',
+				restoreVersion => 'restore_version.pl',
 				schedulerScrpt => 'Scheduler_Script.pl',
 				statusRetrivalScript => 'Status_Retrieval_Script.pl',
-				viewLogScript => 'View_Log.pl',
+				viewLogScript => 'view_log.pl',
 				uninstallScript => 'Uninstall_Script.pl',
 				ConstantsFile => 'Constants.pm'
 			};
@@ -57,7 +59,7 @@ use constant CONST => {
 			AskMirrorType	=> '1) Mirror',
 			AskRelativeType	=> '2) Relative',
 			Product => 'ForLinux',
-			ScriptBuildVersion => '2.13  ',
+			ScriptBuildVersion => '2.16  ',
 		#------------------EVS Operations ---------------------#	
 			LinkBucketOp => 'LinkBucket',
 			NickUpdateOp => 'NickUpdate',
@@ -99,7 +101,7 @@ use constant CONST => {
 			Account => 'Account',
 			adoptLinkMess => 'Select from existing Backup Locations',
 		#--------------------- B -----------------------------#
-			BackupProgress => "Backup Progress\n===============        \n",#Added spaces for FreeBSD to overwrite the existing text. 
+			BackupProgress => "Backup Progress        \n===============        \n",#Added spaces for FreeBSD to overwrite the existing text. 
 			BucketLength => 'Reason: Length must be between 4 to 64 characters ',
 			BackupLocInvalidDedup => 'Invalid Backup Location: ',
 			BackupLocRetryDedup => 'Unable to set Backup Location. Your maximum retry attempt reached. Please try Again.',
@@ -119,6 +121,7 @@ use constant CONST => {
 			BackupScriptName => 'Backup_Script.pl',	
 			backupDeviceIdFile => 'backupDeviceId.txt',	
 			BinaryArchMismatch => 'Binary architecture mismatching.Please download the proper zip file & use.',
+			backup_type_must_be_mirror =>	'Backup type must be "mirror" to perform archive cleanup operation.',
 		#------------------- C ----------------------------#
 			operationNotCompleted => 'Could not complete operation. ',
 			EvsCmplCheck	=>	'Checking for compatible idevsutil command line utility...',
@@ -203,7 +206,8 @@ use constant CONST => {
 			LogChild => 'for Output Parsing',
 			EmptyEmailId => 'Email address cannot be empty.',
 			EmailEmpty	=>	'Email address feild is empty.',
-			delExistingSchJob	=> 'Do you really want to delete the scheduled',	
+			delExistingSchJob	=> 'Do you really want to delete the scheduled',
+			delExistingArchiveJob	=> 'Do you really want to delete the periodic archive cleanup job',			
 			enterChoiceSchJob	=> 'Please select options to run Schedule ',
 			emailNotificationSetting => 'Your email notification settings are : ',
 			emailNotificationStatus	 => 'Email notification status : ',
@@ -291,13 +295,13 @@ use constant CONST => {
 			JobTerminationScriptName => 'job_termination.pl',	
 			JobTerminateMessage	 => 'job terminated successfully',
 			jobNotSch		=> "couldn't be scheduled",
-			jobRemoveSuccess	=> 'Job has been removed successfully.',
+			jobRemoveSuccess	=> 'job has been deleted successfully.',
 		#------------------- K ----------------------------#
 			ProxyErr	=>	'Kindly verify your proxy details or check network connectivity and try again.',
 			ProxyUserErr	=> 'Kindly verify your network connection or proxy details and try again.', 
 			WgetSslErr	=> 'Kindly update wget package and try again.',		
 			WgetSslErrInAcc	=> 'Follow our FAQ section [I am getting \'unable to find compatible binary\' error during account setting script execution. How do I configure my account?] from the link mentioned below:',
-			WgetSslErrInCFU	=> 'Follow our FAQ section [How can I update IDrive scripts manually to newer version, if \'Check_For_Update.pl\' is unable to update ?] from the link mentioned below:',
+			WgetSslErrInCFU	=> 'Follow our FAQ section [How can I update IDrive scripts manually to newer version, if \'check_for_update.pl\' is unable to update ?] from the link mentioned below:',
 		
 		#------------------- L ----------------------------#
 			ListOfDevice => 'List of existing Backup Locations:', #suggested by deepak
@@ -307,11 +311,12 @@ use constant CONST => {
 			loginConfigAgain	=> 'Your account is not configured. Please configure using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 			logoutBackupJob	=> 'Logging out from your account will terminate Manual Backup job. Do you want to continue (y/n)?',
 			logoutRestoreJob => 'Logging out from your account will terminate Manual Restore job. Do you want to continue (y/n)?',
-			logoutExpressBackupJob	=> 'Logging out from your account will terminate Express Backup job. Do you want to continue (y/n)?',			
+			logoutExpressBackupJob	=> 'Logging out from your account will terminate Express Backup job. Do you want to continue (y/n)?',
 			logoutBackupRestoreJob => 'Logging out from your account will terminate Manual Backup and Restore job. Do you want to continue (y/n)?',
 			logoutBackupExpressBackupJob => 'Logging out from your account will terminate Manual Backup and Express Backup. Do you want to continue (y/n)?',
 			logoutExpressBackupRestoreJob => 'Logging out from your account will terminate Manual Express Backup and Restore job. Do you want to continue (y/n)?',
-			logoutBackupExpressBackupRestoreJob => 'Logging out from your account will terminate Manual Backup, Express Backup and Restore job. Do you want to continue (y/n)?',			
+			logoutBackupExpressBackupRestoreJob => 'Logging out from your account will terminate Manual Backup, Express Backup and Restore job. Do you want to continue (y/n)?',
+			logoutJob => 'Logging out from your account will terminate Manual <JOBS>. Do you want to continue (y/n)?',			
 			LocationString => 'LOCATION : ',
 			logDispSuccess => 'Log displayed successfully.',
 			logList => 'Log List:',
@@ -319,7 +324,7 @@ use constant CONST => {
 			LoadingMountPoints => 'Loading information for all mount points. Please wait ...',
 		#------------------- M ----------------------------#
 			maxRetryCuttoff	=> 'Unable to set cut off as your maximum retry attempts reached.',	
-			maxRetry	=> 'Your Maximum retry attempts reached. Please try again.',	
+			maxRetry	=> 'Your maximum retry attempts reached. Please try again.',	
 			maxRetryRestoreFrom	=> 'Your maximum attempt to change Restore from location has reached.',
 		 	messDefaultRestoreFrom	=> 'Considering Default Restore From Location as',
 			messDefaultBackupLoc	=> 'Considering Default Backup Location as',
@@ -339,10 +344,11 @@ use constant CONST => {
 			noLogOut	=> 'Unable to logout.',
 			noFileDir	=> 'No such file or directory',
 			noSchJob	=> 'There is no scheduled',
+			noPeriodicJob	=> 'There is no periodic archive cleanup scheduled',
 			noChangeServicePath => 'Your service directory remains ',
 			noLogs => 'No logs found. Please try again.',
 			noPermissionToKill => sub { return qq{System user [$_[0]] does not have sufficient permission to stop the on going Backup/Restore process. Please run this script in privileged user mode to perform the cleanup.}},
-#			noServicePath	=> 'Service directory does not exists. Please run Account_Setting.pl script... ',
+#			noServicePath	=> 'Service directory does not exists. Please run account_setting.pl script... ',
 		#------------------- O ----------------------------#
 			operationNotcomplete => 'Operation could not be completed.',
 			OpUsrCancel	=>	'Operation could not be completed. Reason : Operation cancelled by user',
@@ -372,6 +378,7 @@ use constant CONST => {
 			LongPwd => 'Parameter \'password\' should be at least 6 - 20 characters',
 			ProvideEmailId	=>	'Provide your e-mail ID(s) [For multiple e-mail IDs provide comma(,) seperation]',
 			AskLocforBackup	=>	'Please enter Backup Location to continue: ',
+			AskLocforBackupInRetry	=>	'Please enter Backup Location',
 			PrepFileMsg	=>	'Preparing File list...',
 			portError	=> 	'Your maximum attempts has reached. Do you want to continue without proxy (y/n)?',	
 			proxyError	=> 	'Your maximum attempts has reached. Do you want to continue without proxy (y/n)?',
@@ -386,6 +393,7 @@ use constant CONST => {
 			parseDeviceList		=> '1',
 			packageUninstalled => 'Package has been uninstalled successfully.',
 			passwordMissing    => 'Password is missing.',
+			periodicArchiveCleanup    => 'Periodic archive cleanup',
 		#------------------- Q ----------------------------#
 			QuotaOverLimit  => "Reason: Quota exceeded.",
 		
@@ -451,10 +459,10 @@ use constant CONST => {
 			serviceLocation => '.serviceLocation',
 			selectLocation4Backup => 'Multiple Backup Locations are configured with this account. Select an option:',#Suggested by deepak
 			selectRestoreFromLoc => 'Select Restore From Location from list below :',
-			backupLocationConfigAgain	=> 'Invalid Backup Location. Please Edit your Backup Location using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
+			backupLocationConfigAgain	=> 'Invalid Backup Location. Please edit your Backup Location using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 			restoreFromLocationConfigAgain	=> 'Invalid Restore From Location. Please Edit your Restore From Location using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
 			restoreFromLocationNotFound	=> 'Restore From Location not found. Please logout and re-configure your account freshly using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
-			scriptRemoved => sub { return qq{Your $_[0] scripts has been removed successfully.}},			
+			scriptRemoved => sub { return qq{Your $_[0] scripts has been removed successfully.}},
 			selectMountPoint => 'Select the mount point you want to backup in, from the list mentioned below:',
 			selectedMountNoPerm => 'Selected device does not have permission to write.',
 			serverRootNotFound => 'Your account not configured for express backup. Please logout and re-configure your account freshly using '.FILE_NAMES->{accountSettingsScript}.' and try again.',
@@ -518,6 +526,7 @@ use constant CONST => {
 		#------------------- Y ----------------------------#
 			scheduleJobDet => 'Your scheduled job details are mentioned below:',
 			existingSchJob	=> 'You have an existing scheduled',
+			existingPeriodicJob	=> 'You have an existing periodic archive cleanup job.',
 			AskConfig	=> 'Your Account encryption key is not set. Do you want to set (y/n)?',
 			BackupLocMsg	=>	'Your Backup Location is set to',
 			RestoreLocMsg	=>	'Your Restore From Location is set to',
@@ -546,6 +555,7 @@ use constant CONST => {
 			YourHostnameEmpty => 'Your hostname is empty. Please provide the hostname and try again.',
 			YouSelectedBkpLoc => sub { return qq{Your selected mount point to backup your data is '$_[0]'.}},
 			YourPreviousMountPoint => sub { return qq{Your previous mount point is '$_[0]'. Do you want to edit(y/n)?}},
+			YourRestoreLocationNotExist => 'Your restore location does not exists. Please enter a new restore location and try again.',
 		#------------------- Z ----------------------------#
 			zippedPackageNotLatest => "Zipped package has version lower than current version. Do you really want to update(y/n)?",
 		

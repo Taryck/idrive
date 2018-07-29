@@ -4,7 +4,10 @@
 #Script Name : Status_Retrieval_Script.pl
 #########################################################################
 
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
+
 require 'Header.pl';
 use FileHandle;
 
@@ -72,7 +75,7 @@ if($BackupScriptRunning ne "" && $RestoreScriptRunning ne "") {
 } elsif($RestoreScriptRunning ne "") {
 	$jobType = "RESTORE";
 } else {
-	print Constants->CONST->{'NoOpRng'}.$lineFeed; 
+	print Constants->CONST->{'NoOpRng'}.$lineFeed;
 	exit;
 }
 
@@ -84,10 +87,13 @@ $SIG{QUIT} = \&process_term;
 
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
-traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
+#traceLog("$lineFeed File: $curFile $lineFeed---------------------------------------- $lineFeed", __FILE__, __LINE__);
 my $displayProgress = 1;
 constructProgressDetailsFilePath();
-
+unless(-e $progressDetailsFilePath){
+	print Constants->CONST->{'NoOpRng'}.$lineFeed;
+	exit 0;
+}
 #system("clear");
 getCursorPos();
 do {
