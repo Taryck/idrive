@@ -127,7 +127,14 @@ $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationF
 getConfigHashValue();
 loadUserData();
 my $BackupsetFile = $localBackupsetFilePath;
-
+#=====================================================================================================================
+# TBE : ENH-005 - Use local Exclusion files
+#=====================================================================================================================
+# Implémentation pour $usrProfileDir/LocalBackup/Manual
+$excludeFullPath =  "$usrProfileDir/LocalBackup/Manual/FullExcludeList.txt";
+$excludePartialPath = "$usrProfileDir/LocalBackup/Manual/PartialExcludeList.txt";
+$regexExcludePath = "$usrProfileDir/LocalBackup/Manual/RegexExcludeList.txt";
+#=====================================================================================================================
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
 #traceLog("$lineFeed File: $curFile ---------------------------------------- $lineFeed", __FILE__, __LINE__);

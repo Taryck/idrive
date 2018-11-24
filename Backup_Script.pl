@@ -144,6 +144,14 @@ if(-e $confFilePath) {
 getConfigHashValue();
 loadUserData();
 my $BackupsetFile = $backupsetFilePath;
+#=====================================================================================================================
+# TBE : ENH-005 - Use local Exclusion files
+#=====================================================================================================================
+# Implémentation par default
+$excludeFullPath =  "$usrProfileDir/FullExcludeList.txt";
+$excludePartialPath = "$usrProfileDir/PartialExcludeList.txt";
+$regexExcludePath = "$usrProfileDir/RegexExcludeList.txt";
+#=====================================================================================================================
 
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
@@ -163,6 +171,14 @@ if(${ARGV[0]} eq "SCHEDULED") {
 	$flagToCheckSchdule = 1;
 	$taskType = "Scheduled";
 	$BackupsetFile = $backupsetSchFilePath;
+#=====================================================================================================================
+# TBE : ENH-005 - Use local Exclusion files
+#=====================================================================================================================
+# Implémentation pour $usrProfileDir/Backup/Scheduled/
+	$excludeFullPath =  "$usrProfileDir/Backup/Scheduled/FullExcludeList.txt";
+	$excludePartialPath = "$usrProfileDir/Backup/Scheduled/PartialExcludeList.txt";
+	$regexExcludePath = "$usrProfileDir/Backup/Scheduled/RegexExcludeList.txt";
+#=====================================================================================================================
 #	$CurrentBackupsetSoftPath = $backupsetSchFileSoftPath;
 	chmod $filePermission, $BackupsetFile;
 	if(!backupTypeCheck()) {

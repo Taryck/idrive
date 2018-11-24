@@ -446,9 +446,15 @@ sub loadUserData {
 	our $utf8File = "$usrProfileDir/.utf8File.txt";
 	our $serverfile = "$usrProfileDir/.userInfo/".Constants->CONST->{'serverAddress'};
 	our $bwPath = "$usrProfileDir/bw.txt";
-	our $excludeFullPath =  "$usrProfileDir/FullExcludeList.txt";      
-	our $excludePartialPath = "$usrProfileDir/PartialExcludeList.txt";
-	our $regexExcludePath = "$usrProfileDir/RegexExcludeList.txt";
+#=====================================================================================================================
+# TBE : ENH-005 - Use local Exclusion files
+#	our $excludeFullPath =  "$usrProfileDir/FullExcludeList.txt";      
+#	our $excludePartialPath = "$usrProfileDir/PartialExcludeList.txt";
+#	our $regexExcludePath = "$usrProfileDir/RegexExcludeList.txt";
+	our $excludeFullPath =  "";
+	our $excludePartialPath = "";
+	our $regexExcludePath = "";
+#=====================================================================================================================
 	our $backupsetFilePath = "$usrProfileDir/Backup/Manual/BackupsetFile.txt"; 
 	our $RestoresetFile = "$usrProfileDir/Restore/Manual/RestoresetFile.txt"; 
 	our $backupsetSchFilePath = "$usrProfileDir/Backup/Scheduled/BackupsetFile.txt"; 
