@@ -1,2 +1,0 @@
-# idrive
-idrive scripts (perl)

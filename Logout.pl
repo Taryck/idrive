@@ -1,143 +1,95 @@
-#!/usr/bin/perl
-#########################################################################################
-#Script Name : Logout.pl
-#########################################################################################
+#!/usr/bin/env perl
+#*****************************************************************************************************
+# Logout user from the current session
+#
+# Created By : Yogesh Kumar @ IDrive Inc
+#*****************************************************************************************************
 
-$incPos = rindex(__FILE__, '/');
-$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
-unshift (@INC,$incLoc);
+use strict;
+use warnings;
 
-require 'Header.pl';
-require Constants;
+use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++Variable Handlings+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-my ($pwdPath,$pvtPath,$confFilePath,$ManualBackupPidpath,$ManualRestorePidpath,$ManualExpressBackupPidpath,$archivePidpath) = ('') x 7;
-my $CurrentUser = getCurrentUser();
-my $usrProfileDir = "$usrProfilePath/$CurrentUser";
-#if the current user dir doesn't exists
-if($CurrentUser ne "" && -d $usrProfileDir) {
-	$pwdPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDPWD'};
-	$pvtPath = "$usrProfileDir/.userInfo/.IDPVT";
-	$confFilePath = "$usrProfileDir/".Constants->CONST->{'configurationFile'};
-	$ManualBackupPidpath = $usrProfileDir."/Backup/Manual/pid.txt";
-	$ManualRestorePidpath = $usrProfileDir."/Restore/Manual/pid.txt";
-	$ManualExpressBackupPidpath = $usrProfileDir."/LocalBackup/Manual/pid.txt";
-	$archivePidpath		= $usrProfileDir."/Archive/Manual/pid.txt";
-}else{
-	print Constants->CONST->{'LogoutInfo'}.$lineFeed;
-	exit(0);
-}
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++Variable Handlings End++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+use Helpers qw(getServicePath);
+use Configuration;
 
+init();
 
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operation Start +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ 
-killOrContinueJob();
-finalLogout();
-#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ Operations End +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#*****************************************************************************************************
+# Subroutine| | | : init
+# Objective|| | | : This function is entry point for the script
+# Added By| | | | : Yogesh Kumar
+#****************************************************************************************************/
+sub init {
+	$Configuration::callerEnv = 'BACKGROUND' if (defined $ARGV[0] and (${ARGV[0]} == 1));
 
-#****************************************************************************
-# Subroutine Name         : killOrContinueJob() 
-# Objective               : To kill or continue with the running Job based on user Input.
-# Usgae                   : killOrContinueJob()
-# Added By                : Abhishek Verma.
-#****************************************************************************/
-sub killOrContinueJob{
-
-	my @jobNameArr = ('manual_backup','manual_restore','manual_localBackup','manual_archive');
-	my %jobNameHash = ('manual_backup'=>'Backup','manual_restore'=>'Restore','manual_localBackup'=>'Express Backup','manual_archive'=>'Archive cleanup');
-	my %jobsPid = ('manual_backup'=>$ManualBackupPidpath,'manual_restore'=>$ManualRestorePidpath,'manual_localBackup'=>$ManualExpressBackupPidpath,'manual_archive'=>$archivePidpath);
-	my @options;
-	my $msg = '';
-	
-	foreach my $job (@jobNameArr) {
-		if(-e $jobsPid{$job}){			
-			push @options, $job;
-		}		
+	Helpers::loadAppPath();
+	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
+	Helpers::loadUsername();
+	unless (Helpers::isLoggedin()) {
+		$Configuration::displayHeader = 0;
+		Helpers::retreat('no_user_is_logged_in');
 	}
-	
-	my $count = 1;
-	$noOfJobs = scalar(@options);
-	if($noOfJobs){
-		foreach my $job (@options){
-			$msg .= $jobNameHash{$job};
-			if($noOfJobs>$count){
-				if(($noOfJobs-1) == $count){
-					$msg .= " and ";
-				} else {
-					$msg .= ", ";
-				}
+
+	my $jobType = 1;
+	$jobType = ${ARGV[1]} if (defined $ARGV[1]);
+
+	my %rjs = Helpers::getRunningJobs(undef, $jobType);
+	if (%rjs) {
+		my $choice = 'y';
+		my @rj = keys %rjs;
+		my $lastrj = '';
+		if (scalar @rj > 1) {
+			$lastrj = pop @rj;
+			@rj = map{($_, ', ')} @rj;
+			pop @rj;
+			push(@rj, (' and ', $lastrj));
+		}
+
+		if(defined $ARGV[2] and $ARGV[2] eq 'NOUSERINPUT'){
+			if(scalar(@rj) > 1) {
+				Helpers::display(['Manual',' '],0);
+				Helpers::display(\@rj, 0);
+				Helpers::display(['jobs_are_cancelled',"\n"]);
+			} else {
+				Helpers::display(['Manual',' ',$rj[0],'job_has_been_cancelled',"\n"]);
 			}
-			$count++;
+		} else {
+			Helpers::display(['logging_out_from_your_account_will_terminate', ' ', ($jobType == 1 ? 'Manual' : ''), ' '], 0);
+			Helpers::display(\@rj, 0);
+			Helpers::display(['. ', 'do_you_want_to_continue_yn']);
+			$choice = lc(Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1)) if($Configuration::callerEnv ne 'BACKGROUND');
 		}
-	}
-	
-	if(scalar(@options)>0){
-		my $displayMsg = Constants->CONST->{'logoutJob'};
-		   $displayMsg =~ s/<JOBS>/$msg/;
-		foreach(@options){
-			killJob("$displayMsg",$_);
-			$displayMsg = '';
-		}
-	}
-}
 
-#****************************************************************************
-#Subroutine Name         : killJob
-#Objective               : To kill the running Job based on user Input.
-#Usgae                   : killJob()
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub killJob{
-	my $userMessage = shift;
-	my $jobToTerminate = shift;
-	my  $confirmationChoice;
-	my $jobTerminationScript = qq($userScriptLocation/).Constants->FILE_NAMES->{jobTerminationScript};
-	if ($userMessage ne ''){
-		print $lineFeed.$userMessage;
-		$confirmationChoice = getConfirmationChoice();
-	}else{
-		$confirmationChoice = 'Y';
-	}
-	if ($confirmationChoice eq 'y' or $confirmationChoice eq 'Y'){
-		$JobTermCmd = "perl '$jobTerminationScript' '$jobToTerminate'";
-		my $res = `$JobTermCmd`;
-		if($? != 0 or $res =~ /Operation not permitted/){
-			print Constants->CONST->{'noLogOut'}."System user '$httpuser' ".Constants->CONST->{'noSufficientPermission'}.$lineFeed;
+
+		if ($choice eq 'y') {
+			my $cmd = sprintf("%s %s '' %s", $Configuration::perlBin, Helpers::getScript('job_termination', 1), Helpers::getUsername());
+			my $res;
+			$res = `$cmd $jobType all 1>/dev/null 2>/dev/null`;
+			if (($? != 0) or ($res =~ /Operation not permitted/)) {
+				Helpers::retreat(['unable_to_logout', ' ', 'system_user', " $Configuration::mcUser ", 'does_not_have_sufficient_permissions']);
+			}
+		}
+		else {
 			exit 0;
 		}
-		if(-e Constants->CONST->{'incorrectPwd'}){
-        		print Constants->CONST->{'noLogOut'}.$lineFeed;
-	                traceLog("Error while logging out from the Account.", __FILE__, __LINE__);
-        	        unlink (Constants->CONST->{'incorrectPwd'});
-                	exit 0;
-         	}
-	}else{
-        	#print $lineFeed.Constants->CONST->{'noLogOut'}.$lineFeed;
-	        exit 0;
 	}
+
+	doLogout();
 }
-#****************************************************************************
-#Subroutine Name         : finalLogout 
-#Objective               : To remove the password file, user.txt file, pvt key file. Inorder to logout finally.
-#Usgae                   : finalLogout()
-#Added By                : Abhishek Verma.
-#****************************************************************************/
-sub finalLogout {
-	if(unlink($pwdPath)) {
-        	unlink ($userTxt);
-	        unlink ($pvtPath);
-        	if(${ARGV[0]} ne 1) {#This scape is kept to avoid the message display when logout script is called from Account settings script.
-                print $lineFeed.Constants->CONST->{'displayUserMessage'}->("\"$CurrentUser\"",Constants->CONST->{'LogoutSuccess'}).$lineFeed;#Logout Success message.
-        	}
-	}else{
-		if(${ARGV[0]} ne 1){
-			if($! =~ /No such file or directory/) {
-					print Constants->CONST->{'LogoutInfo'}.$lineFeed;
-			} else {
-					print $lineFeed.Constants->CONST->{'LogoutErr'}."$!".$lineFeed;
-			}
-		}else{
-			unlink($pvtPath);
-		}
+
+#*****************************************************************************************************
+# Subroutine| | | : doLogout
+# Objective|| | | : Logout current user's a/c
+# Added By| | | | : Yogesh Kumar
+#****************************************************************************************************/
+sub doLogout {
+	my $usrtxt = Helpers::getFileContents(Helpers::getCatfile(getServicePath(), $Configuration::cachedIdriveFile));
+	if ($usrtxt =~ m/^\{/) {
+		$usrtxt = JSON::from_json($usrtxt);
+		$usrtxt->{$Configuration::mcUser}{'isLoggedin'} = 0;
+		Helpers::fileWrite(Helpers::getCatfile(getServicePath(), $Configuration::cachedIdriveFile), JSON::to_json($usrtxt));
+		Helpers::display(["\"", Helpers::getUsername(), "\"", ' ', 'is_logged_out_successfully']);
 	}
+	return 1;
 }

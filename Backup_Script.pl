@@ -1,16 +1,23 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 #######################################################################
 #Script Name : Backup_Script.pl
 #######################################################################
 
+use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 $incPos = rindex(__FILE__, '/');
 $incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
 unshift (@INC,$incLoc);
 
-require 'Header.pl';
 use FileHandle;
 use POSIX;
+#use strict;
+use Configuration;
+use Helpers;
+Helpers::initiateMigrate();
+#Helpers::loadUserConfiguration();
+
+require 'Header.pl';
 
 #use Constants 'CONST';
 require Constants;
@@ -29,6 +36,7 @@ use constant NORELATIVE => "--no-relative";
 my $pid_OutputProcess = undef;
 my $backupPid = undef; #Process ID of child process#
 my $generateFilesPid = undef; #Process ID of child process for generate Backup set files#
+my $displayProgressBarPid = undef;
 my $errorFilePresent = false;
 #Check if EVS Binary exists.
 #my $lineCount; This variable is not used at any place in the script.
@@ -43,19 +51,31 @@ my $BackupsetFileTmp = "";
 my $regexStr = '';
 my $parStr = '';
 #my $relativeAsPerOperation = undef; This variable is not used at any place in the script.
-my $filesOnlyCount = 0;
+my $filesonlycount = 0;
 my $prevFailedCount = 0;
 my $excludedCount = 0;
 my $noRelIndex = 0;
 my $retrycount = 0;
 my $exitStatus = 0;
-my $pidTestFlag = 0;
+my $pidOperationFlag = "main";
 my $prevTime = time();
 my $relativeFileset = "BackupsetFile_Rel";
 my $filesOnly = "BackupsetFile_filesOnly";
 my $noRelativeFileset = "BackupsetFile_NoRel";
-$jobType = "Backup";
-#my $DefaultSet = undef; This variable is not used at any place in the script.
+my $jobType = "Backup";
+my $retry_failedfiles_index = 0;
+my $engineID = 1;
+my @BackupForkchilds;
+# TBE missing strict
+my $BackupsetFile_new;
+my $fullStr;
+my $filecount = 0;
+my $current_source;
+my $filehandle;
+my $BackupsetFile_Only;
+my $Backupfilecount = 0;
+my $totalBackSetSize = 0;
+my $exec_loads;
 
 # Index number for arrayParametersStatusFile
 use constant COUNT_FILES_INDEX => 0;
@@ -68,10 +88,12 @@ use constant BACKUP_SUCCESS => 1;
 use constant BACKUP_PID_FAIL => 2;
 use constant OUTPUT_PID_FAIL => 3;
 use constant PID_NOT_EXIST => 4;
-
-use constant FILE_MAX_COUNT => 1000;
+#TBE
+#use constant FILE_MAX_COUNT => 1000;
+use constant FILE_MAX_COUNT => 500;
+use constant FILE_MAX_SIZE => 10 * 1024 * 1024 * 1024;		# 10 Go
 use constant EXCLUDED_MAX_COUNT => 30000;
-my @commandArgs = qw(--silent SCHEDULED);
+my @commandArgs = qw(--silent SCHEDULED dashboard immediate);
 if ($#ARGV >= 0){
 	if(!validateCommandArgs(\@ARGV,\@commandArgs)){
 		print Constants->CONST->{'InvalidCmdArg'}.$lineFeed;
@@ -85,130 +107,100 @@ my @statusFileArray = 	( "COUNT_FILES_INDEX",
 							"FAILEDFILES_LISTIDX",
 							"EXIT_FLAG"
 						);
-                                
+
 
 ##############################################
 #Subroutine that processes SIGINT and SIGTERM#
 #signal received by the script during backup #
 ##############################################
-$SIG{INT} = \&process_term;
-$SIG{TERM} = \&process_term;
-$SIG{TSTP} = \&process_term;
-$SIG{QUIT} = \&process_term;
-$SIG{PWR} = \&process_term;
-$SIG{KILL} = \&process_term;
-$SIG{USR1} = \&process_term;
+$SIG{INT}	= \&process_term;
+$SIG{KILL}	= \&process_term;
+$SIG{ABRT}	= \&process_term;
+$SIG{PWR}	= \&process_term;
+$SIG{QUIT}	= \&process_term;
+$SIG{TERM}	= \&process_term;
+$SIG{TSTP}	= \&process_term;
+$SIG{USR1}	= \&process_term;
 
 #Assigning Perl path
 my $perlPath = `which perl`;
-chomp($perlPath);	
+chomp($perlPath);
 if($perlPath eq ''){
 	$perlPath = '/usr/local/bin/perl';
-}	
+}
 ###################################################
 #The signal handler invoked when SIGINT or SIGTERM#
 #signal is received by the script                 #
 ###################################################
-sub process_term()
-{
+sub process_term {
 	my $signame = shift;
 	unlink($pidPath);
 	cancelSubRoutine();
 	exit(0);
 }
 
-#======================================================================
-#TBE - FIX - for Enh-006 : Add remaining Quota to summary
-$displayCurrentUser = $userName;
-#======================================================================
-
 $confFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
 
-if(-e $confFilePath) {
-	readConfigurationFile($confFilePath);
-} 
-
-#=====================================================================================================================
-# TBE : ENH-001 - Load local CONFIGURATION_FILE
-# After loading <idrive_path>/userprofile/<my_account>
-# Loads CONFIGURATION_FILE where process is lauched. In scheduled mode :
-# <idrive_path>/userprofile/<my_account>/Backup/Scheduled
-#$confFilePath = $usrProfilePath.'/'.$userName.'/Backup/'.$ARGV[0].'/'.Constants->CONST->{'configurationFile'};
-$confFilePath = $INC[0].'/'.Constants->CONST->{'configurationFile'};
-
-if(-e $confFilePath) {
-	readConfigurationFile($confFilePath);
-}
-#TBE : end of ENH-001
-#=====================================================================================================================
-getConfigHashValue();
 loadUserData();
-my $BackupsetFile = $backupsetFilePath;
-#=====================================================================================================================
-# TBE : ENH-005 - Use local Exclusion files
-#=====================================================================================================================
-# Implémentation par default
-$excludeFullPath =  "$usrProfileDir/FullExcludeList.txt";
-$excludePartialPath = "$usrProfileDir/PartialExcludeList.txt";
-$regexExcludePath = "$usrProfileDir/RegexExcludeList.txt";
-#=====================================================================================================================
 
+my $BackupsetFile = $backupsetFilePath;
+chmod $filePermission, $BackupsetFile;
 # Trace Log Entry #
 my $curFile = basename(__FILE__);
 
 #Flag to silently do backup operation.
 my $silentBackupFlag = 0;
-if (${ARGV[0]} eq '--silent'){
+if (${ARGV[0]} eq '--silent' or ${ARGV[0]} eq 'dashboard'  or ${ARGV[0]} eq 'immediate') {
 	$silentBackupFlag = 1;
 }
 
 headerDisplay($0) if ($silentBackupFlag == 0 and $ARGV[0] ne 'SCHEDULED');
 #Verifying if Backup scheduled or manual job
-my $flagToCheckSchdule = 0;
-if(${ARGV[0]} eq "SCHEDULED") {
+my $isScheduledJob = 0;
+if((${ARGV[0]} eq "SCHEDULED") or (${ARGV[0]} eq "immediate")) {
 	$pwdPath = $pwdPath."_SCH";
 	$pvtPath = $pvtPath."_SCH";
-	$flagToCheckSchdule = 1;
+	$isScheduledJob = 1;
 	$taskType = "Scheduled";
-	$BackupsetFile = $backupsetSchFilePath;
-#=====================================================================================================================
-# TBE : ENH-005 - Use local Exclusion files
-#=====================================================================================================================
-# Implémentation pour $usrProfileDir/Backup/Scheduled/
-	$excludeFullPath =  "$usrProfileDir/Backup/Scheduled/FullExcludeList.txt";
-	$excludePartialPath = "$usrProfileDir/Backup/Scheduled/PartialExcludeList.txt";
-	$regexExcludePath = "$usrProfileDir/Backup/Scheduled/RegexExcludeList.txt";
-#=====================================================================================================================
+	#$BackupsetFile = $backupsetSchFilePath;
 #	$CurrentBackupsetSoftPath = $backupsetSchFileSoftPath;
-	chmod $filePermission, $BackupsetFile;
+	#chmod $filePermission, $BackupsetFile;
 	if(!backupTypeCheck()) {
 		$relative = 1;
 	}
 } else {
 	$taskType = "Manual";
-#	getParameterValue(\"PVTKEY", \$hashParameters{PVTKEY});
-#	my $pvtKey = $hashParameters{$pvtParam};
-	if(getAccountConfStatus($confFilePath)){
-        	exit(0);
+	if(!defined(${ARGV[0]}) or ${ARGV[0]} ne 'dashboard'){
+		if(getAccountConfStatus($confFilePath)){
+			Helpers::sendFailureNotice($userName,'update_backup_progress',$taskType);
+			exit(0);
+		}
+		else{
+			if(getLoginStatus($pwdPath)){
+				Helpers::sendFailureNotice($userName,'update_backup_progress',$taskType);
+				exit(0);
+			}
+		}
 	}
-	else{
-		if(getLoginStatus($pwdPath)){
-                        exit(0);
-                }
-	}
-
 	backupTypeCheck();
 #	$CurrentBackupsetSoftPath = $backupsetFileSoftPath;
 }
+
+if(${ARGV[0]} eq '--silent') {
+	$Configuration::displayHeader = 0;
+	Helpers::isLoggedin() or Helpers::retreat(["\n", 'login_&_try_again']);
+}
+
 if (! checkIfEvsWorking($dedup)){
-        print Constants->CONST->{'EvsProblem'}.$lineFeed;
-        traceLog("Invalid EVS binary found!", __FILE__, __LINE__);
-        exit 0;
+	print Constants->CONST->{'EvsProblem'}.$lineFeed if($taskType eq "Manual");
+	traceLog("Invalid EVS binary found!", __FILE__, __LINE__);
+	Helpers::sendFailureNotice($userName,$taskType);
+	exit 0;
 }
 
 #Getting working dir path and loading path to all other files
-$jobRunningDir = "$usrProfilePath/$userName/Backup/$taskType";
-
+$jobRunningDir = "$usrProfilePath/$userName/Backup/DefaultBackupSet";
+$Configuration::jobRunningDir = $jobRunningDir; # Added by Senthil on Nov 26, 2018
 if(!-d $jobRunningDir) {
 	mkpath($jobRunningDir);
 	chmod $filePermission, $jobRunningDir;
@@ -220,32 +212,40 @@ checkArchiveStatus();
 $pidPath = "$jobRunningDir/pid.txt";
 if(!pidAliveCheck()) {
 	$pidMsg = "$jobType job is already in progress. Please try again later.\n";
-	print $pidMsg;
+	print $pidMsg if($taskType eq "Manual");
 	traceLog($pidMsg, __FILE__, __LINE__);
 	exit 1;
 }
 
 #Loading global variables
 $evsTempDirPath = "$jobRunningDir/evs_temp";
+$evsTempDir = $evsTempDirPath;
 $statusFilePath = "$jobRunningDir/STATUS_FILE";
-$retryinfo = "$jobRunningDir/".$retryinfo;                     
+$retryinfo = "$jobRunningDir/".$retryinfo;
 my $failedfiles = $jobRunningDir."/".$failedFileName;
 my $info_file = $jobRunningDir."/info_file";
 $idevsOutputFile = "$jobRunningDir/output.txt";
 $idevsErrorFile = "$jobRunningDir/error.txt";
 my $fileForSize = "$jobRunningDir/TotalSizeFile";
 $relativeFileset = $jobRunningDir."/".$relativeFileset;
-$noRelativeFileset	= $jobRunningDir."/".$noRelativeFileset;
+my $noRelativeFileset	= $jobRunningDir."/".$noRelativeFileset;
 $filesOnly	= $jobRunningDir."/".$filesOnly;
-my $incSize = "$jobRunningDir/transferredFileSize.txt";
+#my $incSize = "$jobRunningDir/transferredFileSize.txt";
 my $trfSizeAndCountFile = "$jobRunningDir/trfSizeAndCount.txt";
-$excludeDirPath  = "$jobRunningDir/Excluded";
+$excludeDirPath = "$jobRunningDir/Excluded";
 $excludedLogFilePath  = "$excludeDirPath/excludedItemsLog.txt";
+my $utf8Files = $jobRunningDir."/utf8.txt_";
 $errorDir = $jobRunningDir."/ERROR";
-                     
+my $engineLockFile = $jobRunningDir.'/'.Configuration::ENGINE_LOCKE_FILE;
+my $progressDetailsFile = $jobRunningDir.$pathSeparator."PROGRESS_DETAILS";
+my $jobCancelFile = $jobRunningDir.'/cancel.txt';
+my $summaryFilePath = "$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'};
+
+#Renaming the log file if backup process terminated improperly
+Helpers::checkAndRenameFileWithStatus($jobRunningDir);
+
 # pre cleanup for all intermediate files and folders.
-`rm -rf '$relativeFileset'* '$noRelativeFileset'* '$filesOnly'* '$info_file' '$retryinfo' '$errorDir' '$statusFilePath' '$excludeDirPath' '$incSize' '$failedfiles'*`;
-unlink($progressDetailsFilePath);
+Helpers::removeItems([$relativeFileset.'*', $noRelativeFileset.'*', $filesOnly.'*', $info_file, $retryinfo, $errorDir, $statusFilePath.'*', $excludeDirPath, $failedfiles.'*', $progressDetailsFile.'*', $jobCancelFile, $summaryFilePath]);
 #Start creating required file/folder
 if(!-d $errorDir) {
 	mkdir($errorDir);
@@ -256,19 +256,32 @@ if(!-d $excludeDirPath) {
 	mkdir($excludeDirPath);
 	chmod $filePermission, $excludeDirPath;
 }
-#getParameterValue(\"PASSWORD",\$hashParameters{PASSWORD});
-#my $encType = checkEncType($flagToCheckSchdule); # This function has been called inside getOperationFile() function.
+
+#my $encType = checkEncType($isScheduledJob); # This function has been called inside getOperationFile() function.
 my $maximumAttemptMessage = '';
 my $serverAddress = verifyAndLoadServerAddr();
 if ($serverAddress == 0){
 	exit_cleanup($errStr);
 }
-createUpdateBWFile();
-checkPreReq($BackupsetFile,$jobType,$taskType,'NOBACKUPDATA');
+#createUpdateBWFile(); #Commented by Senthil: 13-Aug-2018
+my $isEmpty = checkPreReq($BackupsetFile,$jobType,$taskType,'NOBACKUPDATA');
+if($isEmpty and $silentBackupFlag == 0 and $ARGV[0] ne 'SCHEDULED') {
+	unlink($pidPath);
+	Helpers::retreat($errStr) ;
+}
+
+#Helpers::setUsername($userName) if (defined($userName) and $userName ne '');
+
 createLogFiles("BACKUP");
 createBackupTypeFile();
+
+if (Helpers::loadAppPath() and Helpers::loadServicePath() and Helpers::loadNotifications()) {
+	Helpers::setNotification('update_backup_progress', ((split("/", $outputFilePath))[-1]));
+	Helpers::saveNotifications();
+}
+
 #versionDevDisplay() if ($silentBackupFlag == 0);
-if ($flagToCheckSchdule == 0 and $silentBackupFlag == 0){
+if ($isScheduledJob == 0 and $silentBackupFlag == 0){
 	if ($dedup eq 'off'){
 		emptyLocationsQueries();
 	}elsif($dedup eq 'on'){
@@ -279,112 +292,203 @@ if ($flagToCheckSchdule == 0 and $silentBackupFlag == 0){
 #	$deviceID = (split('#',$backupHost))[0];
 #}
 $location = (($dedup eq 'on') and $backupHost =~ /#/)?(split('#',$backupHost))[1]:$backupHost;
-getCursorPos() if ($flagToCheckSchdule == 0 and $silentBackupFlag == 0);
-$mail_content_head = writeLogHeader($flagToCheckSchdule);
-startBackup();
+getCursorPos() if ($isScheduledJob == 0 and $silentBackupFlag == 0 and !$isEmpty);
+$mail_content_head = writeLogHeader($isScheduledJob);
+
+startBackup() unless($isEmpty);
 exit_cleanup($errStr);
 
 #****************************************************************************************************
 # Subroutine Name         : startBackup
 # Objective               : This function will fork a child process to generate backupset files and get
-#							count of total files considered. Another forked process will perform main 
+#							count of total files considered. Another forked process will perform main
 #							backup operation of all the generated backupset files one by one.
-# Added By				  : 
+# Added By				  :
+# Modified By			  : Senthil Pandian
 #*****************************************************************************************************/
 sub startBackup {
+	my @linesStatusFile;
+	my $line = "";
 	loadFullExclude();
 	loadPartialExclude();
 	loadRegexExclude();
-	
+
 	$generateFilesPid = fork();
 
 	if(!defined $generateFilesPid) {
-		traceLog(Constants->CONST->{'ForkErr'}."$lineFeed", __FILE__, __LINE__);
+		Helpers::traceLog(Constants->CONST->{'ForkErr'});
 		$errStr = "Unable to start generateBackupsetFiles operation";
 		return;
 	}
-	
-	if($generateFilesPid == 0) {
-		generateBackupsetFiles();
+
+	generateBackupsetFiles() if($generateFilesPid == 0);
+
+	if($isScheduledJob == 0 and !$silentBackupFlag){
+		$displayProgressBarPid = fork();
+
+		if(!defined $displayProgressBarPid) {
+			Helpers::traceLog(Constants->CONST->{'ForkErr'});
+			$errStr = "Unable to start generateBackupsetFiles operation";
+			return;
+		}
+
+		if($displayProgressBarPid == 0) {
+			$pidOperationFlag = "DisplayProgress";
+			while(1){
+				displayProgressBar($progressDetailsFile);
+				if (!-e $pidPath) {
+					last;
+				}
+				#select(undef, undef, undef, 0.1);
+				Helpers::sleepForMilliSec(100); # Sleep for 100 milliseconds
+			}
+			displayProgressBar($progressDetailsFile,Helpers::getTotalSize($fileForSize));
+			exit(0);
+		}
 	}
-	
+
 	close(FD_WRITE);
+
+	open(my $handle, '>', $engineLockFile) or Helpers::traceLog("Could not open file '$engineLockFile' $!");
+	close $handle;
+	chmod $filePermission, $engineLockFile;
+
+	my $exec_cores = getSystemCpuCores();
 START:
 	if(!open(FD_READ, "<", $info_file)) {
 		$errStr = Constants->CONST->{'FileOpnErr'}." info_file in startBackup: $info_file to read, Reason:$!";
 		return;
 	}
-	
+
+	my $lastFlag = 0;
+
 	while (1) {
 		if(!-e $pidPath){
 			last;
 		}
-		
-		$line = <FD_READ>;
+
+		if($line eq "") {
+			$line = <FD_READ>;
+		}
+
 		if($line eq "") {
 			sleep(1);
 			seek(FD_READ, 0, 1);		#to clear eof flag
 			next;
 		}
-		
+
 		chomp($line);
 		$line =~ s/^[\s\t]+$//;			#space and tab also trim
 		if($line =~ m/^TOTALFILES/) {
 			$totalFiles = $line;
 			$totalFiles =~ s/TOTALFILES//;
 			$lastFlag = 1;
+			$line = "";
 			last;
 		}
 		else {
-			my $retType = doBackupOperation($line);
-			if(BACKUP_SUCCESS ne $retType) {
-				$exitStatus = 1;
-				last;
-			} 
+			my $isEngineRunning = isEngineRunning($pidPath.'_'.$engineID);
+			if(!$isEngineRunning){
+				while(1){
+					last	if(!-e $pidPath or !isAnyEngineRunning($engineLockFile));
+
+					$exec_loads = get_load_average();
+					if($exec_loads > $exec_cores){
+#						sleep(20);
+						sleep(5);
+						next;
+					}
+					last;
+				}
+
+				if($retry_failedfiles_index != -1){
+					$retry_failedfiles_index++;
+					if($retry_failedfiles_index > 2000000000){
+						$retry_failedfiles_index = 0;
+					}
+				}
+
+				$backupPid = fork();
+				if(!defined $backupPid) {
+					$errStr = Constants->CONST->{'ForkErr'}.$whiteSpace.Constants->CONST->{"EvsChild"}.$lineFeed;
+					return BACKUP_PID_FAIL;
+				}
+				elsif($backupPid == 0) {
+					my $retType = doBackupOperation($line, $taskType, $engineID, $retry_failedfiles_index);
+					exit(0);
+				}
+				else{
+					push (@BackupForkchilds, $backupPid);
+					if(defined($exec_loads) and ($exec_loads > $exec_cores)) {
+						sleep(2);
+					}
+					else{
+						sleep(1);
+					}
+				}
+				$line = "";
+			}
 		}
+
+		if($totalEngineBackup > 1)
+		{
+			$engineID++;
+			if($engineID > $totalEngineBackup){
+				$engineID = 1;
+				sleep(2);
+			}
+		}
+		Helpers::killPIDs(\@BackupForkchilds,0);
+
 	}
-	
-	$nonExistsCount = <FD_READ>;
-	if($nonExistsCount ne "") {
-		$nonExistsCount =~ s/FAILEDCOUNT//;
-	}
-	else {
-		$nonExistsCount = 0;
-	}
+
+	waitForEnginesToFinish();
 	close FD_READ;
+	$nonExistsCount    = Helpers::readInfoFile('FAILEDCOUNT');
+	$noPermissionCount = Helpers::readInfoFile('DENIEDCOUNT');
+	$missingCount      = Helpers::readInfoFile('MISSINGCOUNT');
+
 	waitpid($generateFilesPid,0);
 	undef @linesStatusFile;
-	
+
 	if($totalFiles == 0 or $totalFiles !~ /\d+/) {
-		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
-		$totalFiles = `$fileCountCmd`; 
-		$totalFiles =~ s/TOTALFILES//;
-		
+		$totalFiles    = Helpers::readInfoFile('TOTALFILES');
 		if($totalFiles == 0 or $totalFiles !~ /\d+/){
 			traceLog("Unable to get total files count \n", __FILE__, __LINE__);
 		}
-	} 
-		
+	}
+
 	if(-s $retryinfo > 0 && -e $pidPath && $retrycount <= $maxNumRetryAttempts && $exitStatus == 0) {
 		if($retrycount == $maxNumRetryAttempts) {
-			my $index = "-1";
-			$statusHash{'FAILEDFILES_LISTIDX'} = $index;
-			putParameterValueInStatusFile();
+			for(my $i=1; $i<= $totalEngineBackup; $i++){
+				if(-e $statusFilePath."_".$i  and  -s $statusFilePath."_".$i>0){
+					readStatusFile($i);
+					my $index = "-1";
+					$statusHash{'FAILEDFILES_LISTIDX'} = $index;
+					putParameterValueInStatusFile($i);
+					undef @linesStatusFile;
+				}
+			}
+			$retry_failedfiles_index = -1;
 		}
-		
+
 		move($retryinfo, $info_file);
 		updateRetryCount();
-		
+
 		#append total file number to info
 		if(!open(INFO, ">>",$info_file)){
 			$errStr = Constants->CONST->{'FileOpnErr'}." info_file in startBackup : $info_file, Reason $!".$lineFeed;
 			return;
 		}
 		print INFO "TOTALFILES $totalFiles\n";
+		print INFO "FAILEDCOUNT $nonExistsCount\n";
+		print INFO "DENIEDCOUNT $noPermissionCount\n";
+		print INFO "MISSINGCOUNT $missingCount\n";
 		close INFO;
 		chmod $filePermission, $info_file;
 		sleep 30;
 		traceLog("retrycount:$retrycount", __FILE__, __LINE__);
+		$engineID = 1;
 		goto START;
 	}
 }
@@ -395,12 +499,13 @@ START:
 # Added By				  : Dhritikana
 #*****************************************************************************************************/
 sub generateBackupsetFiles {
-	$pidTestFlag = "GenerateFile";
+	my @source;
+	$pidOperationFlag = "GenerateFile";
 	if(!open(BACKUPSETFILE_HANDLE, $BackupsetFile)) {
 		traceLog(Constants->CONST->{'BckFileOpnErr'}." $BackupsetFile, Reason: $!. $lineFeed", __FILE__, __LINE__);
 		goto GENLAST;
 	}
-	@BackupArray = <BACKUPSETFILE_HANDLE>;
+	my @BackupArray = <BACKUPSETFILE_HANDLE>;
 	close(BACKUPSETFILE_HANDLE);
 	my $traceExist = $errorDir."/traceExist.txt";
 	if(!open(TRACEERRORFILE, ">>", $traceExist)) {
@@ -408,23 +513,57 @@ sub generateBackupsetFiles {
 	}
 	chmod $filePermission, $traceExist;
 
+	my $permissionError = $errorDir."/permissionError.txt";
+	if(!open(TRACEPERMISSIONERRORFILE, ">>", $permissionError)) {
+		traceLog(Constants->CONST->{'FileOpnErr'}." $permissionError, Reason: $!. $lineFeed", __FILE__, __LINE__);
+	}
+	chmod $filePermission, $permissionError;
+
 	# require to open excludedItems file to log excluded details
 	if(!open(EXCLUDEDFILE, ">", $excludedLogFilePath)){
 		print Constants->CONST->{'CreateFail'}." $excludedLogFilePath, Reason:$!";
 		traceLog(Constants->CONST->{'CreateFail'}." $excludedLogFilePath, Reason:$!", __FILE__, __LINE__) and die;
 	}
 	chmod $filePermission, $excludedLogFilePath;
-	
+
 	$filesonlycount = 0;
 	$excludedFileIndex = 1;
 	my $j =0;
 	chomp(@BackupArray);
 	@BackupArray = uniqueData(@BackupArray);
+# =======================================================================
+# If item is regex ls
+	my @BackupArray_ext = ();
+	foreach my $item (@BackupArray) {
+		if ( $item =~ /\*/ 
+		  or $item =~ /\?/ 
+		  or $item =~ /\[.*\]/) {
+# Wildcard line
+# TBE : ENH-002 set Root Directory for relative backup
+			$item = Taryck::extendBackupItem($item);
+			my @ls_list = `ls -d $item`;
+			foreach my $entry (@ls_list) {
+				chomp($entry);
+				if ( -d $entry ) {
+					$entry .= '/';
+				}
+				$entry =~ s/^[\/]+|[\/]+$/\//g; #Removing "/" if more than one found at beginning/end
+				push @BackupArray_ext, $entry;
+			}
+		} else {
+# normal line
+			$item = Taryck::extendBackupItem($item);
+			$item =~ s/^[\/]+|[\/]+$/\//g; #Removing "/" if more than one found at beginning/end
+			push @BackupArray_ext, $item;
+		}
+	}
+	@BackupArray = uniqueData(@BackupArray_ext);
+# =======================================================================
 	foreach my $item (@BackupArray) {
 		if(!-e $pidPath){
 			last;
 		}
-		$item =~ s/^[\/]+|[\/]+$/\//g; #Removing "/" if more than one found at beginning/end
+#		$item =~ s/^[\/]+|[\/]+$/\//g; #Removing "/" if more than one found at beginning/end
 		if($item =~ m/^$/) {
 			next;
 		}
@@ -434,25 +573,14 @@ sub generateBackupsetFiles {
 		elsif ($item eq "." or $item eq "..") {
 			next;
 		}
-# =======================================================================
-# TBE : ENH-002 set Root Directory for relative backup
-# if enh-002 is activated then add base_dir to backupset line
-		if($backupBase_Dir ne "") {
-			if(substr($item, 0, 1) eq "/") {
-				$item =~ s/^.//;
-			}
-			$item = $backupBase_Dir . $item;
-		}
-		if( -l $item # File is a symbolic link #
-#		elsif( -l $item # File is a symbolic link #
-# =======================================================================
+		elsif( -l $item # File is a symbolic link #
 			 or -p $item # File is a named pipe #
 			 or -S $item # File is a socket #
 			 or -b $item # File is a block special file #
 			 or -c $item )# File is a character special file #
 		#	 or -t $item ) # Filehandle is opened to a tty #
 		{
-			print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$item]. reason: Not a regular file/folder.$lineFeed";
+			print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$item]. Reason: Not a regular file/folder.$lineFeed";
 			$excludedCount++;
 			if($excludedCount == EXCLUDED_MAX_COUNT) {
 				$excludedCount = 0;
@@ -460,65 +588,67 @@ sub generateBackupsetFiles {
 			}
 			next;
 		}
-		Chomp(\$item);		
+		Chomp(\$item);
 		if($item ne "/" && substr($item, -1, 1) eq "/") {
-				chop($item);
+			chop($item);
 		}
-		
+
 		if(checkForExclude($item)) {
 			next;
 		}
 		if(-d $item) {
 			if($relative == 0) {
 				$noRelIndex++;
-				$BackupsetFile_new = $noRelativeFileset."$noRelIndex"; 
+				$BackupsetFile_new = $noRelativeFileset."$noRelIndex"."_$Backupfilecount";
 				$filecount = 0;
-# =======================================================================
-# TBE : ENH-002 set Root Directory for relative backup
-				if($backupBase_Dir eq "") {
-# Original version
-					$a = rindex ($item, '/');
-				} else {
-# if enh-002 is activated define then end of BASE_DIR as the position to define relative name
-					$a = length( $backupBase_Dir ) - 1;
-				}
-# =======================================================================
+				$a = rindex ($item, '/');
 				$source[$noRelIndex] = substr($item,0,$a);
 				if($source[$noRelIndex] eq "") {
 					$source[$noRelIndex] = "/";
 				}
 				$current_source = $source[$noRelIndex];
-				
+
 				if(!open $filehandle, ">>", $BackupsetFile_new) {
 					traceLog("cannot open $BackupsetFile_new to write ", __FILE__, __LINE__);
 					goto GENLAST;
 				}
 				chmod $filePermission, $BackupsetFile_new;
 			}
-			
+
 			if(!enumerate($item)){
 				goto GENLAST;
-			}	
-			
+			}
+
 			if($relative == 0 && $filecount>0) {
-				autoflush FD_WRITE; 
+				autoflush FD_WRITE;
 				close $filehandle;
 				#print FD_WRITE "$BackupsetFile_new ".RELATIVE." $current_source\n";
 				print FD_WRITE "$current_source' '".RELATIVE."' '$BackupsetFile_new\n";
 			}
-		}	
+		}
 		else {
-			$totalFiles++;
 			if(!-e $item) {
-				$nonExistsCount++;
-				#write into error 
-				print TRACEERRORFILE "[".(localtime)."] [FAILED] [$item]. Reason: $!".$lineFeed;
+				#write into error
+				my $reason = $!;
+				if($reason =~ /Permission denied/){
+					$noPermissionCount++;
+					print TRACEPERMISSIONERRORFILE "[".(localtime)."] [FAILED] [$item]. Reason: $reason".$lineFeed;
+				} else {
+					$totalFiles++;
+					$nonExistsCount++;
+					$missingCount++ if($reason =~ /No such file or directory/);
+					print TRACEERRORFILE "[".(localtime)."] [FAILED] [$item]. Reason: $reason".$lineFeed;
+				}
 				next;
-			} 
-			$totalSize += -s $item;
+			}
+			$totalFiles++;
+# TBE
+			my $fileSize = -s $item;
+			$totalSize += $fileSize;
+#			$totalSize += -s $item;
 			print NEWFILE $item.$lineFeed;
 			$current_source = "/";
-		
+
 			if($relative == 0) {
 				$filesonlycount++;
 				$filecount = $filesonlycount;
@@ -526,54 +656,59 @@ sub generateBackupsetFiles {
 			else {
 				$filecount++;
 			}
+#TBE take count file size
+			$totalBackSetSize += $fileSize;
 
-			if($filecount == FILE_MAX_COUNT) {
+#			if($filecount == FILE_MAX_COUNT) {
+			if( ($filecount >= FILE_MAX_COUNT) or ( $totalBackSetSize >= FILE_MAX_SIZE) ) {
 				$filesonlycount = 0;
+				$totalBackSetSize = 0;
 				if(!createBackupSetFiles1k("FILESONLY")){
 					goto GENLAST;
 				}
 			}
 		}
 	}
-	
+
 	if($relative == 1 && $filecount > 0) {
 		autoflush FD_WRITE;
-		#print FD_WRITE "$BackupsetFile_new ".RELATIVE." $current_source \n";
 		print FD_WRITE "$current_source' '".RELATIVE."' '$BackupsetFile_new\n";
 	} elsif($filesonlycount >0) {
 		$current_source = "/";
 		autoflush FD_WRITE;
-		#print FD_WRITE "$filesOnly ".NORELATIVE." $current_source\n";
 		print FD_WRITE "$current_source' '".NORELATIVE."' '$filesOnly\n";
 	}
-	
+
 GENLAST:
 	autoflush FD_WRITE;
 	print FD_WRITE "TOTALFILES $totalFiles\n";
 	print FD_WRITE "FAILEDCOUNT $nonExistsCount\n";
+	print FD_WRITE "DENIEDCOUNT $noPermissionCount\n";
+	print FD_WRITE "MISSINGCOUNT $missingCount\n";
 	close FD_WRITE;
 	close NEWFILE;
-	$pidTestFlag = "generateListFinish";
+	$pidOperationFlag = "generateListFinish";
 	close INFO;
 
 	open FILESIZE, ">$fileForSize" or traceLog(Constants->CONST->{'FileOpnErr'}." $fileForSize. Reason: $!\n", __FILE__, __LINE__);
 	print FILESIZE "$totalSize";
 	close FILESIZE;
 	chmod $filePermission, $fileForSize;
-	
+
 	close(TRACEERRORFILE);
+	close(TRACEPERMISSIONERRORFILE);
 	close(EXCLUDEDFILE);
 	exit 0;
 }
 #****************************************************************************************************
 # Subroutine Name         : enumerate.
-# Objective               : This function will list files recursively. 
+# Objective               : This function will list files recursively.
 # Added By                : Dhritikana
 #*****************************************************************************************************/
 sub enumerate {
-	my $item  = $_[0]; 
+	my $item  = $_[0];
 	my $retVal = 1;
-	
+
 	if (substr($item, -1, 1) ne "/") {
 		$item .= "/";
 	}
@@ -600,36 +735,47 @@ sub enumerate {
 			 or -c $temp )# File is a character special file #
 			 #or -t $temp ) # Filehandle is opened to a tty #
 			{
-				print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$temp]. reason: Not a regular file/folder.$lineFeed";
+				print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$temp]. Reason: Not a regular file/folder.$lineFeed";
 				$excludedCount++;
 				if($excludedCount == EXCLUDED_MAX_COUNT) {
 					$excludedCount = 0;
 					createExcludedLogFile30k();
-				}				
+				}
 				next;
 			}
-			
+
 			if(checkForExclude($temp)) {
 				next;
 			}
-			
+
 			if(-d $temp){
 				if(!enumerate($temp)){
 					$retVal = 0;
 					last;
-				}			
+				}
 			}
 			else {
-				$totalFiles++;
 				if(!-e $temp) {
-					$nonExistsCount++;
-					print TRACEERRORFILE "[".(localtime)."] [FAILED] [$temp]. Reason: $!".$lineFeed;
+					#write into error
+					my $reason = $!;
+					if($reason =~ /Permission denied/){
+						$noPermissionCount++;
+						print TRACEPERMISSIONERRORFILE "[".(localtime)."] [FAILED] [$temp]. Reason: $reason".$lineFeed;
+					} else {
+						$totalFiles++;
+						$nonExistsCount++;
+						$missingCount++ if($reason =~ /No such file or directory/);
+						print TRACEERRORFILE "[".(localtime)."] [FAILED] [$temp]. Reason: $reason".$lineFeed;
+					}
 					next;
 				}
-				
-				$totalSize += -s $temp;
+				$totalFiles++;
+# TBE
+				my $fileSize = -s $temp;
+				$totalSize += $fileSize;
+#				$totalSize += -s $temp;
 				if($relative == 0) {
-					$item_orig = $item;
+					my $item_orig = $item;
 					if($current_source ne "/") {
 						$item_orig =~ s/$current_source//;
 					}
@@ -641,10 +787,14 @@ sub enumerate {
 					print NEWFILE $temp.$lineFeed;
 					$BackupsetFileTmp = $relativeFileset;
 				}
-				
+
 				$filecount++;
+#TBE take count file size
+				$totalBackSetSize += $fileSize;
 				
-				if($filecount == FILE_MAX_COUNT) {
+				if( ($filecount >= FILE_MAX_COUNT) or ( $totalBackSetSize >= FILE_MAX_SIZE) ) {
+					$filecount = 0;
+					$totalBackSetSize = 0;
 					if(!createBackupSetFiles1k()){
 						$retVal = 0;
 						last;
@@ -655,184 +805,217 @@ sub enumerate {
 		closedir(DIR);
 	}
 	else {
-		$totalFiles++;
-		$nonExistsCount++;	
-		print TRACEERRORFILE "[".(localtime)."] [FAILED] [$item]. Reason: $!".$lineFeed;
-		traceLog("Could not open Dir $item, Reason:$!", __FILE__, __LINE__);
-	}	
+		#traceLog("Could not open Dir $item, Reason:$!", __FILE__, __LINE__);
+		my $reason = $!;
+		if($reason =~ /Permission denied/){
+			$noPermissionCount++;
+			print TRACEPERMISSIONERRORFILE "[".(localtime)."] [FAILED] [$item]. Reason: $reason".$lineFeed;
+		} else {
+			$totalFiles++;
+			$nonExistsCount++;
+			$missingCount++ if($reason =~ /No such file or directory/);
+			print TRACEERRORFILE "[".(localtime)."] [FAILED] [$item]. Reason: $reason".$lineFeed;
+		}
+	}
 	if($excludedCount == EXCLUDED_MAX_COUNT) {
 		$excludedCount = 0;
 		createExcludedLogFile30k();
 	}
-	return $retVal;	
+	return $retVal;
 }
 
 #****************************************************************************************************
-# Subroutine Name         : cancelSubRoutine
-# Objective               : This subroutine gets call if user cancel the execution of script. It will do
-#							all require cleanup before exiting.
-# Added By				  : Arnab Gupta
-# Modified By				: Dhritikana.
+# Subroutine Name		: cancelSubRoutine
+# Objective				: This subroutine gets call if user cancel the execution of script. It will do all require cleanup before exiting.
+# Added By				: Arnab Gupta
+# Modified By			: Dhritikana, Sabin Cheruvattil
 #*****************************************************************************************************/
-sub cancelSubRoutine()
-{
-	if($pidTestFlag eq "GenerateFile")  {
+sub cancelSubRoutine {
+	if($pidOperationFlag eq "GenerateFile") {
 		open FD_WRITE, ">>", $info_file or (print Constants->CONST->{'FileOpnErr'}."info_file in cancelSubRoutine: $info_file to write, Reason:$!"); # die handle?
 		autoflush FD_WRITE;
 		print FD_WRITE "TOTALFILES $totalFiles\n";
 		print FD_WRITE "FAILEDCOUNT $nonExistsCount\n";
+		print FD_WRITE "DENIEDCOUNT $noPermissionCount\n";
+		print FD_WRITE "MISSINGCOUNT $missingCount\n";
 		close(FD_WRITE);
 		close NEWFILE;
 		exit 0;
-	} 
-	waitpid($generateFilesPid,0);
-	if($totalFiles == 0 or $totalFiles !~ /\d+/) {
-		my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
-		$totalFiles = `$fileCountCmd`; 
-		$totalFiles =~ s/TOTALFILES//;
-	}	
-	
-	if($totalFiles == 0 or $totalFiles !~ /\d+/){
-		traceLog(" Unable to get total files count \n", __FILE__, __LINE__);
-	}
-	
-	if($nonExistsCount == 0) {
-		my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
-		$nonExistsCount = `$nonExistCheckCmd`; 
-		$nonExistsCount =~ s/FAILEDCOUNT//;
 	}
 
-	my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$backupUtfFile\'";
-	$evsRunning = `$evsCmd`;
-	@evsRunningArr = split("\n", $evsRunning);
-	
-	foreach(@evsRunningArr) {
-		if($_ =~ /$evsCmd|grep/) {
-			next;
-		}
-#		my @lines = split(/[\s\t]+/, $_);
-#		my $pid = $lines[3];
-		my $pid = (split(/[\s\t]+/, $_))[3];
-		$scriptTerm = system("kill -9 $pid");
+	exit(0) if($pidOperationFlag eq "DisplayProgress");
+
+	if($pidOperationFlag eq "main") {
+		my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$backupUtfFile\'";
+		my $evsRunning = `$evsCmd`;
+
+		my @evsRunningArr = split("\n", $evsRunning);
+		my $arrayData = ($machineInfo eq 'freebsd')? 1 : 3;
 		
-		if(defined($scriptTerm)) {
-			if($scriptTerm != 0 && $scriptTerm ne "") {
-				my $msg = Constants->CONST->{'KilFail'}." Backup\n";
-				traceLog("$msg\n", __FILE__, __LINE__);
+		foreach(@evsRunningArr) {
+			next if($_ =~ /$evsCmd|grep/);
+
+			my $pid = (split(/[\s\t]+/, $_))[$arrayData];
+			my $scriptTerm = system("kill -9 $pid");
+
+			if(defined($scriptTerm)) {
+				if($scriptTerm != 0 && $scriptTerm ne "") {
+					Helpers::traceLog(Constants->CONST->{'KilFail'} . " Backup");
+				}
 			}
 		}
+		
+		waitpid($generateFilesPid, 0) if($generateFilesPid);
+		waitpid($displayProgressBarPid, 0) if($displayProgressBarPid);
+		
+		if(($totalFiles == 0 or $totalFiles !~ /\d+/) and (-s $info_file)) {
+			my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
+			$totalFiles = `$fileCountCmd`;
+			$totalFiles =~ s/TOTALFILES//;
+		}
+
+		Helpers::traceLog("Unable to get total files count") if($totalFiles == 0 or $totalFiles !~ /\d+/);
+
+		if($nonExistsCount == 0) {
+			my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
+			$nonExistsCount = `$nonExistCheckCmd`;
+			$nonExistsCount =~ s/FAILEDCOUNT//;
+		}
+
+		waitpid($pid_OutputProcess, 0) if($pid_OutputProcess);
+		exit_cleanup($errStr);
 	}
-	
-	waitpid($pid_OutputProcess, 0);
-	exit_cleanup($errStr);
 }
 
 #****************************************************************************************************
-# Subroutine Name         : loadFullExclude.
-# Objective               : This function will load FullExcludePaths to FullExcludeHash.
-# Added By				  : Dhritikana
+# Subroutine Name : loadFullExclude.
+# Objective       : This function will load FullExcludePaths to FullExcludeHash.
+# Added By        : Dhritikana
+# Modified By     : Yogesh Kumar
 #*****************************************************************************************************/
 sub loadFullExclude {
 	my @excludeArray;
 	#read full path exclude file and prepare a hash for it
-	if(-e $excludeFullPath and 0 < -s $excludeFullPath) {
-		if(!open(EXFH, $excludeFullPath)){
-			$errStr = Constants->CONST->{'ExclFileOpnErr'}." $excludeFullPath. Reason:$!";
+	if(-e "$excludeFullPath.info" and 0 < -s "$excludeFullPath.info") {
+		if(!open(EXFH, "$excludeFullPath.info")){
+			$errStr = Constants->CONST->{'ExclFileOpnErr'}." $excludeFullPath.info. Reason:$!";
 			print $errStr;
 			traceLog("$errStr\n", __FILE__, __LINE__);
 			return;
 		}
-		
+
 		@excludeArray = grep { !/^\s*$/ } <EXFH>;
 		close EXFH;
 	}
-	
+
 	push @excludeArray, $currentDir;
+	push @excludeArray, 'enabled';
 	if(-l $idriveServicePath){
 		my $sp = Helpers::getAbsPath($idriveServicePath) or Helpers::retreat('no_such_directory_try_again');
 		push @excludeArray, $sp;
+		push @excludeArray, 'enabled';
 	} else {
 		push @excludeArray, $idriveServicePath;
+		push @excludeArray, 'enabled';
 	}
 	my @qFullExArr; # What is the use of this variable.
 	chomp @excludeArray;
 
 	for (my $i=0; $i<=$#excludeArray; $i++) {
-		if(substr($excludeArray[$i], -1, 1) eq "/") {
-			chop($excludeArray[$i]);
+		if ($excludeArray[$i+1] eq 'enabled') {
+			if(substr($excludeArray[$i], -1, 1) eq "/") {
+				chop($excludeArray[$i]);
+			}
+			$backupExcludeHash{$excludeArray[$i]} = 1;
+			push(@qFullExArr, "^".quotemeta($excludeArray[$i]).'\/');
 		}
-		$backupExcludeHash{$excludeArray[$i]} = 1;
-		$qFullExArr[$i] = "^".quotemeta($excludeArray[$i]).'\/';
+		$i++;
 	}
-	$fullStr = join("\n", @qFullExArr);  
+	$fullStr = join("\n", @qFullExArr);
 	chomp($fullStr);
-	$fullStr =~ s/\n/|/g;#First we join with '\n' and then replacing with '|'?		
+	$fullStr =~ s/\n/|/g;#First we join with '\n' and then replacing with '|'?
 }
 
 #****************************************************************************************************
-# Subroutine Name         : loadPartialExclude.
-# Objective               : This function will load Partial Exclude string from PartialExclude File.
-# Added By				  : Dhritikana
+# Subroutine Name : loadPartialExclude.
+# Objective       : This function will load Partial Exclude string from PartialExclude File.
+# Added By        : Dhritikana
+# Modified By     : Yogesh Kumar
 #*****************************************************************************************************/
 sub loadPartialExclude {
-	my @excludeParArray;
-	#read partial path exclude file and prepare a partial match pattern 
-	if(-e $excludePartialPath and 0 < -s $excludePartialPath) {
-		if(!open(EPF, $excludePartialPath)){
-			$errStr = Constants->CONST->{'ExclFileOpnErr'}." $excludePartialPath. Reason:$!";
+	my (@excludeParArray, @qParExArr);
+
+	#read partial path exclude file and prepare a partial match pattern
+	if (-f "$excludePartialPath.info" and !-z "$excludePartialPath.info") {
+		if (!open(EPF, "$excludePartialPath.info")) {
+			$errStr = Constants->CONST->{'ExclFileOpnErr'}." $excludePartialPath.info. Reason:$!";
 			print $errStr;
 			traceLog("$errStr\n", __FILE__, __LINE__);
 			return;
 		}
-		
+
 		@excludeParArray = grep { !/^\s*$/ } <EPF>;
 		close EPF;
-		
-		my @qParExArr;
+
 		chomp(@excludeParArray);
 		for(my $i = 0; $i <= $#excludeParArray; $i++) {
-			$excludeParArray[$i] =~ s/[\s\t]+$//;
-			$qParExArr[$i] = quotemeta($excludeParArray[$i]);
+			if ($excludeParArray[$i+1] eq 'enabled') {
+				$excludeParArray[$i] =~ s/[\s\t]+$//;
+				push(@qParExArr, quotemeta($excludeParArray[$i]));
+			}
+			$i++;
 		}
 
-		$parStr = join("\n", @qParExArr);  
+		# $parStr = join("\n", @qParExArr);
+		# chomp($parStr);
+		# $parStr =~ s/\n/|/g;
+	}
+	push(@qParExArr, quotemeta("/.")) unless(Helpers::getUserConfiguration('SHOWHIDDEN'));
+	if(scalar(@qParExArr)>0){
+		$parStr = join("|", @qParExArr);
 		chomp($parStr);
-		$parStr =~ s/\n/|/g;
 	}
 }
 
 #****************************************************************************************************
-# Subroutine Name         : loadRegexExclude.
-# Objective               : This function will load Regular Expression Exclude string from RegexExlude File.
-# Added By				  : Dhritikana
+# Subroutine Name : loadRegexExclude.
+# Objective       : This function will load Regular Expression Exclude string from RegexExlude File.
+# Added By        : Dhritikana
+# Modified By     : Yogesh Kumar
 #*****************************************************************************************************/
 sub loadRegexExclude {
-	#read regex path exclude file and find a regex match pattern 
-	if(-e $regexExcludePath and -s $regexExcludePath > 0) {
-		if(!open(RPF, $regexExcludePath)) {
-			$errStr = Constants->CONST->{'ExclFileOpnErr'}." $regexExcludePath. Reason:$!";
+	#read regex path exclude file and find a regex match pattern
+	if (-f "$regexExcludePath.info" and !-z "$regexExcludePath.info") {
+		if(!open(RPF, "$regexExcludePath.info")) {
+			$errStr = Constants->CONST->{'ExclFileOpnErr'}." $regexExcludePath.info. Reason:$!";
 			print $errStr;
 			traceLog("$errStr\n", __FILE__, __LINE__);
 			return;
 		}
-		
+
 		my @tmp;
-		@excludeRegexArray = grep { !/^\s*$/ } <RPF>;
+		my @excludeRegexArray = grep { !/^\s*$/ } <RPF>;
 		close RPF;
-	
+
 		if(!scalar(@excludeRegexArray)) {
 			$regexStr = undef;
-		} else {
-			foreach(@excludeRegexArray) {
-				my $a = $_;
-				chomp($a);
-				$b = eval { qr/$a/ };
-				if ($@) {
-					print OUTFILE " Invalid regex: $a";
-					traceLog("Invalid regex: $a\n", __FILE__, __LINE__);
-				} elsif($a) {
-					push @tmp, $a;
+		}
+		else {
+			for(my $i = 0; $i <= $#excludeRegexArray; $i++) {
+				chomp($excludeRegexArray[$i+1]);
+				if ($excludeRegexArray[$i+1] eq 'enabled') {
+					my $a = $excludeRegexArray[$i];
+					chomp($a);
+					$b = eval { qr/$a/ };
+					if ($@) {
+						print OUTFILE " Invalid regex: $a";
+						traceLog("Invalid regex: $a\n", __FILE__, __LINE__);
 					}
+					elsif($a) {
+						push @tmp, $a;
+					}
+				}
+				$i++;
 			}
 			$regexStr = join("\n", @tmp);
 			chomp($regexStr);
@@ -844,102 +1027,132 @@ sub loadRegexExclude {
 
 #****************************************************************************************************
 # Subroutine Name         : exit_cleanup.
-# Objective               : This function will execute the major functions required at the time of exit 
+# Objective               : This function will execute the major functions required at the time of exit
 # Added By                : Deepak Chaurasia
 # Modified By 			  : Dhritikana
+# Mofidied By             : Yogesh Kumar, Sabin Cheruvattil, Senthil Pandian
 #*****************************************************************************************************/
 sub exit_cleanup {
 	if($silentBackupFlag == 0 and $taskType eq 'Manual'){
 		system('stty', 'echo');
 		system("tput sgr0");
 	}
-	my $displayJobFailMessage = undef;
-	$successFiles = getParameterValueFromStatusFile('COUNT_FILES_INDEX');
-	$syncedFiles = getParameterValueFromStatusFile('SYNC_COUNT_FILES_INDEX');
-	$failedFilesCount = getParameterValueFromStatusFile('ERROR_COUNT_FILES');
-	$exit_flag = getParameterValueFromStatusFile('EXIT_FLAG_INDEX');
-	chomp($exit_flag);
-	if($errStr eq "" and -e $errorFilePath) {
-		open ERR, "<$errorFilePath" or traceLog(Constants->CONST->{'FileOpnErr'}."errorFilePath in exit_cleanup: $errorFilePath, Reason: $!".$lineFeed, __FILE__, __LINE__);
-		$errStr .= <ERR>;
-		close(ERR);
-		chomp($errStr);
-	}
-	
-	if(!-e $pidPath or $exit_flag) {
-		$cancelFlag = 1;
-		
-		# In childprocess, if we exit due to some exit scenario, then this exit_flag will be true with error msg
-		@exit = split("-",$exit_flag,2);
-		traceLog(" exit = $exit[0] and $exit[1] \n", __FILE__, __LINE__);
-		if(!$exit[0]){
-			if($flagToCheckSchdule == 1){
-#				$errStr = "Operation could not be completed. Reason : Operation Cancelled due to Cut off.";
-				$errStr = Constants->CONST->{'operationFailCutoff'};				
-				my $checkJobTerminationMode = $jobRunningDir.'/cancel.txt';
-				if (-e $checkJobTerminationMode and (-s $checkJobTerminationMode > 0)){
-				        open (FH, "<$checkJobTerminationMode") or die $!;
-				        my @errStr = <FH>;
-				        chomp(@errStr);
-				        $errStr = $errStr[0] if (defined $errStr[0]);
-				}
-				unlink($checkJobTerminationMode);
-			}
-			elsif($flagToCheckSchdule == 0) {
-#				$errStr = "Operation could not be completed, Reason: Operation Cancelled by User.";	
-				$errStr = Constants->CONST->{'operationFailUser'};					
-			}
-		}else{
-			if($exit[1] ne ""){
-				$errStr = $exit[1];
-#Below section has been added to provide user friendly message and clear instruction in case of password mismatch or encryption verification failed. In this case we are removing the IDPWD file.So that user can login and recreate these files with valid credential.		
-				if ($errStr =~ /password mismatch|encryption verification failed/i){
-                    $errStr = $errStr.' '.Constants->CONST->{loginAccount}.$lineFeed;
-					unlink($pwdPath);
-					if($taskType == "Scheduled"){
-						$pwdPath =~ s/_SCH$//g;
-						unlink($pwdPath);
+
+	unless($isEmpty){
+		my @StatusFileFinalArray = ('COUNT_FILES_INDEX','SYNC_COUNT_FILES_INDEX','ERROR_COUNT_FILES','DENIED_COUNT_FILES','MISSED_FILES_COUNT','TOTAL_TRANSFERRED_SIZE','EXIT_FLAG_INDEX');
+		($successFiles, $syncedFiles, $failedFilesCount, $noPermissionCount, $missingCount, $transferredFileSize, my $exit_flag) = getParameterValueFromStatusFileFinal(@StatusFileFinalArray);
+		chomp($exit_flag);
+		if($errStr eq "" and -e $errorFilePath) {
+			open ERR, "<$errorFilePath" or traceLog(Constants->CONST->{'FileOpnErr'}."errorFilePath in exit_cleanup: $errorFilePath, Reason: $!".$lineFeed, __FILE__, __LINE__);
+			$errStr .= <ERR>;
+			close(ERR);
+			chomp($errStr);
+		}
+
+		if(!-e $pidPath or $exit_flag) {
+			$cancelFlag = 1;
+
+			# In childprocess, if we exit due to some exit scenario, then this exit_flag will be true with error msg
+			my @exit = split("-",$exit_flag,2);
+			traceLog(" exit = $exit[0] and $exit[1] \n", __FILE__, __LINE__);
+			if(!$exit[0]){
+				if($isScheduledJob == 1){
+	#				$errStr = "Operation could not be completed. Reason : Operation Cancelled due to Cut off.";
+					$errStr = Constants->CONST->{'operationFailCutoff'};
+					if (-e $jobCancelFile and (-s $jobCancelFile > 0)){
+						open (FH, "<$jobCancelFile") or die $!;
+						my @errStr = <FH>;
+						chomp(@errStr);
+						$errStr = $errStr[0] if (defined $errStr[0]);
+					} elsif(!-e Helpers::getServicePath()) {
+						$errStr = Constants->CONST->{'operationFailUser'};
 					}
-                } elsif($errStr =~ /failed to get the device information|Invalid device id/i){
-                    $errStr = $errStr.' '.Constants->CONST->{backupLocationConfigAgain}.$lineFeed;
-				}				
+				}
+				elsif($isScheduledJob == 0) {
+	#				$errStr = "Operation could not be completed, Reason: Operation Cancelled by User.";
+					$errStr = Constants->CONST->{'operationFailUser'};
+				}
+			}else{
+				if($exit[1] ne ""){
+					$errStr = $exit[1];
+	#Below section has been added to provide user friendly message and clear instruction in case of password mismatch or encryption verification failed. In this case we are removing the IDPWD file.So that user can login and recreate these files with valid credential.
+					if ($errStr =~ /password mismatch|encryption verification failed/i){
+						$errStr = $errStr.' '.Constants->CONST->{loginAccount}.$lineFeed;
+						unlink($pwdPath);
+						if($taskType == "Scheduled"){
+							$pwdPath =~ s/_SCH$//g;
+							unlink($pwdPath);
+						}
+					} elsif($errStr =~ /failed to get the device information|Invalid device id/i){
+						$errStr = $errStr.' '.Constants->CONST->{backupLocationConfigAgain}.$lineFeed;
+					} else {
+						$errStr = Helpers::checkErrorAndLogout($errStr);
+					}
+				}
 			}
 		}
 	}
+
 	unlink($pidPath);
-	writeOperationSummary(Constants->CONST->{'BackupOp'});
-	unlink($idevsOutputFile);
-	unlink($idevsErrorFile);
-	unlink($backupUtfFile); 
-	unlink($statusFilePath);
+	waitpid($displayProgressBarPid, 0) if ($displayProgressBarPid);
+	wait();
+	writeOperationSummary(Constants->CONST->{'BackupOp'}, $cancelFlag, $transferredFileSize);
+
+	my $subjectLine = getOpStatusNeSubLine();
 	unlink($retryinfo);
 	unlink($fileForSize);
-	unlink($incSize);
+	#unlink($incSize);
 	unlink($trfSizeAndCountFile);
-	restoreBackupsetFileConfiguration();
-	
-	if(-d $evsTempDirPath) {
-		rmtree($evsTempDirPath);
-	}
-	
-	if(-d $errorDir) {
-		rmtree($errorDir); 
-	}
-	my $subjectLine = getOpStatusNeSubLine();
+	unlink($info_file);
+	unlink($jobCancelFile);
+	#restoreBackupsetFileConfiguration();
+
+	rmtree($evsTempDirPath) if(-d $evsTempDirPath);
+	rmtree($errorDir) if(-d $errorDir);
+
 	if (-e $outputFilePath and -s $outputFilePath > 0){
-		my $finalOutFile = $outputFilePath."_".$status;
+		my $finalOutFile = $outputFilePath;
+		$finalOutFile =~ s/_Running_/_$status\_/;
 		move($outputFilePath, $finalOutFile);
+
+		if (Helpers::loadNotifications()) {
+			Helpers::setNotification('update_backup_progress', ((split("/", $finalOutFile))[-1]));
+			Helpers::setNotification('get_logs') and Helpers::saveNotifications();
+		}
+
 		$outputFilePath = $finalOutFile;
-		$finalSummery .= Constants->CONST->{moreDetailsReferLog}.qq(\n"$finalOutFile"); #Concat log file path with job summary. To access both at once while displaying the summery and log file location.
+		$finalSummery .= Constants->CONST->{moreDetailsReferLog}.qq(\n); #Concat log file path with job summary. To access both at once while displaying the summery and log file location.
 		$finalSummery .= "\n".$status."\n".$errStr;
-		writeToFile("$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'},$finalSummery) if ($silentBackupFlag == 0);#It is a generic function used to write content to file.
-		displayFinalSummary('Backup Job',"$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'})  if ($taskType eq "Manual" and $silentBackupFlag == 0);
+		#It is a generic function used to write content to file.
+		#if ($silentBackupFlag == 0){
+			writeToFile($summaryFilePath,$finalSummery);
+			chmod $filePermission, $summaryFilePath;
+		#}
+
+		if ($taskType eq "Manual" and $silentBackupFlag == 0){
+			displayProgressBar($progressDetailsFile,Helpers::getTotalSize($fileForSize)) unless($isEmpty);
+			displayFinalSummary('Backup Job',$summaryFilePath);
+		}
 		#Above function display summary on stdout once backup job has completed.
+		Helpers::saveLog($finalOutFile);
 	}
-	sendMail($subjectLine);
-	appendEndProcessInProgressFile();
-	terminateStatusRetrievalScript("$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'}) if ($taskType eq "Scheduled");
-	unlink($progressDetailsFilePath);
+	if($isEmpty){
+		sendMail($subjectLine,'NOBACKUPDATA');
+	} else {
+		sendMail($subjectLine);
+	}
+#	terminateStatusRetrievalScript($summaryFilePath) if ($taskType eq "Scheduled"); #Commented by Senthil
+#	unlink($progressDetailsFilePath);
+	my $operationsfile = $jobRunningDir.'/operationsfile.txt';
+	my $doBackupOperationErrorFile = "$jobRunningDir/doBackuperror.txt_";
+	Helpers::removeItems([$idevsErrorFile.'*', $idevsOutputFile.'*', $statusFilePath.'*', $utf8Files.'*', $operationsfile.'*', $doBackupOperationErrorFile.'*', $relativeFileset.'*', $noRelativeFileset.'*', $filesOnly.'*', $failedfiles.'*', $pidPath.'*']);
+
+	unlink($engineLockFile);
+	if(defined(${ARGV[0]}) && ${ARGV[0]} eq 'immediate') {
+		Helpers::loadCrontab();
+		Helpers::updateCronTabToDefaultVal("backup") if(Helpers::getCrontab('backup', 'default_backupset', '{settings}{frequency}') eq 'immediate');
+	}
+
 	if ($successFiles > 0){#some file has been backed up during the process, getQuota call is done to calculate the fresh quota.
 		my $childProc = fork();
 		if ($childProc == 0){
@@ -952,7 +1165,7 @@ sub exit_cleanup {
 
 #****************************************************************************************************
 # Subroutine Name         : checkForExclude.
-# Objective               : This function will exclude the files that matched with exclude and partial list 
+# Objective               : This function will exclude the files that matched with exclude and partial list
 # Added By                : Pooja Havaldar
 # Modified By			  : Dhritikana
 #*****************************************************************************************************/
@@ -961,15 +1174,15 @@ sub checkForExclude {
 	my $returnvalue = 0;
 	###$element the last slash needs to be removed before comparing with hash for full exclude
 	if(exists $backupExcludeHash{$element} or $element =~ m/$fullStr/) {
-		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Full path excluded item.$lineFeed";
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. Reason: Full path excluded item.$lineFeed";
 		$excludedCount++;
 		$returnvalue = 1;
 	} elsif($parStr ne "" and $element =~ m/$parStr/) {
-		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Partial path excluded item.$lineFeed";
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. Reason: Partial path excluded item.$lineFeed";
 		$excludedCount++;
 		$returnvalue = 1;
 	} elsif($regexStr ne "" and $element =~ m/$regexStr/) {
-		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. reason: Regex path excluded item.$lineFeed";
+		print EXCLUDEDFILE "[".(localtime)."] [EXCLUDED] [$element]. Reason: Regex path excluded item.$lineFeed";
 		$excludedCount++;
 		$returnvalue = 1;
 	}
@@ -977,7 +1190,7 @@ sub checkForExclude {
 		$excludedCount = 0;
 		createExcludedLogFile30k();
 	}
-	
+
 	return $returnvalue;
 }
 
@@ -989,40 +1202,40 @@ sub checkForExclude {
 sub createBackupSetFiles1k {
 	my $filesOnlyFlag = $_[0];
 	$Backupfilecount++;
-	
+
 	if($relative == 0) {
 		if($filesOnlyFlag eq "FILESONLY") {
-			$filesOnlyCount++;
+			$filesonlycount++;
 			#print FD_WRITE "$BackupsetFile_Only ".NORELATIVE." $current_source\n";
 			print FD_WRITE "$current_source' '".NORELATIVE."' '$BackupsetFile_Only\n";
-			$BackupsetFile_Only =  $filesOnly."_".$filesOnlyCount;
+			$BackupsetFile_Only =  $filesOnly."_".$filesonlycount;
 			close NEWFILE;
 			if(!open NEWFILE, ">", $BackupsetFile_Only) {
 				traceLog(Constants->CONST->{'FileOpnErr'}."filesOnly in 1k: $filesOnly to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
 				return 0;
-			}	
+			}
 			chmod $filePermission, $BackupsetFile_Only;
 		}
-		else 
+		else
 		{
 			#print FD_WRITE "$BackupsetFile_new#".RELATIVE."#$current_source\n";
 			print FD_WRITE "$current_source' '".RELATIVE."' '$BackupsetFile_new\n";
 			# traceLog("in NORELATIVE BackupsetFile_new = $BackupsetFile_new and BackupsetFileTmp = $BackupsetFileTmp");
 			$BackupsetFile_new = $noRelativeFileset."$noRelIndex"."_$Backupfilecount";
-			
+
 			close $filehandle;
 			if(!open $filehandle, ">", $BackupsetFile_new) {
 				traceLog(Constants->CONST->{'FileOpnErr'}."BackupsetFile_new in 1k: $BackupsetFile_new to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
 				return 0;
-			}	
+			}
 			chmod $filePermission, $BackupsetFile_new;
 		}
-	}	
+	}
 	else {
 		#print FD_WRITE "$BackupsetFile_new ".RELATIVE." $current_source\n";
 		print FD_WRITE "$current_source' '".RELATIVE."' '$BackupsetFile_new\n";
 		$BackupsetFile_new = $relativeFileset."_$Backupfilecount";
-		
+
 		close NEWFILE;
 		if(!open NEWFILE, ">", $BackupsetFile_new){
 			traceLog(Constants->CONST->{'FileOpnErr'}."BackupsetFile_new in 1k: $BackupsetFile_new to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
@@ -1033,139 +1246,140 @@ sub createBackupSetFiles1k {
 
 	autoflush FD_WRITE;
 	$filecount = 0;
-	
+
 	if($Backupfilecount%15 == 0){
-		sleep(1);
+# TBE : Why ?
+#	sleep(1);
 	}
 	return 1;
 }
 
 #****************************************************************************************************
 # Subroutine Name         : doBackupOperation.
-# Objective               : This subroutine performs the actual task of backing up files. It creates 
+# Objective               : This subroutine performs the actual task of backing up files. It creates
 #							a child process which executes the backup command. It also creates a process
-#							which continuously monitors the temporary output file. At the end of backup, 
-#							it inspects the temporary error file if present. It then deletes the temporary 
-#							output file, temporary error file and the temporary directory created by 
-#							idevsutil binary.             
+#							which continuously monitors the temporary output file. At the end of backup,
+#							it inspects the temporary error file if present. It then deletes the temporary
+#							output file, temporary error file and the temporary directory created by
+#							idevsutil binary.
 # Usage			  : doBackupOperation($line);
-# Where			  : $line : 
-# Modified By             : Deepak Chaurasia
+# Where			  : $line :
+# Modified By             : Deepak Chaurasia, Vijay Vinoth
 #*****************************************************************************************************/
-sub doBackupOperation()
-{ 
-	my $parameters = $_[0];
-	#@parameter_list = split / /,$parameters,3;
-	@parameter_list = split /\' \'/,$parameters,3;
-	$backupUtfFile = getOperationFile(Constants->CONST->{'BackupOp'}, $parameter_list[2] ,$parameter_list[1] ,$parameter_list[0]);
+sub doBackupOperation {
+	my $parameters   = $_[0];
+	my $scheduleFlag = $_[1];
+	my $operationEngineId = $_[2];
+	my $retry_failedfiles_index = $_[3];
+	my $doBackupOperationErrorFile = "$jobRunningDir/doBackuperror.txt_".$operationEngineId;
+	my @parameter_list = split /\' \'/,$parameters,3;
+	$backupUtfFile = getOperationFile(Constants->CONST->{'BackupOp'}, $parameter_list[2] ,$parameter_list[1] ,$parameter_list[0],$operationEngineId);
+	open(my $startPidFileLock, ">>", $engineLockFile) or return 0;
+	if(!flock($startPidFileLock, 1)){
+		traceLog("Failed to lock engine file", __FILE__, __LINE__);
+		return 0;
+	}
+
+	open(my $engineFp, ">>", $pidPath.'_'.$operationEngineId) or return 0;
+
+	if(!flock($engineFp, 2)){
+		print "Unable to lock \n";
+		return 0;
+	}
 
 	if(!$backupUtfFile) {
 		traceLog("$errStr", __FILE__, __LINE__);
 		return 0;
 	}
-	
+
 	my $tmpbackupUtfFile = $backupUtfFile;
 	$tmpbackupUtfFile =~ s/\'/\'\\''/g;
-	
+
 	my $tmp_idevsutilBinaryPath = $idevsutilBinaryPath;
 	$tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
-	
+
 	# EVS command to execute for backup
 	$idevsutilCommandLine = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmpbackupUtfFile\'";
-	
+
 	$backupPid = fork();
 	if(!defined $backupPid) {
 		$errStr = Constants->CONST->{'ForkErr'}.$whiteSpace.Constants->CONST->{"EvsChild"}.$lineFeed;
 		return BACKUP_PID_FAIL;
 	}
-	
-	if($backupPid == 0) {	
-		if( -e $pidPath) {
-			exec($idevsutilCommandLine);
-			$errStr = Constants->CONST->{'DoRstOpErr'}.Constants->CONST->{'ChldFailMsg'};
-			print $errStr;
-			traceLog("$errStr", __FILE__, __LINE__);
-			
-			if (open(ERRORFILE, ">> $errorFilePath"))
-			{
-				autoflush ERRORFILE;
-				print ERRORFILE $errStr;
-				close ERRORFILE;
-				chmod $filePermission, $errorFilePath;
+
+	if($backupPid == 0) {
+		$pidOperationFlag = 'dobackup';
+		if(-e $pidPath) {
+			system($idevsutilCommandLine." > /dev/null 2>'$doBackupOperationErrorFile'");
+			if(-e $doBackupOperationErrorFile && -s $doBackupOperationErrorFile) {
+				$errStr = Constants->CONST->{'DoBckOpErr'}.Constants->CONST->{'ChldFailMsg'};
+				print $errStr;
+				traceLog("$errStr", __FILE__, __LINE__);
+
+				if (open(ERRORFILE, ">> $errorFilePath"))
+				{
+					autoflush ERRORFILE;
+					print ERRORFILE $errStr;
+					close ERRORFILE;
+					chmod $filePermission, $errorFilePath;
+				}
+				else {
+					traceLog($lineFeed.Constants->CONST->{'FileOpnErr'}."errorFilePath in doBackupOperation:".$errorFilePath.", Reason:$! $lineFeed", __FILE__, __LINE__);
+				}
+			}
+			Helpers::removeItems($doBackupOperationErrorFile);
+			if(open OFH, ">>", $idevsOutputFile."_".$operationEngineId) {
+				print OFH "\nCHILD_PROCESS_COMPLETED\n";
+				close OFH;
+				chmod $filePermission, $idevsOutputFile."_".$operationEngineId;
 			}
 			else {
-				traceLog($lineFeed.Constants->CONST->{'FileOpnErr'}."errorFilePath in doBackupOperation:".$errorFilePath.", Reason:$! $lineFeed", __FILE__, __LINE__);
+				print Constants->CONST->{'FileOpnErr'}." $outputFilePath. Reason: $!";
+				traceLog(Constants->CONST->{'FileOpnErr'}." outputFilePath in doBackupOperation: $outputFilePath. Reason: $!", __FILE__, __LINE__);
+				return 0;
+			}
+			if (-e $parameter_list[2] ) {
+				traceLog("TBE ENH : Engine($operationEngineId) unlink($parameter_list[2])", __FILE__, __LINE__);
+				unlink($parameter_list[2]);
 			}
 		}
 		exit 1;
 	}
-	
-	$pid_OutputProcess = fork();
-	if(!defined $pid_OutputProcess)
-	{
-		$errStr = Constants->CONST->{'ForkErr'}.$whiteSpace.Constants->CONST->{"LogChild"}.$lineFeed;
-		return OUTPUT_PID_FAIL;
-	}
-	
-	if($pid_OutputProcess == 0) {
-		if( !-e $pidPath) {
-			exit 1;
-		}
-		
-		#$isLocalBackup = 0;
-		$workingDir = $currentDir;
-		$workingDir =~ s/\'/\'\\''/g;
-		my $tmpoutputFilePath = $outputFilePath;
-		$tmpoutputFilePath =~ s/\'/\'\\''/g;
-		my $TmpBackupSetFile = $parameter_list[2];
-		$TmpBackupSetFile =~ s/\'/\'\\''/g;
-		my $TmpSource = $parameter_list[0];
-		$TmpSource =~ s/\'/\'\\''/g;
-		my $tmp_jobRunningDir = $jobRunningDir;
-		$tmp_jobRunningDir =~ s/\'/\'\\''/g;
-		my $tmpBackupHost = $backupHost;
-		$tmpBackupHost =~ s/\'/\'\\''/g;	
-		$fileChildProcessPath = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
+
+	exit(1) if(!-e $pidPath);
+
+	#$isLocalBackup = 0;
+	my $workingDir = $currentDir;
+	$workingDir =~ s/\'/\'\\''/g;
+	my $tmpoutputFilePath = $outputFilePath;
+	$tmpoutputFilePath =~ s/\'/\'\\''/g;
+	my $TmpBackupSetFile = $parameter_list[2];
+	$TmpBackupSetFile =~ s/\'/\'\\''/g;
+	my $TmpSource = $parameter_list[0];
+	$TmpSource =~ s/\'/\'\\''/g;
+	my $tmp_jobRunningDir = $jobRunningDir;
+	$tmp_jobRunningDir =~ s/\'/\'\\''/g;
+	my $tmpBackupHost = $backupHost;
+	$tmpBackupHost =~ s/\'/\'\\''/g;
+	my $fileChildProcessPath = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
 #		$ENV{'OPERATION_PARAM'}=join('::',($tmp_jobRunningDir,$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$curLines,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType,$errorDevNull));
-		my @param = join ("\n",('BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType));
-		writeParamToFile("$tmp_jobRunningDir/operationsfile.txt",@param);
-		exec("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");		
-		$errStr = Constants->CONST->{'bckProcessFailureMsg'};
-		
-		if(open(ERRORFILE, ">> $errorFilePath")) {
-			autoflush ERRORFILE;
-			print ERRORFILE $errStr;
-			close ERRORFILE;
-			chmod $filePermission, $errorFilePath;
-		}
-		else {
-			traceLog(Constants->CONST->{'FileOpnErr'}.$whiteSpace.$errorFilePath."1 Reason :$! $lineFeed", __FILE__, __LINE__);
-		}		
-		
-		exit 1;
-	}
-	waitpid($backupPid,0);
+	my @param = join ("\n",('BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType,$scheduleFlag,$operationEngineId));
+	writeParamToFile("$tmp_jobRunningDir/operationsfile.txt_".$operationEngineId,@param);
+	my $cmd = "cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\' \'$operationEngineId\' \'$retry_failedfiles_index\'";
+	$pidOperationFlag = 'parseop';
+	my $out = system($cmd);
+
+	waitpid($backupPid, 0) if($backupPid);
 	updateServerAddr();
-	
-	if(open OFH, ">>", $idevsOutputFile) {
-		print OFH "CHILD_PROCESS_COMPLETED\n";
-		close OFH;
-		chmod $filePermission, $idevsOutputFile;
-	}
-	else {
-		print Constants->CONST->{'FileOpnErr'}." $outputFilePath. Reason: $!";
-		traceLog(Constants->CONST->{'FileOpnErr'}." outputFilePath in doBackupOperation: $outputFilePath. Reason: $!", __FILE__, __LINE__);
-		return 0;
-	}
-	
-	waitpid($pid_OutputProcess, 0);
+
 	unlink($parameter_list[2]);
-	unlink($idevsOutputFile);
-	
-	if(-e $errorFilePath && -s $errorFilePath) {
-		return 0;
-	}
-	
+	unlink($idevsOutputFile.'_'.$operationEngineId);
+	flock($startPidFileLock, 8);
+	flock($engineFp, 8);
+	unlink($pidPath.'_'.$operationEngineId);
+
+	return 0 if(-e $errorFilePath && -s $errorFilePath);
+
 	return BACKUP_SUCCESS;
 }
 
@@ -1173,55 +1387,16 @@ sub doBackupOperation()
 # Subroutine Name         : getOpStatusNeSubLine.
 # Objective               : This subroutine returns backup operation status and email subject line
 # Added By                : Dhritikana
+# Modified By             : Yogesh Kumar, Senthil Pandian
 #******************************************************************************************************************/
-sub getOpStatusNeSubLine()
-{
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-# and simplification
-	my $TBE_status_text = "";
-#======================================================================
-	my $subjectLine= "";
-	my $totalNumFiles = $filesConsideredCount-$failedFilesCount;
-	if($cancelFlag){
-		$status = "ABORTED";
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Aborted Backup]";
-		$TBE_status_text = 'Aborted Backup';
-#======================================================================
+sub getOpStatusNeSubLine {
+	my $subjectLine= "[$status Backup] [$userName] $taskType Backup Status Report ";
+
+	if ($status =~ /Success/) {
+		if($successFiles > 0) {
+			$subjectLine .= "[Backed up file(s): $successFiles of $filesConsideredCount]";
+		}
 	}
-#	elsif($filesConsideredCount == 0){
-#		$status = "FAILURE";
-#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
-#	}
-	elsif($failedFilesCount == 0 and $filesConsideredCount > 0)
-	{
-		$status = "SUCCESS";
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-#		$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful Backup]";
-		$TBE_status_text = 'Successful Backup';
-#======================================================================
-	}
-	else {
-#		if(($failedFilesCount/$filesConsideredCount)*100 <= 5){				  
-#			$status = "SUCCESS*";
-#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Successful* Backup]";
-#		}
-#		else {
-			$status = "FAILURE";
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-#			$subjectLine = "$taskType Backup Email Notification "."[$userName]"." [Failed Backup]";
-			$TBE_status_text = 'Failed Backup';
-#======================================================================
-#		}
-	}
-#======================================================================
-#TBE : ENH-005 : Mail subject information in decresing importance order
-	$subjectLine = "[$TBE_status_text] [$userName] - $taskType Backup Email Notification";
-#======================================================================
 	return ($subjectLine);
 }
 
@@ -1238,7 +1413,7 @@ sub restoreBackupsetFileConfiguration
 	if($noRelativeFileset ne "") {
 		unlink <"$noRelativeFileset"*>;
 	}
-	if($filesOnly ne "") {	
+	if($filesOnly ne "") {
 		unlink <"$filesOnly"*>;
 	}
 	if($failedfiles ne "") {
@@ -1249,7 +1424,7 @@ sub restoreBackupsetFileConfiguration
 
 #*******************************************************************************************************
 # Subroutine Name         :	updateServerAddr
-# Objective               :	handling wrong server address error msg	
+# Objective               :	handling wrong server address error msg
 # Added By                : Dhritikana
 #********************************************************************************************************
 sub updateServerAddr {
@@ -1257,9 +1432,9 @@ sub updateServerAddr {
 	if($tempErrorFileSize > 0) {
 		my $errorPatternServerAddr = "unauthorized user";
 		open EVSERROR, "<", $idevsErrorFile or traceLog("\n Failed to open error.txt\n", __FILE__, __LINE__);
-		$errorContent = <EVSERROR>;
+		my $errorContent = <EVSERROR>;
 		close EVSERROR;
-		
+
 		if($errorContent =~ m/$errorPatternServerAddr/){
 			if(!(getServerAddr())){
 				exit_cleanup($errStr);
@@ -1281,7 +1456,7 @@ sub createBackupTypeFile {
 		traceLog("\n $errStr\n", __FILE__, __LINE__) and die;
 	}
 	chmod $filePermission, $info_file;
-	
+
 	#Backupset File name for mirror path
 	if($relative != 0) {
 		$BackupsetFile_new =  $relativeFileset;
@@ -1297,7 +1472,7 @@ sub createBackupTypeFile {
 			traceLog(Constants->CONST->{'FileOpnErr'}." filesOnly in createBackupTypeFile: $filesOnly to write, Reason:$!. $lineFeed", __FILE__, __LINE__) and die;
 		}
 		chmod $filePermission, $BackupsetFile_Only;
-		
+
 		$BackupsetFile_new = $noRelativeFileset;
 	}
 }
@@ -1308,23 +1483,27 @@ sub createBackupTypeFile {
 # Added By                : Avinash
 # Modified By             : Dhritikana
 #********************************************************************************************************/
-sub updateRetryCount()
-{
+sub updateRetryCount {
 	my $curFailedCount = 0;
 	my $currentTime = time();
 
-	$curFailedCount = getParameterValueFromStatusFile('ERROR_COUNT_FILES');
-	
-	if($prevFailedCount == 0 or $curFailedCount < $prevFailedCount) {
+	for(my $i=1; $i<= $totalEngineBackup; $i++){
+		if(-e $statusFilePath."_".$i  and  -s $statusFilePath."_".$i>0){
+			$curFailedCount = $curFailedCount+getParameterValueFromStatusFile('ERROR_COUNT_FILES',$i);
+			undef @Header::linesStatusFile;
+		}
+	}
+
+	if($curFailedCount < $prevFailedCount) {
 		$retrycount = 0;
 	}
 	else {
 		if($currentTime-$prevTime < 120) {
-			sleep 300;
+			sleep 100;
 		}
 		$retrycount++;
 	}
-	
+
 	#assign the latest backedup and synced value to prev.
 	$prevFailedCount = $curFailedCount;
 	$prevTime = $currentTime;
@@ -1334,36 +1513,52 @@ sub updateRetryCount()
 # Objective               :	Check the status of archive cleanup & wait/terminate if archive is in-progress
 # Added By                : Senthil Pandian
 #********************************************************************************************************/
-sub checkArchiveStatus()
-{
-	my $jobRunningDir = "$usrProfilePath/$userName/Archive";
-	my @availableJobs = ('Manual','Scheduled');
-	my $runningJobName;
+sub checkArchiveStatus {
+	$pidPath = "$usrProfilePath/$userName/Archive/DefaultBackupSet/pid.txt";
 	while(1){
-		$isJobRunning=0;
-		foreach (@availableJobs) {
-			$pidPath = $jobRunningDir."/".$_."/pid.txt";
-			if (-e $pidPath) {
-				if(!pidAliveCheck()) {
-					$isJobRunning=1;
-					$runningJobName  = $_;
-					last;
-				} elsif(-e $pidPath) {
-					unlink($pidPath);
-				}
+		my $isJobRunning=0;
+		if (-e $pidPath) {
+			if(!pidAliveCheck()) {
+				$isJobRunning=1;
+			} elsif(-e $pidPath) {
+				unlink($pidPath);
 			}
 		}
-		
 		if($isJobRunning==1){
 			if($taskType eq "Scheduled"){
-				#traceLog("Delaying backup operation. Reason: $runningJobName archive cleanup is in progress", __FILE__, __LINE__);	
-				sleep(60);
+				#traceLog("Delaying backup operation. Reason: $runningJobName archive cleanup is in progress", __FILE__, __LINE__);
+				sleep(30);
 				next;
 			} else {
-				print "$runningJobName archive cleanup is in progress. Please try again later.\n";
+				print $lineFeed."Archive cleanup is in progress. Please try again later.".$lineFeed.$lineFeed;
 				exit 0;
 			}
 		}
 		last;
 	}
+}
+
+#*******************************************************************************************************
+# Subroutine Name         :	waitForEnginesToFinish
+# Objective               :	Check the status of all engines and wait to complete to finish the job
+# Added By                : Vijay Vinoth
+#********************************************************************************************************/
+sub waitForEnginesToFinish{
+	#my $size = @BackupForkchilds;
+	my $res = '';
+	while(@BackupForkchilds > 0) {
+		foreach (@BackupForkchilds) {
+			$res = waitpid($_, 0);
+			if ($res > 0 or $res == -1) {
+				#delete $BackupForkchilds{$key};
+				@BackupForkchilds = grep(!/$_/, @BackupForkchilds);
+			}
+		}
+	}
+
+	while(isAnyEngineRunning($engineLockFile)){
+		sleep(1);
+	}
+
+	return;
 }

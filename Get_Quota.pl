@@ -6,54 +6,62 @@
 # Save it to .quota file
 # Display Quota file content
 #####################################################################
-unshift (@INC,substr(__FILE__, 0, rindex(__FILE__, '/')));
-require 'Header.pl';
-#use Constants 'CONST';
-require Constants;
-# use File::stat;
-# use Time::localtime;
+use strict;
+use warnings;
 
-#Configuration File Path#
-system("clear");
-my $isPrivate = 0;
-my $encType = undef;
-my $pvtKey = undef;
-my $pvtKeyField = undef;
-#Check if EVS Binary exists.
-my $err_string = checkBinaryExists();
-if($err_string ne "") {
-        print qq($err_string);
-        exit 1;
-}
+use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
+use Helpers;
+
+our $lineFeed = "\n";
 our $userName = ${ARGV[0]};
-if ($userName eq "") {
-	$userName = getCurrentUser();
-}
-if ($userName eq "") {
+if (! defined $userName or $userName eq "") {
+#	$userName = getCurrentUser();
+#}
+#if ($userName eq "") {
 	print 'Provide User as first parameter or login using Login.pl !'.$lineFeed;
 	exit 1;
 }
-loadUserData();
-if ( substr( $pwdPath, -4) ne "_SCH" ){
-	$pwdPath = $pwdPath."_SCH";
-}
-
-my $file = $usrProfileDir.'/.trace/'.Constants->CONST->{'tracelog'};
-my $last_mod_time = -M $file;		# En jours
-
-if ( $last_mod_time > 0.007 ) {
-# No activity on trace file within 10 minutes
-# => Get fresh Value other wise use exisiting
-	my %Results = getQuota_HashTable();
-	WriteQuotaFile( $usrProfileDir.'/.quota.txt',
-					$filePermission,
-					$Results{totalquota},
-					$Results{usedquota},
-					$Results{remainingquota});
-}
-open QUOTA_FILE, "<", $usrProfileDir.'/.quota.txt' or (traceLog($lineFeed.Constants->CONST->{'ConfMissingErr'}." reason :$! $lineFeed", __FILE__, __LINE__) and die);
+Helpers::loadAppPath();
+Helpers::loadServicePath();
+Helpers::setUsername($userName) if(defined($userName) && $userName ne '');
+#if(Helpers::loadUsername()){
+	Helpers::loadUserConfiguration();
+#}
+getAndUpdateQuota();
+my $file = Helpers::getCachedStorageFile();
+open QUOTA_FILE, "<", $file or die "Quota file $file do not exists";
 my @QuotaFile = <QUOTA_FILE>;
 close QUOTA_FILE;
 				
 print @QuotaFile;
+
+
+#*****************************************************************************************************
+# Subroutine			: getAndUpdateQuota
+# Objective				: This method is used to get the quota value and update in the file.
+# Added By				: Anil Kumar
+#****************************************************************************************************/
+sub getAndUpdateQuota {
+	my $csf = Helpers::getCachedStorageFile();
+	unlink($csf);
+	Helpers::createUTF8File('GETQUOTA') or Helpers::retreat('failed_to_create_utf8_file');
+	my @result = Helpers::runEVS('tree');
+
+	if (exists $result[0]->{'message'}) {
+		if ($result[0]->{'message'} eq 'ERROR') {
+			Helpers::display('unable_to_retrieve_the_quota');
+			return 0;
+		}
+	}
+	my $freeQuota = $result[0]->{'totalquota'} - $result[0]->{'usedquota'} ;
+#	$result[0]->{$Configuration::accountStorageSchema{'freeQuota'}{'evs_name'}}
+	$result[0]->{'remainingQuota'} = $freeQuota;
+	if (Helpers::saveUserQuota(@result)) {
+#		return 1 if(Helpers::loadStorageSize());
+		return 1 ;
+	}
+	Helpers::traceLog('unable_to_cache_the_quota');
+	Helpers::display('unable_to_cache_the_quota') ;
+	return 0;
+}

@@ -1,16 +1,19 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 #*****************************************************************************************************
 # Find and terminate running jobs like backup/restore including scheduled ones.
-# 							Created By: Yogesh Kumar													
+#
+# Created By : Yogesh Kumar @ IDrive Inc
+# Reviewed By: Deepak Chaurasia
 #****************************************************************************************************/
+
 use strict;
 use warnings;
 
-if(__FILE__ =~ /\//) { use lib substr(__FILE__, 0, rindex(__FILE__, '/')) ;	} else { use lib '.' ; }
+use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
 use Helpers;
-use Strings;
 use Configuration;
+
 my $cmdNumOfArgs = $#ARGV;
 
 init();
@@ -19,29 +22,30 @@ init();
 # Subroutine			: init
 # Objective				: This function is entry point for the script
 # Added By				: Yogesh Kumar
+# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub init {
 	Helpers::loadAppPath();
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
-
-	$Configuration::callerEnv = 'SCHEDULER' unless ($cmdNumOfArgs == -1);
+	$Configuration::callerEnv = 'BACKGROUND' unless ($cmdNumOfArgs == -1);
+	my $killall = (defined($ARGV[3]) && $ARGV[3] eq 'all')? 1 : 0;
 
 	if ($cmdNumOfArgs == 1) {
-		Helpers::setUsername($ARGV[1]);
+		Helpers::setUsername($ARGV[1]) if($ARGV[1] ne '-');
 	}
 	else {
 		Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
 	}
 
-	Helpers::loadUserConfiguration() or Helpers::retreat('your_account_not_configured_properly');
-	Helpers::loadEVSBinary() 		 or Helpers::retreat('unable_to_find_or_execute_evs_binary');
-	Helpers::isLoggedin()            or Helpers::retreat('login_&_try_again') if($Configuration::callerEnv ne 'SCHEDULER');
+	my $errorKey = Helpers::loadUserConfiguration();
+	#Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
+	Helpers::loadEVSBinary()  or Helpers::retreat('unable_to_find_or_execute_evs_binary');
+	Helpers::isLoggedin()     or Helpers::retreat('login_&_try_again') if($Configuration::callerEnv ne 'BACKGROUND');
 	Helpers::displayHeader() unless($cmdNumOfArgs == 1);
 
-	
-	my %jobs = ($cmdNumOfArgs >= 0)?Helpers::getRunningJobs($ARGV[0]):Helpers::getRunningJobs();
+	my %jobs = Helpers::getRunningJobs($ARGV[0] || undef, $ARGV[2] || 0);
 	if (!%jobs) {
-		if ($Configuration::callerEnv eq 'SCHEDULER'){
+		if ($Configuration::callerEnv eq 'BACKGROUND'){
 			Helpers::traceLog($ARGV[0],'_not_running');
 		} else {
 			Helpers::display('no_job_is_in_progress');
@@ -52,7 +56,7 @@ sub init {
 	my @options = getOptions(%jobs);
 	my $userSelection;
 
-	if ($Configuration::callerEnv ne 'SCHEDULER') {
+	if ($Configuration::callerEnv ne 'BACKGROUND') {
 		if (scalar(@options) > 1) {
 			Helpers::display('you_can_stop_one_job_at_a_time')
 		}
@@ -63,12 +67,13 @@ sub init {
 	else {
 		$userSelection = 1;
 	}
-	
+
+REPEAT:
 	my $cancelFile = '';
 	if (Helpers::validateMenuChoice($userSelection, 1, scalar(@options))) {
 		$options[($userSelection - 1)] =~ s/stop_//g;
 		my $pid = getPid($jobs{$options[($userSelection - 1)]});
-		if ($options[($userSelection - 1)] =~ /^scheduled_/ and $cmdNumOfArgs == -1) {
+		if ($cmdNumOfArgs == -1) {
 			$cancelFile = $jobs{$options[($userSelection - 1)]};
 			$cancelFile =~ s/pid.txt$/cancel.txt/g;
 			if (open(my $fh, '>', $cancelFile)) {
@@ -77,31 +82,36 @@ sub init {
 				close $fh;
 			}
 			else {
-				#Helpers::traceLog('unable_to_create_cancel_file');
-				Helpers::retreat(['unable_to_create_file', " \"$cancelFile\"" ]);
+				Helpers::retreat(['unable_to_create_file', " \"$cancelFile\"." ]);
 			}
 		}
-		
+
 		if ($pid ne "" && !killPid($pid)) {
 			unlink($cancelFile) if(-f $cancelFile);
-			exit 0;
+			exit(0) unless($killall);
 		}
 		else {
 			if(-e $jobs{$options[($userSelection - 1)]}){
 				unlink($jobs{$options[($userSelection - 1)]});
-				if($Configuration::callerEnv eq 'SCHEDULER'){
+				if($Configuration::callerEnv eq 'BACKGROUND'){
 					Helpers::traceLog([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
 				} else {
 					Helpers::display([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
-				}				
+				}
 			} else {
-				if($Configuration::callerEnv eq 'SCHEDULER'){
+				if($Configuration::callerEnv eq 'BACKGROUND'){
 					Helpers::traceLog('no_job_is_in_progress');
 				} else {
 					Helpers::display('no_job_is_in_progress');
 				}
 				exit 0;
 			}
+		}
+
+		if($killall) {
+			exit(0) if($userSelection == scalar(@options));
+			$userSelection++;
+			goto REPEAT;
 		}
 	}
 	else {
@@ -116,23 +126,23 @@ sub init {
 #****************************************************************************************************/
 sub getPid {
 	my $parentpid;
-	if(open(my $p, '<:encoding(UTF-8)', @_)) {
+	if(open(my $p, '<', @_)) {
 		$parentpid = <$p>;
 		close($p);
 		chomp($parentpid) if($parentpid);
 	}
 	else {
-		Helpers::traceLog($Locale::strings{'failed_to_open_file'}.': '. @_);
+		Helpers::traceLog(['failed_to_open_file', ": @_"]);
 		return "";
 	}
-	
+
 	my ($findpid, $r, $pid);
 	my (@pid, @cmd);
-	
+
 	if($parentpid){
 		$findpid = qq{ps -o sid= -p$parentpid | xargs pgrep -s | xargs ps -o pid,command -p | grep idev | grep -v "grep"};
 		my @r    = `$findpid`;
-		
+
 		foreach(@r) {
 			$_ =~ s/^\s+//;
 			my ($p, $c) = split(/\s+/, $_, 2);
@@ -153,37 +163,37 @@ sub killPid {
 	$pid    =~ s/^\s+|\s+$//g;
 	return 0 if (!$pid);
 
-	my $errorFile = Helpers::getCatfile(Helpers::getServicePath(), 'kill.err');
+	my $errorFile = Helpers::getECatfile(Helpers::getServicePath(), 'kill.err');
 	my $status = system("kill -9 $pid 2>$errorFile");
 	my $errorStr;
 
 	if ($? > 0 and -e $errorFile) {
-		if (open(my $p, '<:encoding(UTF-8)', $errorFile)) {
+		if (open(my $p, '<', $errorFile)) {
 			$errorStr = <$p>;
 			close($p);
 			unlink($errorFile);
 		}
 		else {
-			
-			if($Configuration::callerEnv eq 'SCHEDULER'){
-				Helpers::traceLog($Locale::strings{'failed_to_open_file'}.': '.$errorFile);
+
+			if($Configuration::callerEnv eq 'BACKGROUND'){
+				Helpers::traceLog(['failed_to_open_file', ": $errorFile"]);
 			} else {
 				Helpers::display(['failed_to_open_file', ': ', $errorFile]);
-			}			
+			}
 		}
 		if ($errorStr =~ 'Operation not permitted') {
-			if($Configuration::callerEnv eq 'SCHEDULER'){
+			if($Configuration::callerEnv eq 'BACKGROUND'){
 				Helpers::traceLog('unable_to_kill_job');
 			} else {
 				Helpers::display('operation_not_permitted');
 			}
 		}
 		elsif ($errorStr =~ 'No such process') {
-			if($Configuration::callerEnv eq 'SCHEDULER'){
+			if($Configuration::callerEnv eq 'BACKGROUND'){
 				Helpers::traceLog('this_job_might_be_stopped_already');
 			} else {
 				Helpers::display('this_job_might_be_stopped_already');
-			}			
+			}
 		}
 		return 0;
 	}
