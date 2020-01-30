@@ -9,7 +9,6 @@ use warnings;
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
 use Helpers;
-use Strings;
 use Configuration;
 use File::Path;
 use File::Basename;
@@ -17,6 +16,8 @@ use Time::Local;
 
 my ($lastVersion, $fullFilePath) = (10, '');
 tie(my %mainMenuOptions, 'Tie::IxHash', '1' => 'display_versions_for_your_file', '2' => 'restore_a_specific_version_of_your_file');
+
+Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 init();
@@ -29,19 +30,19 @@ init();
 sub init {
 	my @parsedVersionData = '';
 
-	system('clear');
+	system(Helpers::updateLocaleCmd('clear'));
 	Helpers::loadAppPath();
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
 	Helpers::loadUsername()    or Helpers::retreat('login_&_try_again');
 	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if ($errorKey != 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if ($errorKey > 1);
 	Helpers::loadEVSBinary() or Helpers::retreat('unable_to_find_or_execute_evs_binary');
 	Helpers::isLoggedin()    or Helpers::retreat('login_&_try_again');
 
 	Helpers::displayHeader();
-	displayMainMenu();
+	Helpers::displayMainMenu(\%mainMenuOptions);
 
-	my $jobRunningDir = Helpers::getUsersInternalDirPath('restore');
+	my $jobRunningDir = Helpers::getJobsPath('restore');
 	my $userMainChoice= Helpers::getUserMenuChoice(scalar keys %mainMenuOptions);
 
 	#have to ask restore from
@@ -88,6 +89,7 @@ sub editVersionRestoreFromLocation {
 #********************************************************************************
 sub restoreVersion {
 	my $restoreRunCommand = qq(perl ') . Helpers::getAppPath() . qq(/$Configuration::idriveScripts{'restore_script'}' 2);
+	$restoreRunCommand = Helpers::updateLocaleCmd($restoreRunCommand);
 	system($restoreRunCommand);
 }
 
@@ -99,7 +101,7 @@ sub restoreVersion {
 sub createRestoresetFile {
 	my @parsedVersionData = @{$_[0]};
 
-	Helpers::display(["\n", 'provide_the_version_no_for_file', '.'], 0);
+	Helpers::display(["\n", 'provide_the_version_no_for_file', '.']);
 	my $versionNo = Helpers::getUserMenuChoice($lastVersion);
 
 	Helpers::display('');
@@ -108,12 +110,12 @@ sub createRestoresetFile {
 	sleep(2) if (Helpers::getUserConfiguration('RESTORELOCATIONPROMPT') && Helpers::editRestoreLocation(1));
 
 	#this will give file size for selected version.
-	my $fileVersionSize = (scalar @parsedVersionData > 0)? $parsedVersionData[(($versionNo - 1) * 4) + 3] : '';
+	my $fileVersionSize = (scalar @parsedVersionData > 0)? $parsedVersionData[(($versionNo - 1) * 4) + 2] : '';
 	$fileVersionSize = '' unless $fileVersionSize;
 
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('restore');
+	my $jobRunningDir  = Helpers::getJobsPath('restore');
 	my $restoresetFile = qq($jobRunningDir/$Configuration::versionRestoreFile);
-	open(FILE, ">", $restoresetFile) or Helpers::traceLog(qq($Locale::strings{'couldnt_open'} $restoresetFile $Locale::strings{'for_restore_version_option'}. $Locale::strings{'reason'}: $!));
+	open(FILE, ">", $restoresetFile) or Helpers::traceLog('couldnt_open'," $restoresetFile ",'for_restore_version_option', 'reason', ": $!");
 	chmod $Configuration::filePermission, $restoresetFile;
 	print FILE $fullFilePath . '_IBVER' . $versionNo . "\n" . $fileVersionSize . "\n";
 	close FILE;
@@ -125,7 +127,7 @@ sub createRestoresetFile {
 # Subroutine			: displayTableforVersionData
 # Objective				: This function will show version details in tabular form to user
 # Added By				: Dhritikana Kalita
-# Modified				: Sabin Cheruvattil
+# Modified				: Sabin Cheruvattil, Senthil Pandian
 #*************************************************************************************************
 sub displayTableforVersionData {
 	my @parsedVersionData = @{$_[0]};
@@ -147,7 +149,7 @@ sub displayTableforVersionData {
 	if ($tableContent ne '') {
 		Helpers::display([$tableHeader . $tableContent]);
 	} else {
-		Helpers::display([qq(\n$Locale::strings{'no_version_found'}.\n$Locale::strings{'exiting_title'}...\n)]);
+		Helpers::display(["\n",'no_version_found',"\n",'exiting_title',"...\n"]);
 		exit(0);
 	}
 }
@@ -155,14 +157,14 @@ sub displayTableforVersionData {
 #********************************************************************************
 # Subroutine			: getFileVersions.
 # Objective				: Gets versions of user's requested file
-# Modified By			: Sabin Cheruvattil
+# Modified By			: Sabin Cheruvattil, Senthil Pandian
 #********************************************************************************
 sub getFileVersions {
 	Helpers::createUTF8File('FILEVERSION', $fullFilePath) or Helpers::retreat('failed_to_create_utf8_file');
 	my @result = Helpers::runEVS('item');
 	my $errorMessageHandler = {
-								$Locale::strings{'no_version_found'} => qq($Locale::strings{'no_version_found_for_given_file'}. ),
-								$Locale::strings{'path_not_found'} => qq($Locale::strings{'could_not_find_given_file'}.),
+								Helpers::getStringConstant('no_version_found') => '"'.Helpers::getStringConstant('no_version_found_for_given_file').'."',
+								Helpers::getStringConstant('path_not_found') => '"'.Helpers::getStringConstant('could_not_find_given_file').'."',
 								'cleanupOperation' => sub {Helpers::display(['exiting_title']); exit(0);}
 							};
 
@@ -233,16 +235,6 @@ sub getFilePath {
 
 	my $fullFilePath = (substr($filePath, 0, 1) ne "/")? $fileRestoreHost . "/" . $filePath : $fileRestoreHost . $filePath;
 	return $fullFilePath;
-}
-
-#****************************************************************************************************
-# Subroutine			: displayMainMenu
-# Objective				: This subroutine displays the date options menu
-# Added By				: Sabin Cheruvattil
-#****************************************************************************************************/
-sub displayMainMenu {
-	Helpers::display(['menu_options_title', ':', "\n"]);
-	Helpers::display([map{$_ . ") ", $Locale::strings{$mainMenuOptions{$_}} . "\n"} keys %mainMenuOptions], 0);
 }
 
 1;

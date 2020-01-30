@@ -22,31 +22,38 @@ init();
 # Subroutine			: init
 # Objective				: This function is entry point for the script
 # Added By				: Yogesh Kumar
-# Modified By			: Sabin Cheruvattil
+# Modified By			: Sabin Cheruvattil, Senthil Pandian
 #****************************************************************************************************/
 sub init {
 	Helpers::loadAppPath();
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
 	$Configuration::callerEnv = 'BACKGROUND' unless ($cmdNumOfArgs == -1);
-	my $killall = (defined($ARGV[3]) && $ARGV[3] eq 'all')? 1 : 0;
+	my $killall = (defined($ARGV[3]) && $ARGV[3] eq 'allType')? 1 : 0;
 
-	if ($cmdNumOfArgs == 1) {
-		Helpers::setUsername($ARGV[1]) if($ARGV[1] ne '-');
+	if ($cmdNumOfArgs >= 1 and $ARGV[1] ne '-') {
+		Helpers::setUsername($ARGV[1]);
 	}
 	else {
 		Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
 	}
 
+	$Configuration::mcUser = $ARGV[4] if(defined($ARGV[4])); #Added to terminate all profile's jobs 
 	my $errorKey = Helpers::loadUserConfiguration();
-	#Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($Configuration::callerEnv ne 'BACKGROUND' and $errorKey == 104);
 	Helpers::loadEVSBinary()  or Helpers::retreat('unable_to_find_or_execute_evs_binary');
 	Helpers::isLoggedin()     or Helpers::retreat('login_&_try_again') if($Configuration::callerEnv ne 'BACKGROUND');
 	Helpers::displayHeader() unless($cmdNumOfArgs == 1);
 
-	my %jobs = Helpers::getRunningJobs($ARGV[0] || undef, $ARGV[2] || 0);
+	my $jobName = undef;
+	$jobName = $ARGV[0] if(defined($ARGV[0]) and $ARGV[0] ne 'allOp');
+	my %jobs = Helpers::getRunningJobs($jobName, $ARGV[2] || 0);
 	if (!%jobs) {
 		if ($Configuration::callerEnv eq 'BACKGROUND'){
-			Helpers::traceLog($ARGV[0],'_not_running');
+			if($ARGV[0] eq 'allOp'){
+				Helpers::traceLog('no_job_is_in_progress');
+			} else {
+				Helpers::traceLog($ARGV[0].'_not_running');
+			}
 		} else {
 			Helpers::display('no_job_is_in_progress');
 		}
@@ -54,7 +61,7 @@ sub init {
 	}
 
 	my @options = getOptions(%jobs);
-	my $userSelection;
+	my $userSelection = 1;
 
 	if ($Configuration::callerEnv ne 'BACKGROUND') {
 		if (scalar(@options) > 1) {
@@ -62,10 +69,8 @@ sub init {
 		}
 
 		Helpers::displayMenu('select_the_job_from_the_above_list',@options);
+		Helpers::display('');
 		$userSelection = Helpers::getUserMenuChoice(scalar(@options));
-	}
-	else {
-		$userSelection = 1;
 	}
 
 REPEAT:
@@ -73,17 +78,24 @@ REPEAT:
 	if (Helpers::validateMenuChoice($userSelection, 1, scalar(@options))) {
 		$options[($userSelection - 1)] =~ s/stop_//g;
 		my $pid = getPid($jobs{$options[($userSelection - 1)]});
+		$cancelFile = $jobs{$options[($userSelection - 1)]};
+		$cancelFile =~ s/pid.txt$/exitError.txt/g;
+
 		if ($cmdNumOfArgs == -1) {
-			$cancelFile = $jobs{$options[($userSelection - 1)]};
-			$cancelFile =~ s/pid.txt$/cancel.txt/g;
 			if (open(my $fh, '>', $cancelFile)) {
 				Helpers::traceLog('Operation Cancelled by user');
-				print $fh "Operation could not be completed, Reason: Operation Cancelled by user";
+				print $fh Helpers::getStringConstant('operation_cancelled_by_user');
 				close $fh;
 			}
 			else {
 				Helpers::retreat(['unable_to_create_file', " \"$cancelFile\"." ]);
 			}
+		}
+		elsif (defined($ARGV[5])) {
+			unless(Helpers::fileWrite($cancelFile,Helpers::getStringConstant($ARGV[5]))) {
+				Helpers::retreat(['unable_to_create_file', " \"$cancelFile\"." ]);
+			}
+			Helpers::traceLog(Helpers::getStringConstant($ARGV[5]));
 		}
 
 		if ($pid ne "" && !killPid($pid)) {
@@ -91,7 +103,7 @@ REPEAT:
 			exit(0) unless($killall);
 		}
 		else {
-			if(-e $jobs{$options[($userSelection - 1)]}){
+			if (-e $jobs{$options[($userSelection - 1)]}) {
 				unlink($jobs{$options[($userSelection - 1)]});
 				if($Configuration::callerEnv eq 'BACKGROUND'){
 					Helpers::traceLog([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
@@ -104,7 +116,7 @@ REPEAT:
 				} else {
 					Helpers::display('no_job_is_in_progress');
 				}
-				exit 0;
+				exit(0);
 			}
 		}
 
@@ -141,6 +153,7 @@ sub getPid {
 
 	if($parentpid){
 		$findpid = qq{ps -o sid= -p$parentpid | xargs pgrep -s | xargs ps -o pid,command -p | grep idev | grep -v "grep"};
+		$findpid = Helpers::updateLocaleCmd($findpid);
 		my @r    = `$findpid`;
 
 		foreach(@r) {
@@ -164,7 +177,7 @@ sub killPid {
 	return 0 if (!$pid);
 
 	my $errorFile = Helpers::getECatfile(Helpers::getServicePath(), 'kill.err');
-	my $status = system("kill -9 $pid 2>$errorFile");
+	my $status = system(Helpers::updateLocaleCmd("kill $pid 2>$errorFile"));
 	my $errorStr;
 
 	if ($? > 0 and -e $errorFile) {

@@ -11,10 +11,11 @@ use warnings;
 our @propFields = (
 	'chk_update', 'fail_val' , 'ignore_accesserr',
 	'chk_asksave', 'chk_multiupld' , 'show_hidden',
-	'slide_throttle', 'arch_cleanup_checked' , 'freq_days',
-	'freq_percent', 'DefaultBackupSet' , 'LocalBackupSet',
-	'lst_partexclude', 'nxttrftime' , 'freq',
-	'cutoff', 'email' , 'mailnoti'
+	'slide_throttle', 'notify_missing', 'missing_val',
+	'arch_cleanup_checked', 'freq_days', 'freq_percent',
+	'DefaultBackupSet' , 'LocalBackupSet', 'lst_partexclude',
+	'nxttrftime' , 'freq', 'cutoff',
+	'email' , 'mailnoti'
 );
 
 my %prop = (
@@ -47,7 +48,7 @@ my %prop = (
 		}
 		else {
 			my @d = ('sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat');
-			@v = $_[0]->{'value'} =~ /(\d)/g;
+			@v = split('', $_[0]->{'value'});
 			if (scalar @v == 7) {
 				$f = 'daily';
 			}
@@ -123,7 +124,8 @@ my %prop = (
 	'bkpset_linux' => sub {
 		my $bsf = Helpers::getJobsPath($_[0], 'file');
 		my %backupSet;
-		my $userHomeDir = `echo ~`;
+		my $userHomeDirCmd = Helpers::updateLocaleCmd('echo ~');
+		my $userHomeDir = `$userHomeDirCmd`;
 		chomp($userHomeDir);
 
 		foreach my $fn (keys %{$_[1]}) {
@@ -133,21 +135,15 @@ my %prop = (
 			}
 		}
 
-		if (-e "$bsf.info" and !-z "$bsf.info") {
-			if (open(my $bsContents, '<', ("$bsf.info"))) {
-				while(my $filename = <$bsContents>) {
-					chomp($filename);
-					my $fileType = <$bsContents>;
-					chomp($fileType);
-
-					next if (exists $_[2]->{$filename} and not exists $_[1]->{$filename});
-					unless (exists $_[1]->{$filename} and ($_[1]->{$filename}{'type'} eq $fileType) and $_[1]->{$filename}{'disabled'}) {
-						$backupSet{$filename}{'type'} = $fileType;
-					}
-
-					delete $_[1]->{$filename} if (exists $_[1]->{$filename});
+		if (-e "$bsf.json" and !-z "$bsf.json") {
+			my %backupSetInfo = %{JSON::from_json(Helpers::getFileContents("$bsf.json"))};
+			foreach my $filename (keys %backupSetInfo) {
+				next if (exists $_[2]->{$filename} and not exists $_[1]->{$filename});
+				unless (exists $_[1]->{$filename} and ($_[1]->{$filename}{'type'} eq $backupSetInfo{$filename}{'type'}) and $_[1]->{$filename}{'disabled'}) {
+					$backupSet{$filename}{'type'} = $backupSetInfo{$filename}{'type'};
 				}
-				close($bsContents);
+
+				delete $_[1]->{$filename} if (exists $_[1]->{$filename});
 			}
 		}
 
@@ -218,21 +214,33 @@ sub parseFilenames {
 	foreach (split(/\n/, $_[0]->{$_[1]})) {
 		if ($_ =~ /\\0$/) {
 			$filename = $_[2]? Helpers::urlDecode(substr($_, 0, -2)) : parseQuote(substr($_, 0, -2));
+			if (utf8::is_utf8($filename)) {
+				utf8::downgrade($filename);
+			}
 			$fileInfo{$filename}{'type'} = 'd';
 			$fileInfo{$filename}{'disabled'} = 1;
 		}
 		elsif ($_ =~ /0$/) {
 			$filename = $_[2]? Helpers::urlDecode(substr($_, 0, -1)) : parseQuote(substr($_, 0, -1));
+			if (utf8::is_utf8($filename)) {
+				utf8::downgrade($filename);
+			}
 			$fileInfo{$filename}{'type'} = 'f';
 			$fileInfo{$filename}{'disabled'} = 1;
 		}
 		elsif ($_ =~ /\\1$/) {
 			$filename = $_[2]? Helpers::urlDecode(substr($_, 0, -2)) : parseQuote(substr($_, 0, -2));
+			if (utf8::is_utf8($filename)) {
+				utf8::downgrade($filename);
+			}
 			$fileInfo{$filename}{'type'} = 'd';
 			$fileInfo{$filename}{'disabled'} = 0;
 		}
 		elsif ($_ =~ /1$/) {
 			$filename = $_[2]? Helpers::urlDecode(substr($_, 0, -1)) : parseQuote(substr($_, 0, -1));
+			if (utf8::is_utf8($filename)) {
+				utf8::downgrade($filename);
+			}
 			$fileInfo{$filename}{'type'} = 'f';
 			$fileInfo{$filename}{'disabled'} = 0;
 		}
@@ -252,7 +260,7 @@ sub parseQuote {
 
 	$_[0] =~ s/&apos;/'/;
 	$_[0] =~ s/&quot;/"/;
-	return $_[0];
+	return Helpers::urlDecode($_[0]);
 }
 
 #*****************************************************************************************************

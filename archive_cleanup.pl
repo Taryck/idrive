@@ -11,7 +11,6 @@ use warnings;
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
 use Helpers;
-use Strings;
 use Configuration;
 
 my ($logOutputFile, $errMsg) = ('') x 2;
@@ -24,6 +23,7 @@ $SIG{TERM} = \&cancelProcess;
 $SIG{TSTP} = \&cancelProcess;
 $SIG{QUIT} = \&cancelProcess;
 
+Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 init();
 
@@ -35,7 +35,6 @@ init();
 sub init {
 	Helpers::loadAppPath();
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
-
 	if ($#ARGV > 0) {			#For periodic operation
 		Helpers::setUsername($ARGV[0]);
 		$jobType = 'periodic';
@@ -50,7 +49,7 @@ sub init {
 	}
 
 	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);
 
 	if($jobType eq 'manual'){
 		Helpers::isLoggedin() or Helpers::retreat('login_&_try_again');
@@ -67,12 +66,12 @@ sub init {
 	if($status eq 'FAILURE' && $errStr ne ''){
 		Helpers::retreat($errStr);
 	}
-	
+
 	my $archivePercentage = getPercentageForCleanup();
 	# check if any backup job in progress and if so exit
 	getRunningBackupJobs();
 
-	my $jobRunningDir = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir = Helpers::getJobsPath('archive');
 	Helpers::createDir($jobRunningDir, 1) unless(-e $jobRunningDir);
 
 	#Checking if archive job is already in progress
@@ -116,7 +115,7 @@ sub getRunningBackupJobs {
 			@runningJobs = keys %runningJobs;
 			if($jobType eq 'periodic' and scalar(@runningJobs)){
 				$runningJobName = lc($runningJobs[0]);
-				Helpers::traceLog($Locale::strings{'delaying_cleanup_operation_reason'}.$Locale::strings{$runningJobName.'_running'});
+				Helpers::traceLog('delaying_cleanup_operation_reason',$runningJobName.'_running');
 				sleep(60);
 				next;
 			}
@@ -140,7 +139,7 @@ sub getRunningBackupJobs {
 # Added By				: Senthil Pandian
 #****************************************************************************************************/
 sub getArchiveFileList {
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir  = Helpers::getJobsPath('archive');
 	my $isDedup  	   = Helpers::getUserConfiguration('DEDUP');
 	my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
 	$backupLocation = '/'.$backupLocation unless($backupLocation =~ m/^\//);
@@ -148,7 +147,7 @@ sub getArchiveFileList {
 	#Displaying progress of file scanning with count
 	if($jobType eq 'manual'){
 		Helpers::display("\n");
-		Helpers::getCursorPos(3,$Locale::strings{'scanning_files'}."\n");
+		Helpers::getCursorPos(3,Helpers::getStringConstant('scanning_files')."\n");
 	}
 
 	my @itemsStat = checkBackupsetItemStatus();
@@ -156,13 +155,13 @@ sub getArchiveFileList {
 
 	my $archiveFileList = $jobRunningDir.'/'.$Configuration::archiveFileResultFile;
 	if(!open(ARCHIVE_FILE_HANDLE, ">", $archiveFileList)) {
-		Helpers::traceLog($Locale::strings{'failed_to_open_file'}.":$archiveFileList. Reason:$!");
+		Helpers::traceLog('failed_to_open_file',":$archiveFileList. Reason:$!");
 		exitCleanup();
 	}
 
 	my $archiveFolderList = $jobRunningDir.'/'.$Configuration::archiveFolderResultFile;
 	if(!open(ARCHIVE_FOLDER_HANDLE, ">", $archiveFolderList)) {
-		Helpers::traceLog($Locale::strings{'failed_to_open_file'}.":$archiveFolderList. Reason:$!");
+		Helpers::traceLog('failed_to_open_file',":$archiveFolderList. Reason:$!");
 		exitCleanup();
 	}
 
@@ -177,6 +176,7 @@ sub getArchiveFileList {
 				next;
 			}
 			my $itemName = $fields[0]{'fname'};
+			Helpers::replaceXMLcharacters(\$itemName);
 			$itemName =~ s/^[\/]+/\//g;
 			if($fields[0]{'status'} =~ /directory exists/) {
 				if(-e $itemName){
@@ -192,7 +192,7 @@ sub getArchiveFileList {
 					$notExistCount++;
 					print ARCHIVE_FILE_HANDLE $fields[0]{'fname'}."\n";
 				}
-				my $progressMsg = $Locale::strings{'files_scanned'}." $totalFileCount\nScanning... $fields[0]{'fname'}";
+				my $progressMsg = Helpers::getStringConstant('files_scanned')." $totalFileCount\nScanning... $fields[0]{'fname'}";
 				Helpers::displayProgress($progressMsg,2) if($jobType eq 'manual');
 			}
 		}
@@ -203,6 +203,7 @@ sub getArchiveFileList {
 				next;
 			}
 			my $itemName = $fields[0]{'fname'};
+			Helpers::replaceXMLcharacters(\$itemName);
 			my $tempItemName = $itemName;
 			if($backupLocation ne '/'){
 				$tempItemName =~ s/$backupLocation//;
@@ -223,7 +224,7 @@ sub getArchiveFileList {
 					$notExistCount++;
 					print ARCHIVE_FILE_HANDLE $itemName."\n";
 				}
-				my $progressMsg = $Locale::strings{'files_scanned'}." $totalFileCount\nScanning... $tempItemName";
+				my $progressMsg = Helpers::getStringConstant('files_scanned')." $totalFileCount\nScanning... $tempItemName";
 				Helpers::displayProgress($progressMsg,2) if($jobType eq 'manual');
 			}
 		}
@@ -234,7 +235,7 @@ sub getArchiveFileList {
 	}
 	close(ARCHIVE_FILE_HANDLE);
 	close(ARCHIVE_FOLDER_HANDLE);
-	Helpers::displayProgress($Locale::strings{'scan_completed'},2) if($jobType eq 'manual');
+	Helpers::displayProgress(Helpers::getStringConstant('scan_completed'),2) if($jobType eq 'manual');
 	return 0;
 }
 
@@ -245,36 +246,33 @@ sub getArchiveFileList {
 #****************************************************************************************************/
 sub checkBackupsetItemStatus
 {
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir  = Helpers::getJobsPath('archive');
 	my $isDedup  	   = Helpers::getUserConfiguration('DEDUP');
 	my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
-	$backupLocation = '/'.$backupLocation  unless($backupLocation =~ m/^\//);
+	$backupLocation = '/'.$backupLocation unless($backupLocation =~ m/^\//);
 
-	my $backupsetFilePath = Helpers::getUsersInternalDirPath('backup')."/".$Configuration::backupsetFile;
+	my $backupsetFilePath = Helpers::getJobsPath('backup')."/".$Configuration::backupsetFile;
 	if(!open(BACKUPLIST, $backupsetFilePath)){
-		$errMsg = $Locale::strings{'failed_to_open_file'}.": $backupsetFilePath, Reason: $!";
+		$errMsg = Helpers::getStringConstant('failed_to_open_file').": $backupsetFilePath, Reason: $!";
 		return 0;
 	}
 	my $tempBackupsetFilePath = $jobRunningDir."/".$Configuration::tempBackupsetFile;
 	if(!open(BACKUPLISTNEW, ">", $tempBackupsetFilePath)){
-		$errMsg = $Locale::strings{'failed_to_open_file'}.": $tempBackupsetFilePath, Reason: $!";
+		$errMsg = Helpers::getStringConstant('failed_to_open_file').": $tempBackupsetFilePath, Reason: $!";
 		return 0;
 	}
 
 	my $finalBackupLocation= '';
-	$finalBackupLocation = $backupLocation		if($isDedup eq 'off' and $backupLocation ne '/');
+	$finalBackupLocation = $backupLocation if($isDedup eq 'off' and $backupLocation ne '/');
 
 	my @arryToCheck = ();
 	while(<BACKUPLIST>) {
 		Helpers::Chomp(\$_);
 		next	if($_ eq "");
 
-		my $rItem = $_;
+		my $rItem = $finalBackupLocation.$_;
 		if(substr($_, 0, 1) ne "/") {
 			$rItem = "/".$_;
-		}
-		else {
-			$rItem = $finalBackupLocation.$_;
 		}
 
 		if ( grep{ $rItem."\n" eq $_ } @arryToCheck ) {
@@ -302,11 +300,14 @@ sub checkBackupsetItemStatus
 	unlink($tempBackupsetFilePath);
 
 	if(-s $evsErrorFile > 0) {
-		my $errStr = Helpers::checkExitError($evsErrorFile,'archive');
-		if($errStr and $errStr =~ /1-/){
-			$errStr =~ s/1-//;
-			#$errMsg = $errStr;
-			exitCleanup($errStr);
+		unless(Helpers::checkAndUpdateServerAddr($evsErrorFile)) {
+			exitCleanup(Helpers::getStringConstant('operation_could_not_be_completed_please_try_again'));
+		} else {
+			my $errStr = Helpers::checkExitError($evsErrorFile,'archive');
+			if($errStr and $errStr =~ /1-/){
+				$errStr =~ s/1-//;
+				exitCleanup($errStr);
+			}
 		}
 		return 0;
 	}
@@ -320,7 +321,7 @@ sub checkBackupsetItemStatus
 # Added By				: Senthil Pandian
 #********************************************************************************
 sub startSearchOperation{
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir  = Helpers::getJobsPath('archive');
 	my $isDedup  	   = Helpers::getUserConfiguration('DEDUP');
 	my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
 	   $backupLocation = '/'.$backupLocation unless($backupLocation =~ m/^\//);
@@ -340,7 +341,8 @@ sub startSearchOperation{
 	#Checking pid & cancelling process if job terminated by user
 	my $pidPath = "$jobRunningDir/pid.txt";
 	cancelProcess()		unless(-e $pidPath);
-
+	my $searchRetryCount = 5;
+RETRY:
 	Helpers::createUTF8File(['SEARCH',$tempSearchUTFpath],
 				$tempEvsOutputFile,
 				$tempEvsErrorFile,
@@ -355,11 +357,17 @@ sub startSearchOperation{
 		next;
 	}
 	if(-s $tempEvsOutputFile == 0 and -s $tempEvsErrorFile > 0) {
-		my $errStr = Helpers::checkExitError($tempEvsErrorFile,'archive');
-		if($errStr and $errStr =~ /1-/){
-			$errStr =~ s/1-//;
-			#$errMsg = $errStr;
-			exitCleanup($errStr);
+		unless(Helpers::checkAndUpdateServerAddr($tempEvsErrorFile)) {
+			#exitCleanup(Helpers::getStringConstant('operation_could_not_be_completed_please_try_again'));
+			Helpers::traceLog("startSearchOperation : RETRY");
+			$searchRetryCount--;
+			goto RETRY if($searchRetryCount);
+		} else {
+			my $errStr = Helpers::checkExitError($tempEvsErrorFile,'archive');
+			if($errStr and $errStr =~ /1-/){
+				$errStr =~ s/1-//;
+				exitCleanup($errStr);
+			}
 		}
 		return 0;
 	}
@@ -367,17 +375,17 @@ sub startSearchOperation{
 	my $tempRemoteFolder = $remoteFolder;
 	   $tempRemoteFolder = substr($tempRemoteFolder,1) if(substr($tempRemoteFolder,0,1) eq '/');
 	   chop($tempRemoteFolder) if(substr($tempRemoteFolder,-1,1) eq '/');
-	   $tempRemoteFolder =~ s/[\s]+|[\/]+/_/g; #Replacing space & slash(/) with underscore(_)
+	   $tempRemoteFolder =~ s/[\s]+|[\/]+|[\']+/_/g; #Replacing space, single quote & slash(/) with underscore(_)
 	my $tempArchiveListFile  = $searchDir.'/'."$tempRemoteFolder.txt";
 
-	open my $TEMPARCHIVELIST, ">>", $tempArchiveListFile or ($errStr = $Locale::strings{'failed_to_open_file'}.":$tempArchiveListFile. Reason:$!");
+	open my $TEMPARCHIVELIST, ">>", $tempArchiveListFile or ($errStr = Helpers::getStringConstant('failed_to_open_file').":$tempArchiveListFile. Reason:$!");
 	if($errStr ne ""){
 		Helpers::traceLog($errStr);
 		return 0;
 	}
 
 	# parse search output.
-	open my $SEARCHOUTFH, "<", $tempEvsOutputFile or ($errStr = $Locale::strings{'failed_to_open_file'}.":$tempEvsOutputFile. Reason:$!");
+	open my $SEARCHOUTFH, "<", $tempEvsOutputFile or ($errStr = Helpers::getStringConstant('failed_to_open_file').":$tempEvsOutputFile. Reason:$!");
 	if($errStr ne ""){
 		Helpers::traceLog($errStr);
 		return 0;
@@ -414,9 +422,8 @@ sub startSearchOperation{
 			#print "\ntemp tmpLine::$tmpLine\n";
 			if($tmpLine =~ /fname/) {
 				my %fileName = Helpers::parseXMLOutput(\$tmpLine);
-				if(scalar(keys %fileName) < 5){
-					next;
-				}
+				next if (scalar(keys %fileName) < 5 or !defined($fileName{'fname'}));
+
 				my $temp = $fileName{'fname'};
 				#print "temp fileName::$temp\n";
 				Helpers::replaceXMLcharacters(\$temp);
@@ -428,7 +435,7 @@ sub startSearchOperation{
 				print $TEMPARCHIVELIST $temp."\n";
 				push(@fileList, $temp);
 				$notExistCount++;
-				my $progressMsg = $Locale::strings{'files_scanned'}." $totalFileCount\nScanning... $tempItemName";
+				my $progressMsg = Helpers::getStringConstant('files_scanned')." $totalFileCount\nScanning... $tempItemName";
 				Helpers::displayProgress($progressMsg,2) if($jobType eq 'manual');
 			}
 			elsif($tmpLine ne ''){
@@ -452,7 +459,6 @@ sub startSearchOperation{
 		my $errStr = Helpers::checkExitError($tempEvsErrorFile,'archive');
 		if($errStr and $errStr =~ /1-/){
 			$errStr =~ s/1-//;
-			#$errMsg = $errStr;
 			exitCleanup($errStr);
 		}
 	}
@@ -468,7 +474,7 @@ sub startSearchOperation{
 # Added By				: Senthil Pandian
 #********************************************************************************
 sub startEnumerateOperation{
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir  = Helpers::getJobsPath('archive');
 	my $isDedup  	   = Helpers::getUserConfiguration('DEDUP');
 	my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
 	   $backupLocation = '/'.$backupLocation unless($backupLocation =~ m/^\//);
@@ -479,7 +485,7 @@ sub startEnumerateOperation{
 	my $errStr = "";
 	my $tempPath = $remoteFolder;
 	   $tempPath =~ s/[\/]$//g; #Removing last "/"
-	   $tempPath =~ s/[\s]+|[\/]+/_/g; #Replacing space & slash(/) with underscore(_)
+	   $tempPath =~ s/[\s]+|[\/]+|[\']+/_/g; #Replacing space, single quote & slash(/) with underscore(_)
 
 	my $tempAuthListUTFpath = $searchDir.'/'.$Configuration::utf8File."_AuthList";
 	my $tempEvsOutputFile   = $searchDir.'/'.$Configuration::evsOutputFile."_AuthList";
@@ -503,17 +509,19 @@ sub startEnumerateOperation{
 		next;
 	}
 	if(-s $tempEvsOutputFile == 0 and -s $tempEvsErrorFile > 0) {
-		my $errStr = Helpers::checkExitError($tempEvsErrorFile,'archive',1);
-		if($errStr and $errStr =~ /1-/){
-			$errStr =~ s/1-//;
-			#$errMsg = $errStr;
-			exitCleanup($errStr);
+		if(Helpers::checkAndUpdateServerAddr($tempEvsErrorFile)) {
+			my $errStr = Helpers::checkExitError($tempEvsErrorFile,'archive');
+			if($errStr and $errStr =~ /1-/){
+				$errStr =~ s/1-//;
+				exitCleanup($errStr);
+			}
 		}
+		Helpers::traceLog("startEnumerateOperation : RETRY : $remoteFolder");
 		push(@dirListForAuth,$remoteFolder);
 		return 0;
 	}
 	# parse search output.
-	open my $OUTFH, "<", $tempEvsOutputFile or ($errStr = $Locale::strings{'failed_to_open_file'}.": $tempEvsOutputFile, Reason: $!");
+	open my $OUTFH, "<", $tempEvsOutputFile or ($errStr = Helpers::getStringConstant('failed_to_open_file').": $tempEvsOutputFile, Reason: $!");
 	if($errStr ne ""){
 		Helpers::traceLog($errStr);
 		return 0;
@@ -558,9 +566,8 @@ sub startEnumerateOperation{
 		foreach my $tmpLine (@resultList){
 			if($tmpLine =~ /<item/) {
 				my %fileName = Helpers::parseXMLOutput(\$tmpLine);
-				if(scalar(keys %fileName) < 5){
-					next;
-				}
+				next if (scalar(keys %fileName) < 5 or !defined($fileName{'fname'}));
+
 				my $itemName = $fileName{'fname'};
 				$itemName = $remoteFolder.$itemName unless($itemName =~/\//);
 				Helpers::replaceXMLcharacters(\$itemName);
@@ -584,7 +591,7 @@ sub startEnumerateOperation{
 						$notExistCount++;
 						print ARCHIVE_FILE_HANDLE $itemName."\n";
 					}
-					my $progressMsg = $Locale::strings{'files_scanned'}." $totalFileCount\nScanning... $itemName";
+					my $progressMsg = Helpers::getStringConstant('files_scanned')." $totalFileCount\nScanning... $itemName";
 					Helpers::displayProgress($progressMsg,2) if($jobType eq 'manual');
 				}
 			}
@@ -606,7 +613,6 @@ sub startEnumerateOperation{
 		my $errStr = Helpers::checkExitError($tempEvsErrorFile,'archive',1);
 		if($errStr and $errStr =~ /1-/){
 			$errStr =~ s/1-//;
-			#$errMsg = $errStr;
 			exitCleanup($errStr);
 		}
 		push(@dirListForAuth,$remoteFolder);
@@ -625,7 +631,7 @@ sub startEnumerateOperation{
 sub deleteArchiveFiles
 {
 	my $isDedup  	      = Helpers::getUserConfiguration('DEDUP');
-	my $jobRunningDir     = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir     = Helpers::getJobsPath('archive');
 	my $itemStatusUTFpath = $jobRunningDir.'/'.$Configuration::utf8File;
 	my $evsOutputFile     = $jobRunningDir.'/'.$Configuration::evsOutputFile;
 	my $evsErrorFile      = $jobRunningDir.'/'.$Configuration::evsErrorFile;
@@ -647,21 +653,22 @@ sub deleteArchiveFiles
 
 	#Opening to log file handle
 	if(!open(ARCHIVELOG, ">", $logOutputFile)){
-		Helpers::traceLog($Locale::strings{'failed_to_open_file'}.": $logOutputFile, Reason: $!");
+		Helpers::traceLog('failed_to_open_file',": $logOutputFile, Reason: $!");
 		return 0;
 	}
 
-	print ARCHIVELOG $Locale::strings{'start_time'}.$logStartTime."\n";
-	print ARCHIVELOG ucfirst($Locale::strings{'username'}).": ".Helpers::getUsername()."\n";
+	print ARCHIVELOG Helpers::getStringConstant('start_time').$logStartTime."\n";
+	print ARCHIVELOG ucfirst(Helpers::getStringConstant('username')).": ".Helpers::getUsername()."\n";
 
-	my $host = `hostname`;
-	chomp($host);	
-	print ARCHIVELOG "Machine Name:".$host."\n";
+	my $host = Helpers::updateLocaleCmd('hostname');
+	$host = `$host`;
+	chomp($host);
+	print ARCHIVELOG "Machine Name: ".$host."\n";
 
 	if($jobType eq 'periodic'){
-		print ARCHIVELOG $Locale::strings{'periodic_cleanup_operation'}."\n\n";
+		print ARCHIVELOG Helpers::getStringConstant('periodic_cleanup_operation')."\n\n";
 	} else {
-		print ARCHIVELOG $Locale::strings{'archive_cleanup_operation'}."\n\n";
+		print ARCHIVELOG Helpers::getStringConstant('archive_cleanup_operation')."\n\n";
 	}
 
 	#Checking pid & cancelling process if job terminated by user
@@ -672,9 +679,10 @@ sub deleteArchiveFiles
 		#Displaying progress of file deletion
 		if($jobType eq 'manual'){
 			Helpers::display("\n");
-			Helpers::getCursorPos(2,$Locale::strings{'preparing_to_delete'});
+			Helpers::getCursorPos(2,Helpers::getStringConstant('preparing_to_delete'));
 		}
-
+		my $deleteRetryCount = 5;
+FILERETRY:
 		#Deleting files
 		if(-e $archiveFileList and !-z $archiveFileList){
 			Helpers::createUTF8File(['DELETE',$itemStatusUTFpath],
@@ -693,25 +701,31 @@ sub deleteArchiveFiles
 				next;
 			}
 
-			if(-z $evsOutputFile and !-z $evsErrorFile) {
-				my $errStr = Helpers::checkExitError($evsErrorFile,'archive');
-				if($errStr and $errStr =~ /1-/){
-					$errStr =~ s/1-//;
-					#$errMsg = $errStr;
-					exitCleanup($errStr);
+			if(-s $evsOutputFile < 5 and !-z $evsErrorFile) {
+				unless(Helpers::checkAndUpdateServerAddr($evsErrorFile)) {
+					#exitCleanup(Helpers::getStringConstant('operation_could_not_be_completed_please_try_again'));
+					Helpers::traceLog("Deleting files : RETRY");
+					$deleteRetryCount--;
+					goto FILERETRY if($deleteRetryCount);
+				} else {
+					my $errStr = Helpers::checkExitError($evsErrorFile,'archive');
+					if($errStr and $errStr =~ /1-/){
+						$errStr =~ s/1-//;
+						exitCleanup($errStr);
+					}
 				}
 				return 0;
 			}
 
 			# parse delete output.
-			open OUTFH, "<", $evsOutputFile or ($errStr = $Locale::strings{'failed_to_open_file'}.": $evsOutputFile, Reason: $!");
+			open OUTFH, "<", $evsOutputFile or ($errStr = Helpers::getStringConstant('failed_to_open_file').": $evsOutputFile, Reason: $!");
 			if($errStr ne ""){
 				Helpers::traceLog($errStr);
 				return 0;
 			}
 
 			# Appending deleted files/folders details to log
-			print ARCHIVELOG $Locale::strings{'deleted_content'}."\n";
+			print ARCHIVELOG Helpers::getStringConstant('deleted_content')."\n";
 			$filesToDelete	  = 1;
 			my ($buffer,$lastLine) = ("") x 2;
 			my $skipFlag = 0;
@@ -741,9 +755,8 @@ sub deleteArchiveFiles
 				foreach my $tmpLine (@resultList){
 					if($tmpLine =~ /<item/){
 						my %fileName = Helpers::parseXMLOutput(\$tmpLine);
-						if(scalar(keys %fileName) < 2){
-							next;
-						}
+						next if (scalar(keys %fileName) < 2 or !defined($fileName{'fname'})) ;
+
 						my $op		 = $fileName{'op'};
 						my $fileName = $fileName{'fname'};
 						Helpers::replaceXMLcharacters(\$fileName);
@@ -764,7 +777,7 @@ sub deleteArchiveFiles
 			if(-e $evsErrorFile and !-z $evsErrorFile) {
 				#Reading error file and appending to log file
 				if(!open(TEMPERRORFILE, "< $evsErrorFile")) {
-					Helpers::traceLog($Locale::strings{'failed_to_open_file'}.":$evsErrorFile, Reason:$!");
+					Helpers::traceLog('failed_to_open_file',":$evsErrorFile, Reason:$!");
 				}
 				$errorContent .= <TEMPERRORFILE>;
 				close TEMPERRORFILE;
@@ -773,6 +786,8 @@ sub deleteArchiveFiles
 			unlink($evsErrorFile);
 		}
 
+		$deleteRetryCount = 5;
+EMPTYDIRRETRY:
 		#Deleting folders
 		if(-e $archiveFolderList and !-z $archiveFolderList){
 			Helpers::createUTF8File(['DELETE',$itemStatusUTFpath],
@@ -789,18 +804,25 @@ sub deleteArchiveFiles
 				sleep(2);
 				next;
 			}
-			if((-f $evsOutputFile && -z $evsOutputFile) && (-f $evsErrorFile && !-z $evsErrorFile)) {
-				my $errStr = Helpers::checkExitError($evsErrorFile,'archive');
-				if($errStr and $errStr =~ /1-/){
-					$errStr =~ s/1-//;
-					#$errMsg = $errStr;
-					exitCleanup($errStr);
+
+			if((-f $evsOutputFile && (-s $evsOutputFile < 5)) && (-f $evsErrorFile && !-z $evsErrorFile)) {
+				unless(Helpers::checkAndUpdateServerAddr($evsErrorFile)) {
+					#exitCleanup(Helpers::getStringConstant('operation_could_not_be_completed_please_try_again'));
+					Helpers::traceLog("Deleting folders : RETRY");
+					$deleteRetryCount--;
+					goto EMPTYDIRRETRY if($deleteRetryCount);
+				} else {
+					my $errStr = Helpers::checkExitError($evsErrorFile,'archive');
+					if($errStr and $errStr =~ /1-/){
+						$errStr =~ s/1-//;
+						exitCleanup($errStr);
+					}
 				}
 				return 0;
 			}
 
 			# parse delete output.
-			open OUTFH, "<", $evsOutputFile or ($errStr = $Locale::strings{'failed_to_open_file'}.": $evsOutputFile, Reason: $!");
+			open OUTFH, "<", $evsOutputFile or ($errStr = Helpers::getStringConstant('failed_to_open_file').": $evsOutputFile, Reason: $!");
 			if($errStr ne ""){
 				Helpers::traceLog($errStr);
 				return 0;
@@ -808,7 +830,7 @@ sub deleteArchiveFiles
 
 			unless($filesToDelete){
 				# Appending deleted files/folders details to log
-				print ARCHIVELOG $Locale::strings{'deleted_content'}."\n";
+				print ARCHIVELOG Helpers::getStringConstant('deleted_content')."\n";
 			}
 
 			my $serverRoot = Helpers::getUserConfiguration('SERVERROOT');
@@ -840,9 +862,7 @@ sub deleteArchiveFiles
 				foreach my $tmpLine (@resultList){
 					if($tmpLine =~ /<item/){
 						my %fileName = Helpers::parseXMLOutput(\$tmpLine);
-						if(scalar(keys %fileName) < 2){
-							next;
-						}
+						next if (scalar(keys %fileName) < 2 or !defined($fileName{'fname'}));
 
 						my $op		 = $fileName{'op'};
 						my $fileName = $fileName{'fname'};
@@ -877,7 +897,7 @@ sub deleteArchiveFiles
 			if(-e $evsErrorFile and !-z $evsErrorFile) {
 				#Reading error file and appending to log file
 				if(!open(TEMPERRORFILE, "< $evsErrorFile")) {
-					Helpers::traceLog($Locale::strings{'failed_to_open_file'}.":$evsErrorFile, Reason:$!");
+					Helpers::traceLog('failed_to_open_file',":$evsErrorFile, Reason:$!");
 				}
 				my @errorArray = <TEMPERRORFILE>;
 				foreach my $errorLine (@errorArray){
@@ -903,7 +923,7 @@ sub deleteArchiveFiles
 			unlink($evsOutputFile);
 			unlink($evsErrorFile);
 		}
-		my $progressMsg = $Locale::strings{'delete_operation_has_been_completed'};
+		my $progressMsg = Helpers::getStringConstant('delete_operation_has_been_completed');
 		if($deletedFilesCount == 0 and $errorContent ne ''){
 			$errMsg = Helpers::checkErrorAndLogout($errorContent,1);
 			if($errMsg ne $errorContent){
@@ -913,23 +933,23 @@ sub deleteArchiveFiles
 		}
 		Helpers::displayProgress($progressMsg,1) if($jobType eq 'manual');
 		writeSummary();
-		
+
 		my $logEndTime = `date +"%a %b %d %T %Y"`;
 		Helpers::Chomp(\$logEndTime); #Removing white-space and '\n'
-		print ARCHIVELOG $Locale::strings{'end_time'}.$logEndTime."\n";		
+		print ARCHIVELOG Helpers::getStringConstant('end_time').$logEndTime."\n";		
 	} else {
 		my $logEndTime = `date +"%a %b %d %T %Y"`;
 		Helpers::Chomp(\$logEndTime); #Removing white-space and '\n'
-		my $endTime = $Locale::strings{'end_time'}.$logEndTime."\n";			
+		my $endTime = Helpers::getStringConstant('end_time').$logEndTime."\n";			
 		$_[0] =~ s/<ENDTIME>/$endTime/;
-		print ARCHIVELOG "\n".$Locale::strings{'summary'}."\n";
+		print ARCHIVELOG "\n".Helpers::getStringConstant('summary')."\n";
 		print ARCHIVELOG $_[0]."\n";
 	}
 
 
 	#Appending error content to log file
 	if($errorContent ne '') {
-		print ARCHIVELOG "\n".$Locale::strings{'additional_information'} if($errMsg ne $errorContent);
+		print ARCHIVELOG "\n".Helpers::getStringConstant('additional_information') if($errMsg ne $errorContent);
 		print ARCHIVELOG "\n$errorContent\n"
 	}
 	close ARCHIVELOG; #Closing to log file handle
@@ -942,19 +962,19 @@ sub deleteArchiveFiles
 # Added By				: Senthil Pandian
 #********************************************************************************
 sub cancelProcess {
-	my $jobRunningDir = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir = Helpers::getJobsPath('archive');
 	my $pidPath = $jobRunningDir.'/pid.txt';
 
 	if(!-e $pidPath){
 		$errMsg = 'operation_cancelled_by_user';
 	}
 	else {
-		# Killing EVS operations if job not terminated by job_termination script
+		# Killing EVS operations
 		my $username = Helpers::getUsername();
 		my $jobTerminationPath = Helpers::getScript('job_termination', 1);
-		my $archiveJobType = 'archive';
-		my $cmd = "$Configuration::perlBin $jobTerminationPath 1>/dev/null 2>/dev/null \'$archiveJobType\' \'$username\'";
-		system($cmd);
+		my $cmd = sprintf("%s %s 'archive' - 0 allType", $Configuration::perlBin, Helpers::getScript('job_termination', 1));
+		$cmd = Helpers::updateLocaleCmd($cmd);
+		`$cmd 1>/dev/null 2>/dev/null`;	
 	}
 
 	exitCleanup($errMsg);
@@ -988,7 +1008,7 @@ sub exitCleanup {
 # Added By				: Senthil Pandian
 #********************************************************************************
 sub removeIntermediateFiles {
-	my $jobRunningDir = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir = Helpers::getJobsPath('archive');
 	my $searchDir     = $jobRunningDir.'/'.$Configuration::searchDir;
 	my $pidPath   	  = $jobRunningDir.'/pid.txt';
 	my $cancelFile 	  = $jobRunningDir.'/cancel.txt';
@@ -1022,7 +1042,7 @@ sub getPercentageForCleanup {
 	my $archivePercentage = 0;
 	if($jobType eq 'manual') {
 		$archivePercentage = Helpers::getAndValidate('enter_percentage_of_files_for_cleanup', "percentage_for_cleanup", 1);
-		my $displayMsg = $Locale::strings{'you_have_selected_per_as_cleanup_limit'};
+		my $displayMsg = Helpers::getStringConstant('you_have_selected_per_as_cleanup_limit');
 		$displayMsg =~ s/<PER>/$archivePercentage/;
 		Helpers::display($displayMsg);
 		sleep(2);
@@ -1039,7 +1059,7 @@ sub getPercentageForCleanup {
 #********************************************************************************
 sub checkAndDeleteItems {
 	my $archivePercentage = $_[0];
-	my $jobRunningDir     = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir     = Helpers::getJobsPath('archive');
 	my $archiveFileList   = $jobRunningDir.'/'.$Configuration::archiveFileResultFile;
 
 	#Checking pid & cancelling process if job terminated by user
@@ -1054,21 +1074,21 @@ sub checkAndDeleteItems {
 		#print "\nperCount:'$perCount'\n";
 		#print "archivePercentage:'$archivePercentage'\n";
 		if($archivePercentage < $perCount){
-			my $reason = $Locale::strings{'operation_aborted_due_to_percentage'};
+			my $reason = Helpers::getStringConstant('operation_aborted_due_to_percentage');
 			$reason =~ s/<PER1>/$perCount/;
 			$reason =~ s/<PER2>/$archivePercentage/;
-			$errMsg  = "\n".$Locale::strings{'total_files_in_your_backupset'}.$totalFileCount."\n";
-			$errMsg .= $Locale::strings{'total_files_listed_for_deletion'}.$notExistCount."\n";
+			$errMsg  = "\n".Helpers::getStringConstant('total_files_in_your_backupset').$totalFileCount."\n";
+			$errMsg .= Helpers::getStringConstant('total_files_listed_for_deletion').$notExistCount."\n";
 
 			if($jobType eq 'manual'){				
-				$errMsg .= "\n".$Locale::strings{'archive_cleanup'}." ".$reason."\n";
-				$errMsg  = "\n".$Locale::strings{'summary'}.$errMsg;
+				$errMsg .= "\n".Helpers::getStringConstant('archive_cleanup')." ".$reason."\n";
+				$errMsg  = "\n".Helpers::getStringConstant('summary').$errMsg;
 				Helpers::display(["\n",$errMsg]);
 				removeIntermediateFiles();
-				exit 0;				
+				exit 0;
 			} else {
 				$errMsg .= "<ENDTIME>\n\n";			
-				$errMsg .= $Locale::strings{'periodic_cleanup'}." ".$reason."\n";
+				$errMsg .= Helpers::getStringConstant('periodic_cleanup')." ".$reason."\n";
 			}
 		}
 		elsif($jobType eq 'manual'){
@@ -1108,8 +1128,7 @@ sub checkAndDeleteItems {
 	} elsif($jobType eq 'manual'){
 		Helpers::display(["\n\n",'there_are_no_items_to_delete',"\n"], 1);
 	} else {
-		#$errMsg = $Locale::strings{'periodic_cleanup'}.": ".$Locale::strings{'there_are_no_items_to_delete'}."\n";
-		$errMsg = $Locale::strings{'there_are_no_items_to_delete'}."\n";
+		$errMsg = Helpers::getStringConstant('there_are_no_items_to_delete')."\n";
 		deleteArchiveFiles($errMsg);
 	}
 	return 0;
@@ -1128,37 +1147,6 @@ sub getDaysBetweenTwoDates{
 }
 
 #********************************************************************************
-# Subroutine			: getOperationStatus
-# Objective				: Getting operation status & appending to output file and renaming file name with status
-# Added By				: Senthil Pandian
-#********************************************************************************
-=beg
-sub getOperationStatus{
-	return 0	if(!defined($logOutputFile) or !-e $logOutputFile);
-
-	my $logOutputFileStatusFile;
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('archive');
-	my $userCancelFile = $jobRunningDir.'/cancel.txt';
-	if(-e $userCancelFile or defined($_[0])){
-		unlink($userCancelFile);
-		$logOutputFileStatusFile = $logOutputFile.'_'.$Locale::strings{'aborted'};
-		writeSummary(1);
-	}
-	elsif(defined($errMsg) and $errMsg =~ /operation aborted/i){
-		$logOutputFileStatusFile = $logOutputFile.'_'.$Locale::strings{'aborted'};
-	}
-	elsif($notExistCount>0 and $notExistCount == $deletedFilesCount){
-		$logOutputFileStatusFile = $logOutputFile.'_'.$Locale::strings{'success'};
-	}
-	else {
-		$logOutputFileStatusFile = $logOutputFile.'_'.$Locale::strings{'failure'};
-	}
-	$logOutputFileStatusFile .= "_";
-	system("mv '$logOutputFile' '$logOutputFileStatusFile'");
-	Helpers::display([$Locale::strings{'for_more_details_refer_the_log'},"\n","\"$logOutputFileStatusFile\"","\n"], 1) if($jobType eq 'manual');
-}
-=cut
-#********************************************************************************
 # Subroutine			: renameLogFile
 # Objective				: Rename the log file name with status
 # Added By				: Senthil Pandian
@@ -1168,30 +1156,30 @@ sub renameLogFile{
 	return 0	if(!defined($logOutputFile) or !-e $logOutputFile);
 
 	my ($logOutputFileStatusFile, $status);
-	my $jobRunningDir  = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir  = Helpers::getJobsPath('archive');
 	my $userCancelFile = $jobRunningDir.'/cancel.txt';
 	if(-e $userCancelFile){
 		unlink($userCancelFile);
 		writeSummary(1);
-		$status = $Locale::strings{'aborted'};
+		$status = Helpers::getStringConstant('aborted');
 	}
 	elsif(defined($_[0])){
 		writeSummary(1, $_[0]);
-		$status = $Locale::strings{'aborted'};
+		$status = Helpers::getStringConstant('aborted');
 	}
 	elsif(defined($errMsg) and $errMsg =~ /operation aborted/i){
-		$status = $Locale::strings{'aborted'};
+		$status = Helpers::getStringConstant('aborted');
 	}
 	elsif($notExistCount>0 and $notExistCount == $deletedFilesCount){
-		$status = $Locale::strings{'success'};
+		$status = Helpers::getStringConstant('success');
 	}
 	else {
-		$status = $Locale::strings{'failure'};
+		$status = Helpers::getStringConstant('failure');
 	}
 	$logOutputFileStatusFile = $logOutputFile;
 	$logOutputFileStatusFile =~ s/_Running_/_$status\_/;
-	system("mv '$logOutputFile' '$logOutputFileStatusFile'");
-	Helpers::display([$Locale::strings{'for_more_details_refer_the_log'},"\n"], 1) if($jobType eq 'manual');
+	system(Helpers::updateLocaleCmd("mv '$logOutputFile' '$logOutputFileStatusFile'"));
+	Helpers::display(['for_more_details_refer_the_log',"\n"], 1) if($jobType eq 'manual');
 
 	Helpers::saveLog($logOutputFileStatusFile);
 
@@ -1200,13 +1188,17 @@ sub renameLogFile{
 	my @endTime = localtime();
 	my %logStat = (
 		(split('_', Helpers::basename($logOutputFile)))[0] => {
-			'datetime' => Helpers::strftime("%d/%m/%Y %H:%M:%S", localtime(Helpers::mktime(@startTime))),
+			'datetime' => Helpers::strftime("%m/%d/%Y %H:%M:%S", localtime(Helpers::mktime(@startTime))),
 			'duration' => (Helpers::mktime(@endTime) - Helpers::mktime(@startTime)),
 			'filescount' => $notExistCount,
 			'status' => $status."_".ucfirst($jobType)
 		}
 	);
 	Helpers::addLogStat($jobRunningDir, \%logStat);
+
+	if (Helpers::loadNotifications()) {
+		Helpers::setNotification('get_logs') and Helpers::saveNotifications();
+	}
 }
 
 #********************************************************************************
@@ -1215,7 +1207,7 @@ sub renameLogFile{
 # Added By				: Senthil Pandian
 #********************************************************************************
 sub mergeAllArchivedFiles{
-	my $jobRunningDir     = Helpers::getUsersInternalDirPath('archive');
+	my $jobRunningDir     = Helpers::getJobsPath('archive');
 	my $searchDir     	  = $jobRunningDir.'/'.$Configuration::searchDir;
 	my $archiveFileList   = $jobRunningDir.'/'.$Configuration::archiveFileResultFile;
 	my $archiveFileView   = $jobRunningDir.'/'.$Configuration::archiveFileListForView;
@@ -1224,6 +1216,7 @@ sub mergeAllArchivedFiles{
 	#Appending content of a file to another file
 	if(-s $archiveFileList>0){
 		my $appendFiles = "cat '$archiveFileList' > '$archiveFileView'";
+		$appendFiles = Helpers::updateLocaleCmd($appendFiles);
 		system($appendFiles);
 	}
 	if(opendir(DIR, $searchDir)) {
@@ -1238,6 +1231,7 @@ sub mergeAllArchivedFiles{
 			my $temp = $searchDir."/".$file;
 			if(-s $temp>0){
 				my $appendFiles = "cat '$temp' >> '$archiveFileView'";
+				$appendFiles = Helpers::updateLocaleCmd($appendFiles);
 				system($appendFiles);
 			}
 		}
@@ -1253,20 +1247,20 @@ sub mergeAllArchivedFiles{
 # Added By				: Senthil Pandian
 #********************************************************************************
 sub writeSummary{
-	my $summary = "\n".$Locale::strings{'summary'}."\n";
-	$summary   .= $Locale::strings{'items_considered_for_delete'}.$notExistCount."\n";
-	$summary   .= $Locale::strings{'items_deletes_now'}.$deletedFilesCount."\n";
+	my $summary = "\n".Helpers::getStringConstant('summary')."\n";
+	$summary   .= Helpers::getStringConstant('items_considered_for_delete').$notExistCount."\n";
+	$summary   .= Helpers::getStringConstant('items_deletes_now').$deletedFilesCount."\n";
 	if(defined($_[1])){
-		$summary   .= $Locale::strings{'items_failed_to_delete'}."0\n\n";
+		$summary   .= Helpers::getStringConstant('items_failed_to_delete')."0\n\n";
 		$summary   .= $_[1]."\n\n";
 	}
 	elsif(defined($_[0])){
-		$summary   .= $Locale::strings{'items_failed_to_delete'}."0\n\n";
-		$summary   .= $Locale::strings{'operation_cancelled_by_user'}."\n\n";
+		$summary   .= Helpers::getStringConstant('items_failed_to_delete')."0\n\n";
+		$summary   .= Helpers::getStringConstant('operation_cancelled_by_user')."\n\n";
 	}
 	else {
-		$summary   .= $Locale::strings{'items_failed_to_delete'}.($notExistCount-$deletedFilesCount)."\n\n";
+		$summary   .= Helpers::getStringConstant('items_failed_to_delete').($notExistCount-$deletedFilesCount)."\n\n";
 	}
 	print ARCHIVELOG $summary;
-	print "\n\n".$summary if($jobType eq 'manual');
+	Helpers::display(["\n\n",$summary]) if($jobType eq 'manual');
 }

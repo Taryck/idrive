@@ -11,10 +11,10 @@ use warnings;
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
 use Helpers;
-use Strings;
 use Configuration;
 use File::Basename;
 
+Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 init();
@@ -26,12 +26,12 @@ init();
 # Modified By			: Anil Kumar [04/05/2018], Yogesh Kumar
 #****************************************************************************************************/
 sub init {
-	system('clear');
+	system(Helpers::updateLocaleCmd('clear'));
 	Helpers::loadAppPath();
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
 	Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
 	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);
 	Helpers::isLoggedin() or Helpers::retreat('login_&_try_again');
 
 	Helpers::displayHeader();
@@ -84,7 +84,10 @@ sub init {
 			$editFilePath = Helpers::getJobsPath($menuToPathMap{$menuUserChoice}, 'file');
 			$fileType = $menuToPathMap{$menuUserChoice};
 		}
-
+		if($fileType eq 'restore') {
+			Helpers::editRestoreFromLocation();
+			Helpers::saveUserConfiguration() or Helpers::retreat('failed_to_save_user_configuration');
+		}
 		(-f $editFilePath)? Helpers::openEditor('edit', $editFilePath, $fileType) : Helpers::display(['unable_to_open', '. ', 'invalid_file_path', ' ', '["', $editFilePath, '"]']);
 
 		if ($menuToPathMap{$menuUserChoice} =~ '_exclude') {
@@ -114,7 +117,7 @@ sub calculateJobsetSize {
 	my $calcforkpid = fork();
 	if($calcforkpid == 0) {
 		$0 = 'IDrive:esf:szcal';
-		Helpers::calculateBackupsetDirectorySize($_[0]);
+		Helpers::calculateBackupsetSize($_[0]);
 		while(1) {
 			if (Helpers::isFileLocked($backupsizelock)) {
 				sleep(1);

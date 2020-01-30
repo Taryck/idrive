@@ -11,22 +11,33 @@ use warnings;
 
 if(__FILE__ =~ /\//) { use lib substr(__FILE__, 0, rindex(__FILE__, '/')); } else { use lib '.'; }
 
+require Exporter;
+our @ISA       = qw(Exporter);
+our @EXPORT_OK = qw(TRUE FALSE STATUS SUCCESS FAILURE);
+
 use IxHash;
 
-our $version         = '2.18';
-our $releasedate     = '02-22-2019';
-our $appType         = 'IDrive';
-our $servicePathName = 'idriveIt';
-our $oldServicePathName = 'idrive';
-our $language        = 'EN';       # EN-ENGLISH
-our $staticPerlVersion = '1.0';
+our $version         	= '2.24';
+our $releasedate     	= '01-10-2020';
+our $appType         	= 'IDrive';
+our $servicePathName    = lc($appType).'It';
+our $oldServicePathName = lc($appType);
+
+our $language          = 'EN';       # EN-ENGLISH
+our $staticPerlVersion = '1.3';
+our $appCron = lc($appType).'cron';
 
 use constant {
-	SUCCESS => 'SUCCESS',
-	FAILURE => 'FAILURE',
-	STATUS  => 'STATUS',
-	MSG     => 'MSG',
-	DATA    => 'DATA',
+	SUCCESS  => 'SUCCESS',
+	FAILURE  => 'FAILURE',
+	STATUS   => 'STATUS',
+	MSG      => 'MSG',
+	DATA     => 'DATA',
+	TRUE     => 1,
+	FALSE    => 0,
+	ONEWEEK  => 7,
+	TWOWEEK  => 14,
+	ONEMONTH => 30,
 };
 
 our $debug = 0;
@@ -65,12 +76,15 @@ if (exists $ENV{'_'} and $ENV{'_'} and not ($ENV{'_'} =~ m/$servicePathName\/$st
 	$perlBin = $ENV{'_'};
 }
 if ($perlBin =~ /\.pl$/) {
-	$perlBin = '/usr/bin/perl';
+	$perlBin = `which perl`;
+	chomp($perlBin);
+	$perlBin = '/usr/bin/perl' unless($perlBin);
 }
 
 our $errorMsg           = '';
 our $utf8File           = 'utf8.cmd';
 our $idriveLibPath      = 'Idrivelib/lib';
+our $idriveDepPath      = 'Idrivelib/dependencies';
 our $cronSetupPath      = 'Idrivelib/cronsetup';
 our $defaultMountPath   = '/tmp';
 
@@ -79,9 +93,9 @@ our $freebsdProgress;
 our $deviceType      = 'LINUX';
 our $evsVersion      = 'evs005';
 our $NSPort          = 443;
-our $idriveLoginCGI  = 'https://www.idrive.com/idrive/viewjsp/RemoteLogin.jsp';
-our $newIdriveLoginCGI  = 'https://www.idrive.com/idrive/viewjsp/RemoteLogin_test.jsp';
+our $idriveLoginCGI  = 'https://tomcat.idrive.com/idrive/viewjsp/RemoteLogin.jsp';
 
+our $deviceUIDPrefix= 'Linux';
 our $deviceIDPrefix = '5c0b';
 our $deviceIDSuffix = '4b5z';
 
@@ -92,7 +106,7 @@ our $updateVersionInfo   = '.updateVersionInfo';
 our $forceUpdateFile     = '.forceupdate';
 
 our $cachedFile            = 'cache/user.txt';
-our $cachedIdriveFile      = 'cache/idriveuser.txt';
+our $cachedIdriveFile      = 'cache/'.lc($appType).'user.txt';
 our $userProfilePath       = 'user_profile';
 our $userInfoPath          = '.userInfo';
 our $idpwdFile             = "$userInfoPath/IDPWD";
@@ -118,6 +132,9 @@ our $maxChoiceRetry        = 3;
 our $reportMaxMsgLength    = 4095;
 our $bufferLimit           = 2*1024;
 
+our $minEngineCount = 2;
+our $maxEngineCount = 4;
+
 our $fullExcludeListFile    = 'FullExcludeList.txt';
 our $partialExcludeListFile = 'PartialExcludeList.txt';
 our $regexExcludeListFile   = 'RegexExcludeList.txt';
@@ -129,6 +146,7 @@ our $versionRestoreFile = 'versionRestoresetFile.txt';
 
 our $unzipLog     = 'unzipLog.txt';
 our $updateLog    = '.updateLog.txt';
+our $updatePid    = 'update.pid';
 our $freshInstall = 'freshInstall';
 
 our $isUserConfigModified = 0;
@@ -140,8 +158,11 @@ our $restoresetFile        = 'RestoresetFile.txt';
 our $archiveFileListForView  = 'archiveFileListForView.txt';
 our $archiveFileResultFile   = 'archiveFileResult.txt';
 our $archiveFolderResultFile = 'archiveFolderResult.txt';
-our $archiveSettingsFile     = 'archive_settings.json';
 
+our $alertStatusFile = 'alert.status';
+
+our $cancelFile      = 'exitError.txt';
+our $exitErrorFile   = 'exitError.txt';
 our $errorFile       = 'error.txt';
 our $evsTempDir      = 'evs_temp';
 our $statusFile      = 'STATUS_FILE';
@@ -164,15 +185,22 @@ our $transferredFileSize = 'transferredFileSize.txt';
 our $operationsfile  = 'operationsfile.txt';
 our $fileSummaryFile = 'fileSummary.txt';
 our $permissionErrorFile = 'permissionError.txt',
+our $minimalErrorRetry = 'errorretry.min';
 our $pidOperationFlag  =  'main';
 our $pidOutputProcess = undef;
 our $status = "Success";
 our $opStatus = "Success";
+our $dbPathsXML = 'dbpaths.xml';
+our $dbMapFile = 'DB.map';
+our $expressDbDir = 'ExpressDB';
 our ($jobRunningDir,$outputFilePath,$errorFilePath,$mailContentHead) = ('') x 4;
-our ($mailContent,$jobType,$expressLocalDir,$errStr,$finalSummery) = ('') x 5;
+our ($mailContent,$jobType,$expressLocalDir,$errStr,$finalSummary) = ('') x 5;
 our ($fullStr,$parStr,$regexStr) = ('') x 3;
 our ($excludedCount,$noRelIndex,$excludedFileIndex,$filesonlycount,$retryCount,$cancelFlag) = (0) x 6;
-our ($totalFiles,$nonExistsCount,$noPermissionCount,$missingCount) = (0) x 4;
+our ($totalFiles,$fileCount,$nonExistsCount,$noPermissionCount,$missingCount) = (0) x 5;
+our ($localMountPath,$encType,$hashVal) = ('') x 3;
+our $progressSizeOp = 1;
+
 our @linesStatusFile = undef;
 
 our $filePermission    = 0777;
@@ -184,13 +212,15 @@ our $inputMandetory = 1;
 
 our $accessTokenFile = 'accesstoken.txt';
 our $notificationFile = 'notification.json';
+our $nsFile = 'ns.json';
 
 our $logStatFile = "%02d%04dlogstat\.json";
 
-our $crontabFile  = 'idrivecrontab.json';
-our $cronlockFile = '/var/run/idrivecron.lock';
-our $cronservicepid = '/var/run/idrivecron.pid';
-our $cronLinkPath = '/etc/idrivecron.pl';
+our $crontabFile    = lc($appType).'crontab.json';
+our $cronlockFile   = '/var/run/'.lc($appType).'cron.lock';
+our $cronservicepid = '/var/run/'.lc($appType).'cron.pid';
+our $cronLinkPath   = '/etc/'.lc($appType).'cron.pl';
+
 our $migUserlock  = 'migrate.lock';
 our $migUserSuccess = 'migrateSuccess';
 our $migratedLogFileList = 'migratedLogFileList.txt';
@@ -200,6 +230,8 @@ our $backupsizesynclock = 'backupsetsizesync.lock';
 our $sfmaxcachets   = 7200; # 2 hrs | time in seconds | size json file
 our $sizepollintvl  = 5; #120;
 our $tempVar        = '';
+our $expressDBMapFile = 'DB.map';
+our $ldbNew			  = 'LDBNEW';
 
 # dashboard lock
 our $dashboardpid = 'dashboard.pid';
@@ -216,6 +248,12 @@ our %userProfilePaths = (
 	'tmp'         => 'tmp',
 );
 
+our %jobDir = (
+	'default_backupset'  => 'DefaultBackupSet',
+	'local_backupset' 	 => 'LocalBackupSet',
+	'default_restoreset' => 'DefaultRestoreSet',
+);
+
 our %fileSizeDetail = (
 	'bytes' => 'bytes',
 	'kb'    => 'KB',
@@ -224,25 +262,38 @@ our %fileSizeDetail = (
 	'tb'    => 'TB',
 );
 
-our $screenSize = `stty size`;
+our $screenSize = '';
+$screenSize     = `stty size` if (-t STDIN);
 
 our $userConfChanged = 0;
+our $tab = "      ";
+
+our $proxyNetworkError = "failed to connect|Connection refused|Could not resolve proxy|Could not resolve host|No route to host|HTTP code 407|URL returned error: 407|407 Proxy Authentication Required|Connection timed out|response code said error|kindly_verify_ur_proxy";
 
 #############Multiple Engine#############
 our $totalEngineBackup = 4;
 use constant ENGINE_LOCKE_FILE => "engine.lock";
 #############Multiple Engine#############
 
-
 #our $evsDownloadsPage = "https://www.__APPTYPE__.com/downloads/linux/download-options__EVSTYPE__";
 our $evsDownloadsPage = "https://www.__APPTYPE__.com/downloads/linux/download-options";
-our $IDriveAuthCGI = "https://www1.idrive.com/cgi-bin/v1/user-details.cgi";
+#our $evsDownloadsPage = " -u deepak:deepak http://192.168.3.169/svn/linux_repository/trunk/PackagesForTesting/IDriveForLinux/binaries";
+our $IDriveUsersCGI   = "https://www1.idrive.com/cgi-bin/v1/user-list.cgi";
+our $IBackupUsersCGI  = "http://www1.ibackup.com/cgi-bin/ibackup_get_email_ibsync_user_v1.cgi";
+our $IDriveAuthCGI  = "https://www1.idrive.com/cgi-bin/v1/user-details.cgi";
 our $IBackupAuthCGI = "https://www1.ibackup.com/cgi-bin/get_ibwin_evs_details_xml_ip.cgi?";
 our $IDriveErrorCGI = 'https://webdav.ibackup.com/cgi-bin/Notify_unicode';
-#our $checkUpdateBaseCGI = "\"https://www1.ibackup.com/cgi-bin/check_version_upgrades_idrive_evs_new.cgi?appln=${appType}ForLinux&version=$version\"";
-our $checkUpdateBaseCGI = "https://www1.ibackup.com/cgi-bin/check_version_upgrades_idrive_evs_new.cgi?'appln=${appType}ForLinux&version=$version'";
+
+# Software Update CGI
+my $trimmedVersion = $version;
+my @matches = split('\.', $trimmedVersion);
+if (scalar(@matches) > 2) {
+	$trimmedVersion = $matches[0].".".$matches[1];
+}
+our $checkUpdateBaseCGI = "https://www1.ibackup.com/cgi-bin/check_version_upgrades_idrive_evs_new.cgi?'appln=${appType}ForLinux&version=$trimmedVersion'";
+
 our $IDriveBKPSummaryCGI = 'https://www1.idrive.com/cgi-bin/idrive_backup_summary.cgi';
-our $IDriveSupportEmail = 'support@idrive.com';
+our $IDriveSupportEmail = 'support@'.lc($appType).'.com';
 our $notifyPath = 'https://webdav.ibackup.com/cgi-bin/Notify_email_ibl';
 
 # production download URL
@@ -254,21 +305,33 @@ my $IDriveAppUrl = "https://www.idrivedownloads.com/downloads/linux/download-for
 my $IBackupAppUrl = "https://www.ibackup.com/online-backup-linux/downloads/download-for-linux/IBackup_for_Linux.zip";
 # SVN download URL
 #my $IBackupAppUrl = " -u deepak:deepak http://192.168.3.169/svn/linux_repository/trunk/PackagesForTesting/IBackupForLinux/IBackup_for_Linux.zip";
-my $IDriveUserInoCGIUrl =  "https://www1.idrive.com/cgi-bin/update_user_device_info.cgi?";
-my $IBackupUserInoCGIUrl =  "https://www1.ibackup.com/cgi-bin/update_user_device_info.cgi?";
+my $IDriveUserInoCGIUrl = "https://www1.idrive.com/cgi-bin/update_user_device_info.cgi?";
+my $IBackupUserInoCGIUrl = "https://www1.ibackup.com/cgi-bin/update_user_device_info.cgi?";
+our $accountSignupURL = "https://www.ibackup.com/newibackup/signup";
+$accountSignupURL = "https://www.idrive.com/idrive/signup" if($appType eq 'IDrive');
 
 our $appDownloadURL = ($appType eq 'IDrive')? $IDriveAppUrl : $IBackupAppUrl;
-our $appPackageName = $appType . 'ForLinux';
+our $appPackageName = ($appType eq 'IDrive')?'IDriveForLinux':'IBackup_for_Linux';
 our $appPackageExt  = '.zip';
 our $IDriveUserInoCGI  =  ($appType eq 'IDrive')? $IDriveUserInoCGIUrl : $IBackupUserInoCGIUrl;
 
 our %evsZipFiles = (
-	'32' => ['__APPTYPE___linux_32bit.zip', '__APPTYPE___QNAP_32bit.zip'],
-	'64' => ['__APPTYPE___linux_64bit.zip', '__APPTYPE___QNAP_64bit.zip', '__APPTYPE___synology_64bit.zip', '__APPTYPE___Netgear_64bit.zip', '__APPTYPE___Vault_64bit.zip','__APPTYPE___linux_32bit.zip', '__APPTYPE___QNAP_32bit.zip' ],
-
-	'arm' => ['__APPTYPE___QNAP_ARM.zip', '__APPTYPE___synology_ARM.zip',
-						'__APPTYPE___Netgear_ARM.zip', '__APPTYPE___synology_Alpine.zip'],
-	'x' => ['__APPTYPE___linux_universal.zip'],
+	'IDrive' => {
+		'32' => ['__APPTYPE___linux_32bit.zip', '__APPTYPE___QNAP_32bit.zip'],
+		'64' => ['__APPTYPE___linux_64bit.zip', '__APPTYPE___QNAP_64bit.zip', '__APPTYPE___synology_64bit.zip', '__APPTYPE___synology_aarch64bit.zip', '__APPTYPE___Netgear_64bit.zip', '__APPTYPE___Vault_64bit.zip', '__APPTYPE___linux_32bit.zip', '__APPTYPE___QNAP_32bit.zip'],
+		'freebsd' => ['__APPTYPE___Vault_64bit.zip'],
+		'arm' => ['__APPTYPE___QNAP_ARM.zip', '__APPTYPE___synology_ARM.zip',
+							'__APPTYPE___Netgear_ARM.zip', '__APPTYPE___synology_Alpine.zip'],
+		'x' => ['__APPTYPE___linux_universal.zip'],
+	},
+	'IBackup' => {
+		'32' => ['__APPTYPE___linux_32bit.zip', '__APPTYPE___QNAP_32bit.zip', '__APPTYPE___synology_64bit.zip', '__APPTYPE___Netgear_64bit.zip', '__APPTYPE___Vault_64bit.zip'],
+		'64' => ['__APPTYPE___linux_64bit.zip', '__APPTYPE___QNAP_64bit.zip', '__APPTYPE___synology_64bit.zip', '__APPTYPE___Netgear_64bit.zip', '__APPTYPE___Vault_64bit.zip', '__APPTYPE___linux_32bit.zip', '__APPTYPE___QNAP_32bit.zip'],
+		'freebsd' => ['__APPTYPE___Vault_64bit.zip'],
+		'arm' => ['__APPTYPE___QNAP_ARM.zip', '__APPTYPE___synology_ARM.zip',
+							'__APPTYPE___Netgear_ARM.zip', '__APPTYPE___synology_Alpine.zip'],
+		'x' => ['__APPTYPE___linux_universal.zip'],
+	},
 );
 
 our %staticperlZipFiles = (
@@ -277,43 +340,55 @@ our %staticperlZipFiles = (
 	'freebsd' => ['idrive_perl/freebsd.zip'],
 );
 
+our %evsAPI = (
+	'IDrive' => {
+		'getServerAddress' => 'https://evs.idrive.com/evs/getServerAddress',
+		'configureAccount' => 'https://EVSSERVERADDRESS/evs/configureAccount',
+		'getAccountQuota'  => 'https://EVSSERVERADDRESS/evs/getAccountQuota',
+	},
+	'IBackup' => {
+		'getServerAddress' => 'https://evs.ibackup.com/evs/getServerAddress',
+		'configureAccount' => 'https://EVSSERVERADDRESS/evs/configureAccount',
+		'getAccountQuota' => 'https://EVSSERVERADDRESS/evs/getAccountQuota',
+	},
+);
 
 # We know that 32 bit works on 64 bit machines, so we give it a try
 # when 64 bit binaries fails to work on the same machine.
 #$evsZipFiles{'64'} = [@{$evsZipFiles{'64'}}, @{$evsZipFiles{'32'}}];
 
 tie (our %availableJobsSchema, 'Tie::IxHash',
-	'backup' => {
-		'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/",
-		'logs' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/$logDir",
-		'file' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/$backupsetFile",
-		'type' => 'backup',
-		'runas' => ['SCHEDULED', 'immediate'],
-		'croncmd' => "%s %s %s", # Script name & username
+	backup => {
+		path => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/",
+		logs => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/$logDir",
+		file => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/$backupsetFile",
+		type => 'backup',
+		runas => ['SCHEDULED', 'immediate'],
+		croncmd => "%s %s %s", # Script name & username
 	},
-	'restore' => {
-		'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/",
-		'logs' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/$logDir",
-		'file' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/$restoresetFile",
-		'type' => 'restore',
-		'runas' => [],
-		'croncmd' => "",
+	restore => {
+		path => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/",
+		logs => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/$logDir",
+		file => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/$restoresetFile",
+		type => 'restore',
+		runas => [],
+		croncmd => "",
 	},
-	'localbackup' => {
-		'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/",
-		'logs' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/$logDir",
-		'file' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/$backupsetFile",
-		'type' => 'backup',
-		'runas' => ['SCHEDULED', 'immediate'],
-		'croncmd' => "%s SCHEDULED %s", # Script name & username
+	localbackup => {
+		path => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/",
+		logs => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/$logDir",
+		file => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/$backupsetFile",
+		type => 'backup',
+		runas => ['SCHEDULED', 'immediate'],
+		croncmd => "%s SCHEDULED %s", # Script name & username
 	},
-	'archive' => {
-		'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/",
-		'logs' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/$logDir",
-		'file' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/$backupsetFile",
-		'type' => 'archive',
-		'runas' => [],
-		'croncmd' => "%s %s %s %s %s", # script name, username, percentage, days & timestamp
+	archive => {
+		path => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/",
+		logs => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/$logDir",
+		file => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/$backupsetFile",
+		type => 'archive',
+		runas => [],
+		croncmd => "%s %s %s %s %s", # script name, username, percentage, days & timestamp
 	}
 );
 
@@ -326,26 +401,10 @@ use constant JOBEXITCODE => {
 };
 
 tie (our %logMenuAndPaths, 'Tie::IxHash',
-	'backup' => {
-		'view_logs_for_backup' => {
-			'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'backup'}/$logDir/",
-		}
-	},
-	'express_backup' => {
-		'view_logs_for_express_backup' => {
-			'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'localbackup'}/$logDir/",
-		}
-	},
-	'restore' => {
-		'view_logs_for_restore' => {
-			'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'restore'}/$logDir/",
-		}
-	},
-	'archive' => {
-		'view_logs_for_archive' => {
-			'path' => "__SERVICEPATH__/$userProfilePath/$mcUser/__USERNAME__/$userProfilePaths{'archive'}/$logDir/",
-		}
-	}
+	'backup'      => 'backup_logs',
+	'localbackup' => 'express_backup_logs',
+	'restore'     => 'restore_logs',
+	'archive'     => 'archive_cleanup_logs',
 );
 
 tie (our %excludeFilesSchema, 'Tie::IxHash',
@@ -368,11 +427,11 @@ our %evsAPIPatterns = (
 	'STRINGENCODE'     => "--string-encode=__ARG1__\n--out-file=__ARG2__",
 	'VALIDATE'         => "--validate\n--user=__ARG1__\n--password-file=__ARG2__",
 	'GETSERVERADDRESS' => "--getServerAddress\n__getUsername__",
-	'CREATEBUCKET'     => "--xml-output\n--create-bucket\n--nick-name=__ARG1__\n--os=Linux\n--uid=__getMachineUID__\n--bucket-type=D\n__getUsername__\@__getServerAddress__::home/",
+	'CREATEBUCKET'     => "--xml-output\n--create-bucket\n--nick-name=__ARG1__\n--os=Linux\n--uid=__getMachineUID__\n--bucket-type=D\n--location=__getMachineUser__\n__getUsername__\@__getServerAddress__::home/",
 	'CREATEDIR'        => "--xml-output\n--create-dir=__ARG1__\n__getUsername__\@__getServerAddress__::home/",
 	'LISTDEVICE'       => "--xml-output\n--list-device\n__getUsername__\@__getServerAddress__::home/",
-	'NICKUPDATE'       => "--xml-output\n--nick-update\n--nick-name=__ARG1__\n--os=Linux\n--device-id=__ARG2__\n__getUsername__\@__getServerAddress__::home/",
-	'LINKBUCKET'       => "--xml-output\n--link-bucket\n--nick-name=__ARG1__\n--os=Linux\n__getUsername__\@__getServerAddress__::home/\n--device-id=$deviceIDPrefix\__ARG2__$deviceIDSuffix\n--uid=__ARG3__\n--bucket-type=D",
+	'NICKUPDATE'       => "--xml-output\n--nick-update\n--nick-name=__ARG1__\n--os=Linux\n--device-id=__ARG2__\n--location=__getMachineUser__\n__getUsername__\@__getServerAddress__::home/",
+	'LINKBUCKET'       => "--xml-output\n--link-bucket\n--nick-name=__ARG1__\n--os=Linux\n__getUsername__\@__getServerAddress__::home/\n--device-id=$deviceIDPrefix\__ARG2__$deviceIDSuffix\n--uid=__ARG3__\n--bucket-type=D\n--location=__getMachineUser__",
 	'DEFAULTCONFIG'    => "--config-account\n--user=__getUsername__\n--enc-type=DEFAULT",
 	'PRIVATECONFIG'    => "--config-account\n--user=__getUsername__\n--enc-type=PRIVATE",
 	'PING'             => "__getUsername__\@__getServerAddress__::home/",
@@ -389,7 +448,31 @@ our %evsAPIPatterns = (
 );
 
 tie(our %userConfigurationSchema, 'Tie::IxHash',
-	'TBE_BASE_DIR' => {			# Added for relative path
+	USERNAME => {
+		cgi_name => '',
+		evs_name => '',
+		required => 100,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
+	},
+	EMAILADDRESS => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
+	},
+	BACKUPLOCATION => {
+		cgi_name => '',
+		evs_name => '',
+		required => 101,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 1,
+	},
+	'MUID' => {
 		'cgi_name' => '',
 		'evs_name' => '',
 		'required' => 0,
@@ -397,376 +480,355 @@ tie(our %userConfigurationSchema, 'Tie::IxHash',
 		'type' => 'regex',
 		'for_dashboard' => 0,
 	},
-	'USERNAME' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 100,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	RESTOREFROM => {
+		cgi_name => '',
+		evs_name => '',
+		required => 101,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 1,
 	},
-	'EMAILADDRESS' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	RESTORELOCATION => {
+		cgi_name => '',
+		evs_name => '',
+		required => 101,
+		default  => '',
+		type => 'regex',   # to avoid restore directory exist validation for now
+		for_dashboard => 1,
 	},
-	'BACKUPLOCATION' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 101,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	RESTORELOCATIONPROMPT => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 1,
+		type => 'regex',
+		for_dashboard => 1,
 	},
-	'RESTOREFROM' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 101,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	NOTIFYSOFTWAREUPDATE => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 0,
+		type => 'regex',
+		for_dashboard => 1,
 	},
-	'RESTORELOCATION' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 101,
-		'default'  => '',
-		'type' => 'regex',   # to avoid restore directory exist validation for now
-		'for_dashboard' => 1,
+	PROXYIP => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'RESTORELOCATIONPROMPT' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 1,
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	PROXYPORT => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'NOTIFYSOFTWAREUPDATE' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 0,
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	PROXYUSERNAME => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'RETAINLOGS' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 101,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	PROXYPASSWORD => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'PROXYIP' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	PROXY => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'PROXYPORT' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	BWTHROTTLE => {
+		cgi_name => '',
+		evs_name => '',
+		required => 1000,
+		default  => 100,
+		type => 'regex',
+		regex => '^(?:[1-9]\d?|100)$',
+		for_dashboard => 1,
 	},
-	'PROXYUSERNAME' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	BACKUPTYPE => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 'mirror',
+		type => 'regex',
+		for_dashboard => 1,
 	},
-	'PROXYPASSWORD' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	DEDUP => {
+		cgi_name => 'dedup',
+		evs_name => 'dedup',
+		required => 100,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 1,
 	},
-	'PROXY' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	ENCRYPTIONTYPE => {
+		cgi_name => 'enctype',
+		evs_name => 'configtype',
+		required => 100,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'BWTHROTTLE' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 1000,
-		'default'  => 100,
-		'type' => 'regex',
-		'regex'	   => '^(?:[1-9]\d?|100)$',
-		'for_dashboard' => 1,
+	USERCONFSTAT => {
+		cgi_name => 'cnfgstat',
+		evs_name => 'configstatus',
+		required => 100,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'BACKUPTYPE' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 'mirror',
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	SERVERROOT => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'DEDUP' => {
-		'cgi_name' => 'dedup',
-		'evs_name' => 'dedup',
-		'required' => 100,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	PLANTYPE => {
+		cgi_name => 'plan_type',
+		evs_name => '',
+		required => 100,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'ENCRYPTIONTYPE' => {
-		'cgi_name' => 'enctype',
-		'evs_name' => 'configtype',
-		'required' => 100,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	PLANSPECIAL => {
+		cgi_name => 'plan_special',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'USERCONFSTAT' => {
-		'cgi_name' => 'cnfgstat',
-		'evs_name' => 'configstatus',
-		'required' => 100,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	RMWS => {
+		cgi_name => 'remote_manage_websock_server',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'SERVERROOT' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	RMI => {
+		cgi_name => 'remote_manage_ip',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'PLANTYPE' => {
-		'cgi_name' => 'plan_type',
-		'evs_name' => '',
-		'required' => 100,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	RMS => {
+		cgi_name => 'remote_manage_server',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'PLANSPECIAL' => {
-		'cgi_name' => 'plan_special',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	RMIH => {
+		cgi_name => 'remote_manage_ip_https',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'RMI' => {
-		'cgi_name' => 'remote_manage_ip',
-		'evs_name' => '',
-		'required' => 100,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	RMSH => {
+		cgi_name => 'remote_manage_server_https',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'RMS' => {
-		'cgi_name' => 'remote_manage_server',
-		'evs_name' => '',
-		'required' => 100,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	ADDITIONALACCOUNT => {
+		cgi_name => 'addtl_account',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'RMIH' => {
-		'cgi_name' => 'remote_manage_ip_https',
-		'evs_name' => '',
-		'required' => 100,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	PRMI => {
+		cgi_name => 'parent_remote_manage_ip',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'RMSH' => {
-		'cgi_name' => 'remote_manage_server_https',
-		'evs_name' => '',
-		'required' => 100,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	PRMS => {
+		cgi_name => 'parent_remote_manage_server',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'ADDITIONALACCOUNT' => {
-		'cgi_name' => 'addtl_account',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	PRMIH => {
+		cgi_name => 'parent_remote_manage_ip_https',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'PRMI' => {
-		'cgi_name' => 'parent_remote_manage_ip',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	PRMSH => {
+		cgi_name => 'parent_remote_manage_server_https',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'PRMS' => {
-		'cgi_name' => 'parent_remote_manage_server',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
+	PARENTACCOUNT => {
+		cgi_name => 'parent_account',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
-	'PRMIH' => {
-		'cgi_name' => 'parent_remote_manage_ip_https',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
-	},
-	'PRMSH' => {
-		'cgi_name' => 'parent_remote_manage_server_https',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
-	},
-	'PARENTACCOUNT' => {
-		'cgi_name' => 'parent_account',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 0,
-	},
-	'LOCALMOUNTPOINT' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type'     => 'regex',
-		'for_dashboard' => 1,
+	LOCALMOUNTPOINT => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 1,
 	},
 	# Notify as Failure if the total files failed for backup is more than
 	# % of the total files backed up
-	'NFB' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 1001,
-#TBE		'default'  => 5,
-		'default'  => 0,
-		'type'     => 'regex',
-#TBE		'regex'	   => '^(?:[1-9]\d?|10)$',
-		'regex'	   => '^(?:[0-9]\d?|10)$',
-		'for_dashboard' => 1,
+	NFB => {
+		cgi_name => '',
+		evs_name => '',
+		required => 1001,
+		default  => 5,
+		type     => 'regex',
+		'regex'    => '^(?:[0-9]\d?|10)$',
+		for_dashboard => 1,
 	},
 	# Upload multiple file chunks simultaneously
-	'ENGINECOUNT' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 4,
-		'type' => 'regex',
-		'for_dashboard' => 1,
+	ENGINECOUNT => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 4,
+		type => 'regex',
+		for_dashboard => 1,
 	},
 	# Disable Desktop Access
-	'DDA' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 0,
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	DDA => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 0,
+		type => 'regex',
+		for_dashboard => 0,
 	},
 	# Block Desktop Access
-	'BDA' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 0,
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	BDA => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 0,
+		type => 'regex',
+		for_dashboard => 0,
 	},
-	'DEFAULTTEXTEDITOR' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => '',
-		'type' => 'regex',
-		'for_dashboard' => 0,
+	DEFAULTTEXTEDITOR => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type => 'regex',
+		for_dashboard => 0,
 	},
 	# Ignore file/folder level access rights/permission errors
 	# IFPE -> Ignore file permission errors
-	'IFPE' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 0,
-		'type'     => 'regex',
-		'for_dashboard' => 1,
+	IFPE => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 0,
+		type     => 'regex',
+		for_dashboard => 1,
 	},
 	# Notify as Failure if the total files missing for backup is more than
 	# % of the total files backed up
-	'NMB' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 1002,
-#TBE		'default'  => 5,
-		'default'  => 0,
-		'type'     => 'regex',
-#TBE		'regex'	   => '^(?:[0-9]\d?|10)$',
+	NMB => {
+		cgi_name => '',
+		evs_name => '',
+		required => 1002,
+		default  => 5,
+		type     => 'regex',
 		'regex'	   => '^(?:[0-9]\d?|10)$',
-		'default'  => 0,
-		'type'     => 'regex',
-		'for_dashboard' => 1,
+		for_dashboard => 1,
 	},
-	'SHOWHIDDEN' => {
-		'cgi_name' => '',
-		'evs_name' => '',
-		'required' => 0,
-		'default'  => 1,
-		'type'     => 'regex',
-		'for_dashboard' => 1,
+	SHOWHIDDEN => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => 1,
+		type     => 'regex',
+		for_dashboard => 1,
+	},
+	UPTIME => {
+		cgi_name => '',
+		evs_name => '',
+		required => 0,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
+	},
+	WEBAPI => {
+		cgi_name => 'evswebsrvr',
+		evs_name => 'webApiServer',
+		required => 1,
+		default  => '',
+		type     => 'regex',
+		for_dashboard => 0,
 	},
 );
 
 tie(our %ServerAddressSchema, 'Tie::IxHash',
 	'SERVERADDRESS' => {
-		'cgi_name' => 'evssrvrip',
-		'evs_name' => 'cmdUtilityServerIP',
-		'required' => 1,
-		'type' => 'regex',
+		cgi_name => 'evssrvrip',
+		evs_name => 'cmdUtilityServerIP',
+		required => 1,
+		type => 'regex',
 	},
 );
 
 tie(our %accountStorageSchema, 'Tie::IxHash',
 	'totalQuota' => {
-		'cgi_name' => 'quota',
-		'evs_name' => 'totalQuota',
-		'required' => 1,
-		'type' => 'regex',
+		cgi_name => 'quota',
+		evs_name => 'totalQuota',
+		required => 1,
+		type => 'regex',
 		'func' => 'setTotalStorage',
 	},
 	'usedQuota' => {
-		'cgi_name' => 'quota_used',
-		'evs_name' => 'usedQuota',
-		'required' => 1,
-		'type' => 'regex',
+		cgi_name => 'quota_used',
+		evs_name => 'usedQuota',
+		required => 1,
+		type => 'regex',
 		'func' => 'setStorageUsed',
-	},
-	'remainingQuota' => {		# TBE added
-		'cgi_name' => 'quota_remaining',
-		'evs_name' => 'remainingQuota',
-		'required' => 0,
-		'type' => 'regex',
-		'func' => 'setFreeStorage',
 	},
 );
 
@@ -781,18 +843,34 @@ our %notificationsSchema = (
 	'update_remote_manage_ip'     => '',
 	'register_dashboard'          => '',
 	'update_acc_status'           => '',
+	'alert_status_update'         => '',
+	'update_device_info'          => '',
 );
 
 @notificationsSchema{map{"get_$_".'set_content'} keys %availableJobsSchema} = map{"default_sync"} values %availableJobsSchema;
 @notificationsSchema{map{"get_$_".'files_content'} keys %excludeFilesSchema} = map{"default_sync"} values %excludeFilesSchema;
 
 our %notificationsForDashboard = (
-	'update_backup_progress'      => '',
-	'update_localbackup_progress' => '',
-	'update_restore_progress'     => '',
-	'get_localbackupset_content'     => '',
-	'get_backupset_content'     => '',
-	'get_user_settings'     => '',
+	update_backup_progress      => '',
+	update_localbackup_progress => '',
+	update_restore_progress     => '',
+	get_localbackupset_content     => '',
+	get_backupset_content     => '',
+	get_user_settings     => '',
+	get_scheduler => '',
+);
+
+our %alertErrCodes = (
+	'unexpected_error'        => 100,
+	'no_files_to_backup'      => 103,
+	'account_cancelled'       => 104,
+	'account_under_maint'     => 105,
+	'account_blocked'         => 106,
+	'account_expired'         => 107,
+	'uname_pwd_mismatch'      => 113,
+	'pvt_verification_failed' => 114,
+	'scheduled_cut_off'       => 115,
+	'no_scheduled_jobs'       => 203,
 );
 
 our %crontabSchema = (
@@ -826,18 +904,18 @@ tie(our %notifOptions, 'Tie::IxHash',
 	'notify_failure' => 'notify_failure'
 );
 
-# @TODO: need to analyze older version of the OS's and have to add configurations
+# TODO: need to analyze older version of the OS's and have to add configurations
 # fallback will take care if schema not present
 our %cronLaunchCodes = (
 	'centos' => {
 		'lt-6.00' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron' => '/etc/init.d/idrivecron'},
+			'shellcp' => {'idrivecron' => "/etc/init.d/$appCron"},
 			'shellln' => {},
-			'setupcmd' => ['chkconfig --add idrivecron', 'service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop', 'chkconfig --del idrivecron'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["chkconfig --add $appCron", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "chkconfig --del $appCron"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/centos/lt-6.00/"
 		},
@@ -845,23 +923,23 @@ our %cronLaunchCodes = (
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron.conf' => '/etc/init/idrivecron.conf',
+				"idrivecron.conf" => "/etc/init/$appCron.conf",
 			},
 			'shellln' => {},
-			'setupcmd' => ['initctl start idrivecron'],
-			'stopcmd' => ['initctl stop idrivecron'],
-			'restartcmd' => 'initctl restart idrivecron',
+			'setupcmd' => ["initctl start $appCron"],
+			'stopcmd' => ["initctl stop $appCron"],
+			'restartcmd' => "initctl restart $appCron",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/centos/btw-6.00_6.99/"
 		},
 		'gte-7.00' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron.service' => '/lib/systemd/system/idrivecron.service'},
+			'shellcp' => {"idrivecron.service" => "/lib/systemd/system/$appCron.service"},
 			'shellln' => {},
-			'setupcmd' => ['systemctl unmask idrivecron', 'systemctl enable idrivecron', 'systemctl start idrivecron'],
-			'stopcmd' => ['systemctl stop idrivecron', 'systemctl disable idrivecron'],
-			'restartcmd' => 'systemctl restart idrivecron',
+			'setupcmd' => ["systemctl unmask $appCron", "systemctl enable $appCron", "systemctl start $appCron"],
+			'stopcmd' => ["systemctl stop $appCron", "systemctl disable $appCron"],
+			'restartcmd' => "systemctl restart $appCron",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/centos/gte-7.00/"
 		}
@@ -871,62 +949,62 @@ our %cronLaunchCodes = (
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron' => '/etc/init.d/idrivecron',
+				"idrivecron" => "/etc/init.d/$appCron",
 			},
 			'shellln' => {},
-			'setupcmd' => ['update-rc.d idrivecron defaults', '/etc/init.d/idrivecron start'],
-			'stopcmd' => ['/etc/init.d/idrivecron stop', 'update-rc.d -f idrivecron remove'],
-			'restartcmd' => '/etc/init.d/idrivecron restart',
+			'setupcmd' => ["update-rc.d $appCron defaults", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "update-rc.d -f $appCron remove"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/debian/lt-6.00/"
 		},
-		'btw-6.00_7.99' => {
+		'btw-6.00_8.50' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron' => '/etc/init.d/idrivecron',
+				"idrivecron" => "/etc/init.d/$appCron",
 			},
 			'shellln' => {},
-			'setupcmd' => ['insserv idrivecron', 'service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop', 'insserv -r idrivecron'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["insserv $appCron", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "insserv -r $appCron"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
-			'setupdir' => "$cronSetupPath/debian/btw-6.00_7.99/"
+			'setupdir' => "$cronSetupPath/debian/btw-6.00_8.50/"
 		},
-		'gte-8.00' => {
+		'gt-8.50' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron.service' => '/lib/systemd/system/idrivecron.service'
+				"idrivecron.service" => "/lib/systemd/system/$appCron.service"
 			},
 			'shellln' => {},
-			'setupcmd' => ['systemctl enable idrivecron', 'systemctl start idrivecron'],
-			'stopcmd' => ['systemctl stop idrivecron', 'systemctl disable idrivecron'],
-			'restartcmd' => 'systemctl restart idrivecron',
+			'setupcmd' => ["systemctl enable $appCron", "systemctl start $appCron"],
+			'stopcmd' => ["systemctl stop $appCron", "systemctl disable $appCron"],
+			'restartcmd' => "systemctl restart $appCron",
 			'launcherdecoy' => '__LAUNCHPATH__',
-			'setupdir' => "$cronSetupPath/debian/gte-8.00/"
+			'setupdir' => "$cronSetupPath/debian/gt-8.50/"
 		},
 	},
 	'fedora' => {
 		'lte-13.99' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron' => '/etc/init.d/idrivecron'},
+			'shellcp' => {"idrivecron" => "/etc/init.d/$appCron"},
 			'shellln' => {},
-			'setupcmd' => ['chkconfig --add idrivecron', 'service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop', 'chkconfig --del idrivecron'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["chkconfig --add $appCron", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "chkconfig --del $appCron"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/fedora/lte-13.99/"
 		},
 		'gte-14.0' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron.service' => '/lib/systemd/system/idrivecron.service'},
+			'shellcp' => {"idrivecron.service" => "/lib/systemd/system/$appCron.service"},
 			'shellln' => {},
-			'setupcmd' => ['systemctl unmask idrivecron.service', 'systemctl enable idrivecron.service', 'systemctl start idrivecron.service'],
-			'stopcmd' => ['systemctl stop idrivecron.service', 'systemctl disable idrivecron.service'],
-			'restartcmd' => 'systemctl restart idrivecron',
+			'setupcmd' => ["systemctl unmask $appCron.service", "systemctl enable $appCron.service", "systemctl start $appCron.service"],
+			'stopcmd' => ["systemctl stop $appCron.service", "systemctl disable $appCron.service"],
+			'restartcmd' => "systemctl restart $appCron",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/fedora/gte-14.0/"
 		}
@@ -935,11 +1013,11 @@ our %cronLaunchCodes = (
 		'lt-7.00' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron' => '/etc/init.d/idrivecron'},
+			'shellcp' => {"idrivecron" => "/etc/init.d/$appCron"},
 			'shellln' => {},
-			'setupcmd' => ['chkconfig --add idrivecron', 'service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop', 'chkconfig --del idrivecron'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["chkconfig --add $appCron", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "chkconfig --del $appCron"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/fedoracore/lt-7.00/"
 		},
@@ -948,26 +1026,26 @@ our %cronLaunchCodes = (
 		'gte-11.0' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {'rc.conf' => '/etc/rc.conf'},
-			'shellcp' => {'idrivecron' => '/etc/rc.d/idrivecron'},
+			'shellcp' => {"idrivecron" => "/etc/rc.d/$appCron"},
 			'shellln' => {},
-			'setupcmd' => ['service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["service $appCron start"],
+			'stopcmd' => ["service $appCron stop"],
+			'restartcmd' => "service $appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/freebsd/gte-11.0/"
 		},
 	},
 	'gentoo' => {
-		'gte-2.0' => {
+		'gte-1.0' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron' => '/etc/init.d/idrivecron'},
+			'shellcp' => {"idrivecron" => "/etc/init.d/$appCron"},
 			'shellln' => {},
-			'setupcmd' => ['rc-update add idrivecron default', 'service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop', 'rc-update delete idrivecron default'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["rc-update add $appCron default", "service $appCron start"],
+			'stopcmd' => ["service $appCron stop", "rc-update delete $appCron default"],
+			'restartcmd' => "service $appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
-			'setupdir' => "$cronSetupPath/gentoo/gte-2.0/"
+			'setupdir' => "$cronSetupPath/gentoo/gte-1.0/"
 		},
 	},
 	'linuxmint' => {
@@ -975,36 +1053,51 @@ our %cronLaunchCodes = (
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron.service' => '/lib/systemd/system/idrivecron.service'
+				"idrivecron.service" => "/lib/systemd/system/$appCron.service"
 			},
 			'shellln' => {},
-			'setupcmd' => ['systemctl enable idrivecron', 'systemctl start idrivecron'],
-			'stopcmd' => ['systemctl stop idrivecron', 'systemctl disable idrivecron'],
-			'restartcmd' => 'systemctl restart idrivecron',
+			'setupcmd' => ["systemctl enable $appCron", "systemctl start $appCron"],
+			'stopcmd' => ["systemctl stop $appCron", "systemctl disable $appCron"],
+			'restartcmd' => "systemctl restart $appCron",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/linuxmint/gte-15.0/"
+		},
+	},
+	'manjarolinux' => {
+		'gt-0.8' => {
+			'pidpath' => $cronservicepid,
+			'confappend' => {},
+			'shellcp' => {
+				'idrivecron.service' => "/lib/systemd/system/$appCron.service"
+			},
+			'shellln' => {},
+			'setupcmd' => ["systemctl enable $appCron", "systemctl start $appCron"],
+			'stopcmd' => ["systemctl stop $appCron", "systemctl disable $appCron"],
+			'restartcmd' => "systemctl restart $appCron",
+			'launcherdecoy' => '__LAUNCHPATH__',
+			'setupdir' => "$cronSetupPath/manjarolinux/gte-0.8/"
 		},
 	},
 	'opensuse' => {
 		'lte-14.99' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron' => '/etc/init.d/idrivecron'},
+			'shellcp' => {"idrivecron" => "/etc/init.d/$appCron"},
 			'shellln' => {},
-			'setupcmd' => ['chkconfig --add idrivecron', '/sbin/service idrivecron start'],
-			'stopcmd' => ['/sbin/service idrivecron stop', 'chkconfig --del idrivecron'],
-			'restartcmd' => '/sbin/service idrivecron restart',
+			'setupcmd' => ["chkconfig --add $appCron", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "chkconfig --del $appCron"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/opensuse/lte-14.99/"
 		},
 		'gte-15.0' => {
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
-			'shellcp' => {'idrivecron.service' => '/usr/lib/systemd/system/idrivecron.service'},
+			'shellcp' => {"idrivecron.service" => "/usr/lib/systemd/system/$appCron.service"},
 			'shellln' => {},
-			'setupcmd' => ['systemctl unmask idrivecron', 'systemctl enable idrivecron', 'systemctl start idrivecron'],
-			'stopcmd' => ['systemctl stop idrivecron', 'systemctl disable idrivecron'],
-			'restartcmd' => 'systemctl restart idrivecron',
+			'setupcmd' => ["systemctl unmask $appCron", "systemctl enable $appCron", "systemctl start $appCron"],
+			'stopcmd' => ["systemctl stop $appCron", "systemctl disable $appCron"],
+			'restartcmd' => "systemctl restart $appCron",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/opensuse/gte-15.0/"
 		},
@@ -1014,12 +1107,12 @@ our %cronLaunchCodes = (
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron' => '/etc/init.d/idrivecron',
+				"idrivecron" => "/etc/init.d/$appCron",
 			},
 			'shellln' => {},
-			'setupcmd' => ['update-rc.d idrivecron defaults', 'service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop', 'update-rc.d -f idrivecron remove'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["update-rc.d $appCron defaults", "/etc/init.d/$appCron start"],
+			'stopcmd' => ["/etc/init.d/$appCron stop", "update-rc.d -f $appCron remove"],
+			'restartcmd' => "/etc/init.d/$appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/ubuntu/lte-9.04/"
 		},
@@ -1027,12 +1120,12 @@ our %cronLaunchCodes = (
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron.conf' => '/etc/init/idrivecron.conf',
+				"idrivecron.conf" => "/etc/init/$appCron.conf",
 			},
 			'shellln' => {},
-			'setupcmd' => ['service idrivecron start'],
-			'stopcmd' => ['service idrivecron stop'],
-			'restartcmd' => 'service idrivecron restart',
+			'setupcmd' => ["service $appCron start"],
+			'stopcmd' => ["service $appCron stop"],
+			'restartcmd' => "service $appCron restart",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/ubuntu/btw-9.10_14.10/"
 		},
@@ -1040,12 +1133,12 @@ our %cronLaunchCodes = (
 			'pidpath' => $cronservicepid,
 			'confappend' => {},
 			'shellcp' => {
-				'idrivecron.service' => '/lib/systemd/system/idrivecron.service'
+				"idrivecron.service" => "/lib/systemd/system/$appCron.service"
 			},
 			'shellln' => {},
-			'setupcmd' => ['systemctl enable idrivecron.service', 'systemctl start idrivecron.service'],
-			'stopcmd' => ['systemctl stop idrivecron.service', 'systemctl disable idrivecron.service'],
-			'restartcmd' => 'systemctl restart idrivecron.service',
+			'setupcmd' => ["systemctl enable $appCron.service", "systemctl start $appCron.service"],
+			'stopcmd' => ["systemctl stop $appCron.service", "systemctl disable $appCron.service"],
+			'restartcmd' => "systemctl restart $appCron.service",
 			'launcherdecoy' => '__LAUNCHPATH__',
 			'setupdir' => "$cronSetupPath/ubuntu/gte-15.00/"
 		},
@@ -1083,7 +1176,7 @@ our %idriveScripts = (
 	'strings'                     => 'Strings.pm',
 	'uninstallcron'               => 'uninstallcron.pl',
 	'uninstall_script'            => 'Uninstall_Script.pl',
-	'view_log'                    => 'view_log.pl',
+	'view_log'                    => 'logs.pl',
 	'post_update'                 => 'post_update.pl',
 	'deprecated_account_settings' => 'Account_Setting.pl',
 	'deprecated_check_for_update' => 'Check_For_Update.pl',
@@ -1092,6 +1185,10 @@ our %idriveScripts = (
 	'deprecated_restore_version'  => 'Restore_Version.pl',
 	'deprecated_view_log'         => 'View_Log.pl',
 	'deprecated_logout'           => 'Logout.pl',
+	'deprecated_strings'          => 'Strings.pm',
+	'deprecated_configuration'    => 'Configuration.pm',
+	'deprecated_helpers'          => 'Helpers.pm',
+	'deprecated_viewlog'          => 'view_log.pl',
 );
 
 our %evsOperations = (
@@ -1185,21 +1282,24 @@ our @errorArgumentsExit = (
 	"not enough free space on device"
 );
 
-our %statusHash = 	(	"COUNT_FILES_INDEX" => 0,
-						"SYNC_COUNT_FILES_INDEX" => 0,
-						"ERROR_COUNT_FILES" => 0,
-						"FAILEDFILES_LISTIDX" => 0,
-						"EXIT_FLAG" => 0,
-						"FILES_COUNT_INDEX" => 0,
-						"DENIED_COUNT_FILES" => 0,
-						"MISSED_FILES_COUNT" => 0,
-						"FAILED_COUNT_FILES_INDEX" => 0,
-					);
+our %statusHash = (
+	COUNT_FILES_INDEX => 0,
+	SYNC_COUNT_FILES_INDEX => 0,
+	ERROR_COUNT_FILES => 0,
+	FAILEDFILES_LISTIDX => 0,
+	EXIT_FLAG => 0,
+	FILES_COUNT_INDEX => 0,
+	DENIED_COUNT_FILES => 0,
+	MISSED_FILES_COUNT => 0,
+	FAILED_COUNT_FILES_INDEX => 0,
+);
 
 our %errorDetails = (
 	100 => 'logout_&_login_&_try_again',
 	101 => 'your_account_not_configured_properly',
 	102 => 'login_&_try_again',
+	103 => 'your_account_not_configured_properly_reconfigure',
+	104 => 'account_not_configured',	
 	1000 => 'invalid_bwt',
 	1001 => 'invalid_nfb',
 	1002 => 'invalid_nmb',
@@ -1217,13 +1317,43 @@ our %userConfigurationLockSchema = (
 );
 
 our %evsVersionSchema = (
-	'idevsutil' => {
-			'version' => '1.0.2.8',
-			'release_date' => '05-JUNE-2018',
+	'IDrive' => {
+		'idevsutil' => {
+				'version' => '1.0.2.8',
+				'release_date' => '05-JUNE-2018',
+				},
+		'idevsutil_dedup' => {
+				'version' => '2.0.0.1',
+				'release_date' => '21-MAY-2018',
+				},
+	},
+	'IBackup' => {
+		'idevsutil' => {
+				'version' => '1.0.2.8',
+				'release_date' => '18-MARCH-2015',
+				},
+	}
+);
+our %minMaxVersionSchema = (
+	'IDrive' => {
+		'1' => {
+			'min' => '2.10',
+			'max' => '2.18',
 			},
-	'idevsutil_dedup' => {
-			'version' => '2.0.0.1',
-			'release_date' => '21-MAY-2018',
+		'2' => {
+			'min' => '2.18',
+			'max' => '2.18',
 			},
+	},
+	'IBackup' => {
+		'1' => {
+			'min' => '2.7',
+			'max' => '2.11',
+			},
+		'2' => {
+			'min' => '2.12',
+			'max' => '2.12',
+			},
+	}
 );
 1;
