@@ -12,15 +12,9 @@ use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/
 
 use Helpers qw(display createCrontab loadCrontab getCrontab prettyPrint setCrontab retreat);
 use Configuration;
-
-eval {
-	if($Configuration::appType eq 'IDrive') {
-		require PropSchema;
-	}
-};
+use PropSchema;
 
 my $cmdNumOfArgs = $#ARGV;
-Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 init();
@@ -35,7 +29,7 @@ sub init {
 	Helpers::loadServicePath() or retreat('invalid_service_directory');
 	Helpers::loadUsername() or retreat('login_&_try_again');
 	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
 	Helpers::loadEVSBinary() or retreat('unable_to_find_or_execute_evs_binary');
 	Helpers::isLoggedin() or retreat('login_&_try_again');
 	Helpers::displayHeader();
@@ -43,17 +37,11 @@ sub init {
 	# check the status of cron job, if not runnig ask the user to start the cron
 	unless(Helpers::checkCRONServiceStatus() == Helpers::CRON_RUNNING) {
 		display(['cron_service_not_running', '.']);
-		my $res = Helpers::confirmRestartIDriveCRON();
-		unless(Helpers::checkCRONServiceStatus() == Helpers::CRON_RUNNING) {
-			if($Configuration::mcUser eq 'root') {
-				Helpers::retreat(['please_try_again', '.']);
-			} else {
-				Helpers::retreat(['please_make_sure_you_are_sudoers_list_and_try']);
-			}
-		}
+		Helpers::confirmRestartIDriveCRON();
+		Helpers::retreat(['please_try_again', '.']) unless(Helpers::checkCRONServiceStatus() == Helpers::CRON_RUNNING);
 	}
 
-	checkActiveDashboard() if($Configuration::appType eq 'IDrive');
+	checkActiveDashboard();
 
 	my @jobTypes = ("backup", "express_backup", "archive");
 	my @jobNames = ("default_backupset", "local_backupset", "default_backupset");
@@ -130,6 +118,43 @@ sub checkActiveDashboard {
 }
 
 #*****************************************************************************************************
+# Subroutine			: checkRunningJobs
+# Objective				: This function is used check the running jobs and to update the jbbs accordingly.
+# Added By				: Anil Kumar
+#****************************************************************************************************/
+sub checkRunningJobs {
+
+	my $jobType = $_[0];
+	my $jobRunningDir = Helpers::getUserProfilePath();
+	#Getting working dir path and loading path to all other files
+	if ($jobType eq "backup") {
+		$jobRunningDir = $jobRunningDir."/Backup/DefaultBackupSet";
+	} elsif($jobType eq "express_backup") {
+		$jobRunningDir = $jobRunningDir."/Backup/LocalBackupSet";
+	} elsif($jobType eq "archive") {
+		$jobRunningDir = $jobRunningDir."/Archive/DefaultBackupSet";
+	}
+
+	#Checking if another job is already in progress
+	my $pidPath = "$jobRunningDir/pid.txt";
+	if (-e $pidPath) {
+		my $isSchedulerRunning = 1;
+		$isSchedulerRunning = Helpers::isJobRunning($jobType) if($jobType ne "archive");
+		if($isSchedulerRunning) {
+			display(["\n", $jobType.'_job_is_already_in_progress_try_again'], 1);
+			display(["\n", 'would_you_like_to_proceed', "\n"], 1);
+			my $choice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+
+			exit(0) if(lc($choice) eq "n" );
+
+			# if user agreed need to terminate the existing jobs
+			my $username = Helpers::getUsername();
+			my $jobTerminationScript = Helpers::getScript('job_termination', 1);
+			system("$Configuration::perlBin $jobTerminationScript \'$jobType\' \'$username\' 1>/dev/null 2>/dev/null");
+		}
+	}
+}
+#*****************************************************************************************************
 # Subroutine			: scheduleArchiveJob
 # Objective				: This function is used to schedule the archive job
 # Added By				: Anil Kumar
@@ -141,8 +166,7 @@ sub scheduleArchiveJob {
 	my $jobName = "default_backupset";
 	my $backupType  = Helpers::getUserConfiguration('BACKUPTYPE');
 	my $locktype	= 'arch_cleanup_checked';
-	my @archlocks 	= ();
-	@archlocks 	= PropSchema::getLockedArchiveFields() if($Configuration::appType eq 'IDrive');
+	my @archlocks 	= PropSchema::getLockedArchiveFields();
 	unless($backupType =~ /mirror/){
 		Helpers::retreat('backup_type_must_be_mirror');
 		exit 0;
@@ -186,7 +210,6 @@ sub scheduleArchiveJob {
 # Subroutine			: updateInfoDetails
 # Objective				: This function is used to update the job details
 # Added By				: Anil Kumar
-# Modified By 		: Yogesh Kumar
 #****************************************************************************************************/
 sub updateInfoDetails {
 	my $jobType = $_[0];
@@ -202,28 +225,23 @@ sub updateInfoDetails {
 	}
 
 	Helpers::saveCrontab();
-	if (($jobType eq 'backup') and Helpers::loadNotifications()) {
-		Helpers::setNotification('get_scheduler') and Helpers::saveNotifications();
-		if (Helpers::getNotifications('alert_status_update') eq $Configuration::alertErrCodes{'no_scheduled_jobs'}) {
-			Helpers::setNotification('alert_status_update', 0) and Helpers::saveNotifications();
-		}
-	}
+	Helpers::loadNotifications() and Helpers::setNotification('get_scheduler') and Helpers::saveNotifications();
 
 	#need to check the backup set file to confirm whether it is empty or not.
 	my ($jobRunningDir, $backupsetType) = ("") x 2;
 	if ($jobType eq "express_backup") {
-		$jobRunningDir = Helpers::getJobsPath('localbackup');
+		$jobRunningDir = Helpers::getUsersInternalDirPath("localbackup");
 		$backupsetType = 'express backupset';
 	} else {
-		$jobRunningDir = Helpers::getJobsPath($jobType);
+		$jobRunningDir = Helpers::getUsersInternalDirPath($jobType);
 		$backupsetType = 'backupset';
 	}
-	my $backupsetFile = Helpers::getCatfile($jobRunningDir, $Configuration::backupsetFile);
+	my $backupsetFile	= Helpers::getCatfile($jobRunningDir, $Configuration::backupsetFile);
 
 	if ($backupType == 0) {
 		displayCrontab('string', $jobType, $jobName);
 	} elsif($backupType == 1) {
-		display(["\n", $jobType.'_job_started_successfully'], 1) if(-s $backupsetFile);
+		display(["\n", $jobType.'_job_started_sucessfully'], 1) if(-s $backupsetFile);
 	} else {
 		display(["\n", 'periodic_archive_cleanup', 'has_been_scheduled_successfully'],1);
 	}
@@ -266,7 +284,7 @@ sub scheduleBackupJob {
 	my $jobType  = "backup";
 	my $jobName = "default_backupset";
 
-	display(["\n", "your_backup_to_device_name_is", ' "', (Helpers::getUserConfiguration('DEDUP') eq 'on') ? (split('#', (Helpers::getUserConfiguration('BACKUPLOCATION'))))[1] :  Helpers::getUserConfiguration('BACKUPLOCATION'),"\"."], 0);
+	display(["\n", "your_backup_to_device_name_is", ' "', (index(Helpers::getUserConfiguration('BACKUPLOCATION'), '#') != -1 )? (split('#', (Helpers::getUserConfiguration('BACKUPLOCATION'))))[1] :  Helpers::getUserConfiguration('BACKUPLOCATION'),"\"."], 0);
 
 	if (Helpers::getUserConfiguration('DEDUP') eq 'off') {
 		display([' ', 'do_you_really_want_to_edit_(_y_n_)', '?']);
@@ -274,7 +292,7 @@ sub scheduleBackupJob {
 
 		if ($yesorno eq 'y') {
 			Helpers::setBackupToLocation();
-			Helpers::saveUserConfiguration() or retreat('failed_to_save_user_configuration');
+			Helpers::saveUserConfiguration() or retreat('failed');
 		}
 	}
 
@@ -295,8 +313,7 @@ sub updateBackupType {
 	# need to check whether any scheduled job is running or not.
 	# checkRunningJobs($_[0]);
 
-	my @schlocks 	= ();
-	@schlocks 	= PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
+	my @schlocks 		= PropSchema::getLockedScheduleFields();
 	my $freqtype		= (($_[0] eq 'backup')? 'backup_freq' : 'localbackup_freq');
 	my $timetype		= (($_[0] eq 'backup')? 'backup_nxttrftime' : 'localbackup_nxttrftime');
 	my $userSelection	= 1;
@@ -324,7 +341,7 @@ sub updateBackupType {
 		# check for empty backup set and exit if empty
 		my ($jobRunningDir, $backupsetType) = ('') x 2;
 		if($_[0] eq "express_backup") {
-			$jobRunningDir = Helpers::getJobsPath("localbackup");
+			$jobRunningDir = Helpers::getUsersInternalDirPath("localbackup");
 			$backupsetType = 'express backupset';
 		} else {
 			my $isArchiveRunning = 1;
@@ -333,7 +350,7 @@ sub updateBackupType {
 				display(["\n", 'archive_in_progress_try_again'], 1);
 				exit 0;
 			}
-			$jobRunningDir = Helpers::getJobsPath($_[0]);
+			$jobRunningDir = Helpers::getUsersInternalDirPath($_[0]);
 			$backupsetType = 'backupset';
 		}
 
@@ -359,8 +376,7 @@ sub goToCutOff {
 	my $jobType = $_[0] || retreat('jobname_is_required');
 	my $jobName = $_[1] || retreat('jobtitle_is_required');
 
-	my @schlocks 	    = ();
-	@schlocks 		    = PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
+	my @schlocks 		= PropSchema::getLockedScheduleFields();
 	my $cutofftype		= (($jobType eq 'backup')? 'backup_cutoff' : 'localbackup_cutoff');
 	my $freqtype		= (($jobType eq 'backup')? 'backup_freq' : 'localbackup_freq');
 	my $timetype		= (($jobType eq 'backup')? 'backup_nxttrftime' : 'localbackup_nxttrftime');
@@ -469,7 +485,7 @@ sub displayCrontab {
 	}
 	elsif ($displayFormat eq 'table') {
 		my $startDate = "NA";
-		prettyPrint(['-16s', $jobType.'_title'], ['s', Helpers::colorScreenOutput(getCrontab($jobType, $jobName, '{settings}{status}'), '9s')]);
+		prettyPrint(['-16s', $jobType.'_title'], ['s', Helpers::coloredFormat(getCrontab($jobType, $jobName, '{settings}{status}'), '9s')]);
 
 		if (((getCrontab($jobType, $jobName, '{settings}{frequency}') eq 'daily') || (getCrontab($jobType, $jobName, '{settings}{frequency}') eq 'hourly')) && ($jobType ne "archive")) {
 			prettyPrint(['-25s', getCrontab($jobType, $jobName, '{settings}{frequency}')]);
@@ -504,16 +520,16 @@ sub displayCrontab {
 			prettyPrint(['-25s', $fre]);
 
 			prettyPrint(['.2d', getCrontab($jobType, $jobName, '{h}')], ['s', ':'], ['-13.2d', getCrontab($jobType, $jobName, '{m}')],
-			['s', Helpers::colorScreenOutput('disabled', '16s')],
+			['s', Helpers::coloredFormat('disabled', '16s')],
 			['.2d', '00'], ['s', ':'], ['-13.2d', '00'],
 			['9s', $startDate]);
 		}
 		else {
 			if(getCrontab($jobType, $jobName, '{settings}{frequency}') eq 'hourly') {
 				my $zeroapp = (getCrontab($jobType, $jobName, '{m}') <= 9)? '0' : '';
-				prettyPrint(['4s', $zeroapp . ordinal(getCrontab($jobType, $jobName, '{m}')), '4s'], ['1s', ''], ['6s', ucfirst('minute')], ['5s', ''], ['s', Helpers::colorScreenOutput(getCrontab('cancel', $jobName, '{settings}{status}'), '16s')], ['.2d', getCrontab('cancel', $jobName, '{h}')], ['s', ':'], ['-13.2d', getCrontab('cancel', $jobName, '{m}')], ['9s', $startDate]);
+				prettyPrint(['4s', $zeroapp . ordinal(getCrontab($jobType, $jobName, '{m}')), '4s'], ['1s', ''], ['6s', ucfirst('minute')], ['5s', ''], ['s', Helpers::coloredFormat(getCrontab('cancel', $jobName, '{settings}{status}'), '16s')], ['.2d', getCrontab('cancel', $jobName, '{h}')], ['s', ':'], ['-13.2d', getCrontab('cancel', $jobName, '{m}')], ['9s', $startDate]);
 			} else {
-				prettyPrint(['.2d', ((getCrontab($jobType, $jobName, '{h}') eq '*')?'00':getCrontab($jobType, $jobName, '{h}'))], ['s', ':'], ['-13.2d', getCrontab($jobType, $jobName, '{m}')], ['s', Helpers::colorScreenOutput(getCrontab('cancel', $jobName, '{settings}{status}'), '16s')], ['.2d', getCrontab('cancel', $jobName, '{h}')], ['s', ':'], ['-13.2d', getCrontab('cancel', $jobName, '{m}')], ['9s', $startDate]);
+				prettyPrint(['.2d', ((getCrontab($jobType, $jobName, '{h}') eq '*')?'00':getCrontab($jobType, $jobName, '{h}'))], ['s', ':'], ['-13.2d', getCrontab($jobType, $jobName, '{m}')], ['s', Helpers::coloredFormat(getCrontab('cancel', $jobName, '{settings}{status}'), '16s')], ['.2d', getCrontab('cancel', $jobName, '{h}')], ['s', ':'], ['-13.2d', getCrontab('cancel', $jobName, '{m}')], ['9s', $startDate]);
 			}
 
 		}
@@ -571,8 +587,7 @@ sub schedule {
 	my $jobType = $_[1] || retreat('jobname_is_required');
 	my $jobName = $_[2] || retreat('jobtitle_is_required');
 
-	my @schlocks 	= ();
-	@schlocks 	= PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
+	my @schlocks 		= PropSchema::getLockedScheduleFields();
 	my $freqtype		= (($jobType eq 'backup')? 'backup_freq' : 'localbackup_freq');
 	my $timetype		= (($jobType eq 'backup')? 'backup_nxttrftime' : 'localbackup_nxttrftime');
 	my $cutofftype		= (($jobType eq 'backup')? 'backup_cutoff' : 'localbackup_cutoff');
@@ -679,9 +694,8 @@ sub weeklySchedule {
 
 	my $dailySchedule = 0;
 
-	my @schlocks 	= ();
-	@schlocks 		= PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
-	my $freqtype	= (($jobType eq 'backup')? 'backup_freq' : 'localbackup_freq');
+	my @schlocks 		= PropSchema::getLockedScheduleFields();
+	my $freqtype		= (($jobType eq 'backup')? 'backup_freq' : 'localbackup_freq');
 
 	if(grep(/^$freqtype$/, @schlocks)) {
 		display(['weekly_scheduled_days', ': ', uc(getCrontab($jobType, $jobName, '{dow}')), "\n"]);
@@ -772,9 +786,8 @@ sub updateCrontab {
 	my $jobType = $_[0] || retreat('jobname_is_required');
 	my $jobName = $_[1] || retreat('jobtitle_is_required');
 
-	my @schlocks 	= ();
-	@schlocks 		= PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
-	my $freqtype	= (($jobType eq 'backup')? 'backup_freq' : 'localbackup_freq');
+	my @schlocks 		= PropSchema::getLockedScheduleFields();
+	my $freqtype		= (($jobType eq 'backup')? 'backup_freq' : 'localbackup_freq');
 
 	tie(my %optionsInfo, 'Tie::IxHash',
 		'hourly_u' => \&hourlyschedule,
@@ -800,17 +813,16 @@ sub updateCrontab {
 # Subroutine			: disable
 # Objective				: This function is used to display the options based on the requirement.
 # Added By				: Anil Kumar
-# Modified By			: Sabin Cheruvattil, Yogesh Kumar
+# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub disable {
 	my $operationType = $_[0];
 	my $jobType = "";
 	my $jobName = "";
 
-	my @schlocks 	= ();
-	@schlocks 		= PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
-	my @archlocks 	= ();
-	@archlocks 		= PropSchema::getLockedArchiveFields() if($Configuration::appType eq 'IDrive');
+	my @schlocks 	= PropSchema::getLockedScheduleFields();
+	my @archlocks 	= PropSchema::getLockedArchiveFields();
+
 	if ($operationType eq "disable_scheduled_backup_job") {
 		$jobType  = "backup";
 		$jobName = "default_backupset";
@@ -847,9 +859,6 @@ sub disable {
 		#$jobType =~ s/_/ /g	if($jobType eq "express_backup");
 		$jobType = "periodic_archive_cleanup" if($jobType eq "archive");
 		display([$jobType, 'job_has_been_disabled_successfully']);
-		if ($jobType eq 'backup') {
-			Helpers::loadNotifications() and Helpers::setNotification('alert_status_update', $Configuration::alertErrCodes{'no_scheduled_jobs'}) and Helpers::saveNotifications();
-		}
 	}
 
 	Helpers::saveCrontab();
@@ -880,9 +889,8 @@ sub updateEmailIDs {
 	my $jobType = $_[0] || retreat('jobname_is_required');
 	my $jobName = $_[1] || retreat('jobtitle_is_required');
 
-	my @schlocks 	= ();
-	@schlocks 		= PropSchema::getLockedScheduleFields() if($Configuration::appType eq 'IDrive');
-	my $emaillock	= (($_[0] eq 'backup')? 'backup_email' : 'localbackup_email');
+	my @schlocks 		= PropSchema::getLockedScheduleFields();
+	my $emaillock		= (($_[0] eq 'backup')? 'backup_email' : 'localbackup_email');
 
 	if(grep(/^$emaillock$/, @schlocks)) {
 		display(["\n", 'admin_has_locked_settings']);

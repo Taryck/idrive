@@ -6,12 +6,13 @@
 #****************************************************************************************************/
 
 package Helpers;
+use Taryck;
 use strict;
 use warnings;
 
 require Exporter;
 our @ISA       = qw(Exporter);
-our @EXPORT_OK = qw(display retreat getRemoteAccessToken encryptString getParentRemoteManageIP getRemoteManageIP getUsername getParentUsername getMachineUser getServicePath getCatfile retreat request getUserConfiguration setUserConfiguration saveUserConfiguration loadCrontab createCrontab getCrontab getUserProfilePath setCrontab prettyPrint loadNotifications setNotification saveNotifications loadNS getNS saveNS deleteNS getFileContents);
+our @EXPORT_OK = qw(display getRemoteAccessToken encryptString getParentRemoteManageIP getRemoteManageIP getUsername getMachineUser getServicePath getCatfile retreat request getUserConfiguration loadCrontab createCrontab getCrontab getUserProfilePath setCrontab prettyPrint);
 
 use Cwd 'abs_path';
 use POSIX qw(strftime);
@@ -32,15 +33,12 @@ use Sys::Hostname;
 
 use Configuration;
 use JSON;
-#use locale;
-my $isEngEnabled = currentLocale();
 
 # Locale Strings
-my (%LS, %Help) = () x 2;
+my %LS = ();
 if ($Configuration::language eq 'EN') {
 	use Locale::EN;
-	%LS   = %Locale::EN::strings;
-	%Help = %Locale::EN::content;
+	%LS = %Locale::EN::strings;
 }
 
 use constant STATUS => 'STATUS';
@@ -58,6 +56,8 @@ my $username = '';
 my $evsBinary;
 my $storageUsed;
 my $totalStorage;
+my $storageUsed_Raw_TBE;
+my $totalStorage_Raw_TBE;
 my $utf8File;
 my $serverAddress;
 my $machineHardwareName;
@@ -65,7 +65,7 @@ my $muid;
 my $mipa;
 my $errorDevNull = '2>>/dev/null';
 
-my (%notifications, %modifiedNotifications, %ns);
+my %notifications;
 our %crontab;
 our $machineInfo;
 
@@ -79,6 +79,7 @@ my $filecount = 0;
 
 my %backupExcludeHash = (); #Hash containing items present in Exclude List#
 my ($totalSize,$prevFailedCount,$cols,$latestCulmn,$backupfilecount,$skippedItem) = (0) x 6;
+my $progressSizeOp = 1;
 my ($backupLocationDir,$summaryError,$summary) = ('') x 4;
 my $lineFeed = "\n";
 my @startTime;
@@ -115,13 +116,12 @@ sub appendEndProcessInProgressFile {
 # Subroutine Name         : appendErrorFileContents
 # Objective               : This subroutine appends the contents of the error file to the output file
 #							and deletes the error file.
-# Modified By             : Deepak Chaurasia, Senthil Pandian
+# Modified By                : Deepak Chaurasia
 #*****************************************************************************************************/
 sub appendErrorFileContents
 {
 	my $errorDir = $_[0]."/";
-	my $filesListCmd = updateLocaleCmd("ls '$errorDir'");
-	my @files_list = `$filesListCmd`;
+	my @files_list = `ls '$errorDir'`;
 	my $fileopen = 0;
 	my $proxyErr = 0;
 
@@ -140,7 +140,7 @@ sub appendErrorFileContents
 				$summaryError.="_______________________________________________________________________________________$lineFeed";
 			}
 			$fileopen = 1;
-			open ERROR_FILE, "<", $file or traceLog('failed_to_open_file'," $file. Reason $!");
+			open ERROR_FILE, "<", $file or traceLog($Locale::strings{'failed_to_open_file'}." $file. Reason $!");
 			while(my $line = <ERROR_FILE>) {
 				$summaryError.=$line;
 				if ($line =~/.*(Proxy Authentication Required).*|.*(bad response from proxy).*/is){
@@ -166,12 +166,12 @@ sub appendErrorFileContents
 # Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub authenticateUser {
+	my $authCGI;
 	my $uname = $_[0];
 	my $upswd = $_[1];
-	my $emailID = $_[2];
 
-	my $authCGI = $Configuration::IDriveAuthCGI;
-	$authCGI = $Configuration::IBackupAuthCGI if ($Configuration::appType eq 'IBackup');
+	$authCGI = $Configuration::IDriveAuthCGI;
+	$authCGI = $Configuration::IBackupAuthCGI	if ($Configuration::appType eq 'IBackup');
 	my @responseData;
 	my %params = (
 		'host' => $authCGI,
@@ -184,60 +184,33 @@ sub authenticateUser {
 
 	my $res = requestViaUtility(\%params);
 
-	if ($res) {
-		@responseData = parseEVSCmdOutput($res->{DATA}, 'login', 1);
-		if ($responseData[0]->{'STATUS'} eq 'FAILURE') {
-			my $errorMsg = (defined($emailID) and $emailID ne $uname)? 'failed_to_authenticate_user_associated' : 'failed_to_authenticate_username';
-			$errorMsg = getStringConstant($errorMsg);
-			$errorMsg =~ s/__USER__/$uname/eg;
-			$errorMsg =~ s/__EMAILID__/$emailID/eg;
+	# If cgi fails to provide any output then fallback to EVS commands for authentication
+	unless ($res) {
+		my $tmpPath = "$servicePath/$Configuration::mcUser/$Configuration::tmpPath";
+		createDir($tmpPath);
 
-			if (exists $responseData[0]->{'desc'}) {
-				if (($responseData[0]->{'desc'} eq 'passwords do not match') and loadNotifications()) {
-					setNotification('alert_status_update', $Configuration::alertErrCodes{'uname_pwd_mismatch'}) and saveNotifications();
-				}
-				retreat([$errorMsg, ucfirst($responseData[0]->{'desc'}), '. ', 'please_try_again']);
+		createUTF8File('STRINGENCODE',$upswd, ("$tmpPath/$_[0]\.tmp")) or
+			retreat('failed_to_create_utf8_file');
+		my @result = runEVS();
+
+		if (($result[0]->{'STATUS'} eq Configuration::SUCCESS) and ($result[0]->{'MSG'} eq 'no_stdout')) {
+			createUTF8File('VALIDATE',$_[0], ("$tmpPath/$_[0]\.tmp")) or
+			retreat('failed_to_create_utf8_file');
+			@responseData = runEVS('tree');
+
+			if (defined($responseData[0]->{'MSG'}) && $responseData[0]->{'MSG'} =~ m/unable to reach the server/i) {
+				retreat('please_check_internet_con_and_try');
 			}
-
-			if (exists $responseData[0]->{'MSG'} && $responseData[0]->{'MSG'} ne '') {				
-				#retreat(ucfirst($responseData[0]->{'MSG'})) if($responseData[0]->{'MSG'} =~ /Try again/);
-				retreat([$errorMsg, ucfirst($responseData[0]->{'MSG'})]) if($responseData[0]->{'MSG'} =~ /Try again/i);				
-				retreat([$errorMsg, ucfirst($responseData[0]->{'MSG'}), '. ', 'please_try_again']);
-			}
-			retreat([$errorMsg,'please_try_again']);
 		}
-
-		if ((exists $responseData[0]->{'plan_type'}) and ($responseData[0]->{'plan_type'} eq 'Mobile-Only')) {
-			retreat(ucfirst($responseData[0]->{'desc'}));
+		else {
+			retreat(['Your account is under maintenance. Please contact support for more information',"."]) if ((defined($result[0]->{'desc'})) && ($result[0]->{'desc'} eq 'ACCOUNT IS UNDER MAINTENANCE'));
+			retreat(ucfirst($result[0]->{'MSG'})) if (defined($result[0]->{'MSG'}));
+			retreat(ucfirst($result[0]->{'desc'}));
 		}
-
-		if ((exists $responseData[0]->{'accstat'}) and ($responseData[0]->{'accstat'} eq 'C')) {
-			checkErrorAndLogout('account has been cancelled');
-			loadNotifications() and
-				setNotification('alert_status_update', $Configuration::alertErrCodes{'account_cancelled'}) and saveNotifications();
-			retreat('your_account_has_been_cancelled');
-		}
-
-		if ((exists $responseData[0]->{'accstat'}) and ($responseData[0]->{'accstat'} eq 'M')) {
-			checkErrorAndLogout('account is under maintenance');
-			loadNotifications() and
-				setNotification('alert_status_update', $Configuration::alertErrCodes{'account_under_maint'}) and saveNotifications();
-			retreat('your_account_is_under_maintenance');
-		}
-
-		if ((exists $responseData[0]->{'accstat'}) and ($responseData[0]->{'accstat'} eq 'B')) {
-			checkErrorAndLogout('account has been blocked');
-			loadNotifications() and
-				setNotification('alert_status_update', $Configuration::alertErrCodes{'account_blocked'}) and saveNotifications();
-			retreat('your_account_has_been_blocked');
-		}
+		rmtree("$servicePath/$Configuration::mcUser/$Configuration::tmpPath");
 	}
-
-	if (loadNotifications() and ((getNotifications('alert_status_update') eq $Configuration::alertErrCodes{'uname_pwd_mismatch'}) or
-			(getNotifications('alert_status_update') eq $Configuration::alertErrCodes{'account_cancelled'}) or
-			(getNotifications('alert_status_update') eq $Configuration::alertErrCodes{'account_under_maint'}) or
-			(getNotifications('alert_status_update') eq $Configuration::alertErrCodes{'account_blocked'}))) {
-		setNotification('alert_status_update', 0) and saveNotifications();
+	else {
+		@responseData = parseEVSCmdOutput($res->{DATA}, 'login', 1);
 	}
 	return @responseData;
 }
@@ -246,7 +219,7 @@ sub authenticateUser {
 # Subroutine			: askProxyDetails
 # Objective				: Ask user to provide proxy details.
 # Added By				: Yogesh Kumar
-# Modified By			: Anil Kumar [27/04/2018], Senthil Pandian
+# Modified By			: Anil Kumar [27/04/2018]
 #****************************************************************************************************/
 sub askProxyDetails {
 	display(["\n",'are_using_proxy_y_n', '? ', "\n"], 0);
@@ -288,14 +261,12 @@ sub askProxyDetails {
 			my @responseData = ();
 			createUTF8File('PING')  or retreat('failed_to_create_utf8_file');
 			@responseData = runEVS();
-			if (($responseData[0]->{'STATUS'} eq Configuration::FAILURE)) {
-				traceLog("Proxy validation error: ".$responseData[0]->{'MSG'}) if(defined($responseData[0]->{'MSG'}));
-				#if($responseData[0]->{'MSG'} =~ /Could not resolve proxy|Failed to connect to .* port [0-9]+: Connection refused|Failed connect to .* Connection refused|Connection timed out|response code said error|407 Proxy Authentication Required|HTTP code 407|execution_failed|kindly_verify_ur_proxy|No route to host|Could not resolve host/) {
-				if($responseData[0]->{'MSG'} =~ /$Configuration::proxyNetworkError/i) {
-					retreat(["\n", 'kindly_verify_ur_proxy']) if (defined($_[1]));
-				    display(["\n", 'kindly_verify_ur_proxy']);
-				    askProxyDetails(@_,"NoRetry");
-				}
+			if (($responseData[0]->{'STATUS'} eq Configuration::FAILURE) and ($responseData[0]->{'MSG'} =~ /Could not resolve proxy|Failed to connect to .* port [0-9]+: Connection refused|Failed connect to .* Connection refused|Connection timed out|response code said error|407|execution_failed|kindly_verify_ur_proxy|No route to host|Could not resolve host/)) {
+
+				retreat(["\n", 'kindly_verify_ur_proxy']) if (defined($_[1]));
+				display(["\n", 'kindly_verify_ur_proxy']);
+				askProxyDetails(@_,"NoRetry");
+
 			}
 			display(['proxy_details_updated_successfully', "\n"], 1) ;
 		}
@@ -313,7 +284,7 @@ sub askToCreateOrSelectADevice {
 	tie(my %optionsInfo, 'Tie::IxHash',
 		'create_new_backup_location' => \&createBucket,
 		'select_from_existing_backup_locations' => sub {
-			return linkBucket('backup', $_[0], \&askToCreateOrSelectADevice);
+			linkBucket('backup', $_[0], \&askToCreateOrSelectADevice);
 		}
 	);
 	my @options = keys %optionsInfo;
@@ -360,8 +331,7 @@ sub addLogStat {
 sub appendExcludedLogFileContents
 {
 	my $excludeDirPath = $Configuration::jobRunningDir."/".$Configuration::excludeDir."/";
-	my $filesList = updateLocaleCmd("ls '$excludeDirPath'");
-	my @files_list = `$filesList`;
+	my @files_list = `ls '$excludeDirPath'`;
 	my $fileopen = 0;
 	my $excludeLogSummary ='';
 	chomp(@files_list);
@@ -378,7 +348,7 @@ sub appendExcludedLogFileContents
 				$excludeLogSummary.="_______________________________________________________________________________________$lineFeed$lineFeed";
 			}
 			$fileopen = 1;
-			open EXCLUDED_FILE, "<", $file or traceLog('failed_to_open_file'," $file. Reason $!");
+			open EXCLUDED_FILE, "<", $file or traceLog($Locale::strings{'failed_to_open_file'}." $file. Reason $!");
 			while(my $line = <EXCLUDED_FILE>) {
 				$excludeLogSummary.=$line;
 			}
@@ -386,7 +356,7 @@ sub appendExcludedLogFileContents
 			unlink($file);
 		}
 	}
-	if ($excludeLogSummary) {
+	if ($excludeLogSummary){
 		$excludeLogSummary .= $lineFeed.$lineFeed;
 	}
 	if (-e $excludeDirPath and $excludeDirPath ne '/') {
@@ -443,8 +413,9 @@ sub backupTypeCheck {
 #*****************************************************************************************************/
 sub checkForRunningJobsInOtherUsers {
 	# to get all jobs that needs to kill from different user profiles.
+	my @idriveUsersList = ();
 	#Getting IDrive user list
-	my @idriveUsersList = getIDriveUserList();
+	@idriveUsersList = getIDriveUserList();
 	if (scalar @idriveUsersList > 0) {
 		foreach my $usrProfileDir (@idriveUsersList)  {
 			next if (getUsername() eq basename($usrProfileDir));
@@ -471,7 +442,7 @@ sub checkForRunningJobsInOtherUsers {
 # Subroutine Name		: getIDriveUserList
 # Objective				: Getting IDrive user list from service directory.
 # Added By				: Senthil Pandian
-# Modified By			: Sabin Cheruvattil, Senthil Pandian
+# Modified By			: Sabin Cheruvattil
 #*****************************************************************************************************/
 sub getIDriveUserList {
 	my @idriveUsersList 	= ();
@@ -480,14 +451,14 @@ sub getIDriveUserList {
 
 	if (opendir(MCUSERDIR, $usrProfileDirPath)) {
 		foreach my $userName (readdir(MCUSERDIR)) {
-			next if ($userName =~ /^\.\.?$/ || $userName eq "tmp");
+			next if ($userName =~ /^\.\.?$/);
 
 			my $mcUserProfileDir =  getCatfile(getServicePath(), $Configuration::userProfilePath, $userName);
 			next unless (-d $mcUserProfileDir);
 
 			if (opendir(DIR, $mcUserProfileDir)) {
 				foreach my $userName (readdir(DIR)) {
-					next if ($userName =~ /^\.\.?$/ || $userName =~ /.trace|tmp/);
+					next if ($userName =~ /^\.\.?$/ || $userName eq ".trace");
 
 					my $idriveUserProfileDir 	= "$mcUserProfileDir/$userName";
 					$idriveUserProfileDir		=  getCatfile($mcUserProfileDir, $userName);
@@ -504,12 +475,11 @@ sub getIDriveUserList {
 
 
 #*****************************************************************************************************
-# Subroutine			: calculateBackupsetSize
+# Subroutine			: calculateBackupsetDirectorySize
 # Objective				: Calculate backup set size
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian, Yogesh Kumar
 #****************************************************************************************************/
-sub calculateBackupsetSize {
+sub calculateBackupsetDirectorySize {
 	my $backupsizelock	= getBackupsetSizeLockFile($_[0]);
 
 	open(my $lockfh, ">>", $backupsizelock);
@@ -518,21 +488,21 @@ sub calculateBackupsetSize {
 	my $backuptype 		= $_[0];
 	return 0 unless($backuptype);
 
-	my $bsf = getJobsPath($_[0], 'file');
+	my $backupsizefile	= getCatfile(getUsersInternalDirPath($_[0]), $Configuration::backupsizefile);
 
-	return 0 if (!-f $bsf or !-s $bsf);
+	my $backupsetfile	= getCatfile(getUsersInternalDirPath($backuptype), $Configuration::backupsetFile);
+	return 0 if (!-f $backupsetfile || !-s $backupsetfile);
 
-	if (!open(BACKUPLISTFH, $bsf)) {
-		traceLog('failed_to_open_file', ": $bsf, Reason: $!");
+	if (!open(BACKUPLISTFH, $backupsetfile)) {
+		traceLog($Locale::strings{'failed_to_open_file'} . ": $backupsetfile, Reason: $!");
 		return 0;
 	}
 	close(BACKUPLISTFH);
 
 RERUNCALC:
-	my %backupsetsizes = ((-f "$bsf.json" and -s "$bsf.json")? %{JSON::from_json(getFileContents("$bsf.json"))} : ());
-	my $backupsetdata = getFileContents("$bsf", 'array');
-	my $prevbkpsetmodtm = ((-f "$bsf")? stat("$bsf")->mtime : 0);
-	my $prevbkpsetsizemodtm = ((-f "$bsf.json")? stat("$bsf.json")->mtime : 0);
+	my %backupsetsizes 	= ((-f $backupsizefile && -s $backupsizefile)? %{JSON::from_json(getFileContents($backupsizefile))} : ());
+	my $backupsetdata	= getFileContents($backupsetfile, 'array');
+	my $prevbkpsetmodtm	= ((-f $backupsizefile)? stat($backupsizefile)->mtime : 0);
 
 	loadUserConfiguration();
 	loadFullExclude();
@@ -543,7 +513,7 @@ RERUNCALC:
 	my ($dirsizes, $filecount, $filename) = (0, 0, '');
 
 	for my $i (0 .. $#{$backupsetdata}) {
-		unlink($backupsizelock) if (defined($_[1]) && !isFileLocked($_[1]));
+		unlink($backupsizelock) if(defined($_[1]) && !isFileLocked($_[1]));
 		exit(0) unless(-f $backupsizelock);
 		$filename		= @{$backupsetdata}[$i];
 		chomp($filename);
@@ -565,13 +535,10 @@ RERUNCALC:
 			$filecount = 0;
 		}
 
-		if ($prevbkpsetmodtm != 0 && $prevbkpsetmodtm != stat("$bsf")->mtime) {
-			last;
-		}
-		fileWrite2("$bsf.json", JSON::to_json(\%backupsetsizes));
+		fileWrite($backupsizefile, JSON::to_json(\%backupsetsizes));
 	}
 
-	goto RERUNCALC if ($prevbkpsetmodtm != 0 && $prevbkpsetmodtm != stat("$bsf")->mtime);
+	goto RERUNCALC if ($prevbkpsetmodtm != 0 && $prevbkpsetmodtm != stat($backupsizefile)->mtime);
 
 	# delete lock file
 	unlink($backupsizelock) if (-f $backupsizelock);
@@ -582,7 +549,6 @@ RERUNCALC:
 # Subroutine			: checkAndRenameFileWithStatus
 # Objective				: This subroutine check and rename file with status
 # Added By				: Senthil Pandian
-# Modified By			: Yogesh Kumar
 #****************************************************************************************************/
 sub checkAndRenameFileWithStatus {
 	my $jobDir		 = $_[0];
@@ -591,18 +557,14 @@ sub checkAndRenameFileWithStatus {
 	my $logPidFilePath = $jobDir."/".$Configuration::logPidFile;
 
 	if (-e $logPidFilePath){
-		open FILE, "<", $logPidFilePath or (traceLog('failed_to_open_file',":$logPidFilePath. Reason:$!") and die);
+		open FILE, "<", $logPidFilePath or (traceLog($Locale::strings{'failed_to_open_file'}.":$logPidFilePath. Reason:$!") and die);
 		chomp($logFile = <FILE>);
 		close FILE;
 		unlink($logPidFilePath);
 	}
-	else {
-		return 0;
-	}
-	return 0 if (!defined($logFile) or !-e $logFile);
-	return 0 unless ($logFile =~ m/_Running_/);
-	my $logContentCmd = updateLocaleCmd("tail -n10 '$logFile'");
-	my @logContent = `$logContentCmd`;
+	return if (!defined($logFile) or !-e $logFile);
+
+	my @logContent = `tail -n10 '$logFile'`;
 	foreach (@logContent) {
 		my $line = $_;
 		if (!$isSummary and $line =~ m/Summary:/) {
@@ -628,74 +590,46 @@ sub checkAndRenameFileWithStatus {
 
 	if ($isSummary){
 		if ($failed > 0 or $considered == 0){
-			$status = getStringConstant('failure');
+			$status = $Locale::strings{'failure'};
 		}
 		elsif ($considered == ($success+$synced)){
-			$status = getStringConstant('success');
+			$status = $Locale::strings{'success'};
 		}
 	}
-
 	if (!$isSummary or !defined($status)){
-		$status = getStringConstant('aborted');
+		$status = $Locale::strings{'aborted'};
 	}
 	my $finalOutFile = $logFile;
 	$finalOutFile =~ s/_Running_/_$status\_/;
-	system(updateLocaleCmd("mv '$logFile' '$finalOutFile'"));
-	my @logPath = split("_Running_",$logFile);
-	my $tempOutputFilePath = (split("/", $logPath[0]))[-1];
-	my %logStat = (
-		(split('_', basename($tempOutputFilePath)))[0] => {
-			'datetime' =>  strftime('%m/%d/%Y %H:%M:%S', localtime($tempOutputFilePath+15)),
-			'duration' => "--",
-			'filescount' => ($considered)?$considered:"--",
-			'status' => $status."_".$logPath[1],
-			'bkpfiles' => $success,
-			'size' => "--",
-		}
-	);
-	addLogStat($jobDir, \%logStat);
-	loadNotifications() and setNotification(sprintf("get_%sset_content", $_[1])) and saveNotifications();
-	return 1;
-}
-
-#*******************************************************************************************************
-# Subroutine Name         :	checkAndUpdateServerAddr
-# Objective               :	check and update server address if evs error due to invalide address
-# Added By                : Senthil Pandian
-#********************************************************************************************************
-sub checkAndUpdateServerAddr {
-	my $tempErrorFile = $_[0];
-	my $tempErrorFileSize = 0;
-	$tempErrorFileSize = -s $tempErrorFile if(-f $tempErrorFile);
-
-	if($tempErrorFileSize > 0) {
-		my $errorContent = getFileContents($tempErrorFile);
-		if ($errorContent =~ /unauthorized user|user information not found/i) {			
-			saveServerAddress(fetchServerAddress());
-			return 0;
+	system("mv '$logFile' '$finalOutFile'");
+	if (loadAppPath() and loadServicePath() and loadUsername()) {
+		if ($logFile =~ m/_Running_/){
+			my @logPath = split("_Running_",$logFile);
+			my $tempOutputFilePath = (split("/", $logPath[0]))[-1];
+			my %logStat = (
+				(split('_', basename($tempOutputFilePath)))[0] => {
+					'datetime' =>  strftime('%d/%m/%Y %H:%M:%S', localtime($tempOutputFilePath+15)),
+					'duration' => "--",
+					'filescount' => ($considered)?$considered:"--",
+					'status' => $status."_".$logPath[1]
+				}
+			);
+			addLogStat($jobDir, \%logStat);
 		}
 	}
-	return 1;
 }
 
 #*****************************************************************************************************
 # Subroutine			: checkAndUpdateServerRoot
 # Objective				: check and update if server root field is empty in configuration file
 # Added By				: Senthil Pandian
-# Modified By			: Sabin Cheruvattil, Senthil Pandian
+# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub checkAndUpdateServerRoot {
 	my $serverRoot;
 	if (getUserConfiguration('DEDUP') eq 'on' && (!getUserConfiguration('SERVERROOT') || getUserConfiguration('SERVERROOT') eq '')) {
-		my @result = fetchAllDevices();
-		#Added to consider the bucket type 'D' only
-		my @devices;
-		foreach (@result){
-			next if(!defined($_->{'bucket_type'}) or $_->{'bucket_type'} !~ /D/);
-			push @devices, $_;
-		}
-
-		$muid = getMachineUID() or retreat('unable_to_find_mac_address');
+		my @devices = fetchAllDevices();
+		my $uniqueID = getMachineUID() or retreat('unable_to_find_mac_address');
 		foreach(@devices) {
 			next if ($muid ne $_->{'uid'});
 			if ($_->{'server_root'} ne '') {
@@ -724,30 +658,28 @@ sub checkCRONServiceStatus {
 }
 
 #*****************************************************************************************************
-# Subroutine			: colorScreenOutput
+# Subroutine			: coloredFormat
 # Objective				: format text in the given color
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
-sub colorScreenOutput {
+sub coloredFormat {
 	unless (defined &colored) {
 		my $cmd = "$Configuration::perlBin -e 'use Term::ANSIColor;'";
-		$cmd = updateLocaleCmd($cmd);
 		my $o = `$cmd 2>&1`;
 		if ($? == 0) {
 			use Term::ANSIColor;
 		}
 	}
 
-	my $text = $_[0];
+	my $text  = $_[0];
 	if (defined &colored) {
 		my $color = 'black';
 		my $bg    = 'yellow';
-		if ((lc($text) eq 'on') or (lc($text) eq 'enabled') or ($text eq 'c_running') or (looks_like_number($text) and $text == 1)) {
+		if ((lc($text) eq 'on') or (lc($text) eq 'enabled') or (looks_like_number($text) and $text == 1)) {
 			$color = 'green';
 			$bg    = 'black';
-			$text  = 'enabled' if (looks_like_number($text) and $text == 1);
 		}
-		elsif ((lc($text) eq 'off') or (lc($text) eq 'disabled') or ($text eq 'c_stopped') or (looks_like_number($text) and $text == 0)) {
+		elsif ((lc($text) eq 'off') or (lc($text) eq 'disabled') or (looks_like_number($text) and $text == 0)) {
 			$color = 'red';
 			$bg    = 'black';
 			$text  = 'disabled' if (looks_like_number($text) and $text == 0);
@@ -755,8 +687,6 @@ sub colorScreenOutput {
 
 		$color = $_[2] if (defined $_[2]);
 		$bg    = $_[3] if (defined $_[3]);
-
-		$text = $LS{$text} if (exists $LS{$text});
 
 		$text = colored($text, "bold $color on_$bg");
 		if (defined $_[1]) {
@@ -837,20 +767,19 @@ sub checkPreReq {
 # Subroutine			: checkExitError
 # Objective				: This function will display the proper error message if evs error found in Exit argument.
 # Added By				: Senthil Pandian
-# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub checkExitError {
 	my $errorline = "idevs error";
 	my $individual_errorfile   = $_[0];
 	my $userJobPaths 		   = $_[1];
 	my $needToSkippTermination = 0;
-	$needToSkippTermination = 1 if (defined($_[2])); #Added to skip termination for archive cleanup.
-	unless(-e $individual_errorfile or -s _ > 0) {
+	$needToSkippTermination = 1 if(defined($_[2])); #Added to skip termination for archive cleanup.
+	unless(-e $individual_errorfile or -s $individual_errorfile>0) {
 		return 0;
 	}
 	#check for retry attempt
 	if (!open(TEMPERRORFILE, "< $individual_errorfile")) {
-		traceLog($LS{'failed_to_open_file'}.":$individual_errorfile, Reason:$!");
+		traceLog($LS{'failed_to_open_file'}.":$individual_errorfile, Reason:$! \n", __FILE__, __LINE__);
 		return 0;
 	}
 
@@ -869,21 +798,16 @@ sub checkExitError {
 			if ($linesBackupErrorFile[$i] =~ m/$exitErrorMessage/)
 			{
 				#Avoiding termination for archive cleanup when EVS connection timed out & retrying.
-				if (!$needToSkippTermination or $exitErrorMessage !~ m/connection timed out/i) {
+				if(!$needToSkippTermination or $exitErrorMessage !~ m/connection timed out/i) {
 					$Configuration::errStr  = $LS{'operation_could_not_be_completed_reason'}.$exitErrorMessage.".";
-					traceLog($Configuration::errStr);
+					traceLog($Configuration::errStr, __FILE__, __LINE__);
 					#kill evs and then exit
 					my $username = getUsername();
 					my $jobTerminationScript = getScript('job_termination', 1);
-					system(updateLocaleCmd("$Configuration::perlBin $jobTerminationScript 1>/dev/null 2>/dev/null \'$userJobPaths\' \'$username\'"));
+					system("$Configuration::perlBin $jobTerminationScript 1>/dev/null 2>/dev/null \'$userJobPaths\' \'$username\'");
 					return "1-$Configuration::errStr";
 				}
 			}
-		}
-		if($linesBackupErrorFile[$i] =~ /unauthorized user|user information not found/i) {
-			saveServerAddress(fetchServerAddress());
-			#$Configuration::errStr  = $LS{'operation_could_not_be_completed_please_try_again'};
-			#return "1-$Configuration::errStr";
 		}
 	}
 	return 0;
@@ -911,7 +835,7 @@ sub createBackupSetFiles1k {
 			$BackupsetFile_Only =  $filesOnly."_".$Configuration::filesOnlyCount;
 			close NEWFILE;
 			if (!open NEWFILE, ">", $BackupsetFile_Only) {
-				traceLog('failed_to_open_file',"filesOnly in 1k: $filesOnly to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
+				traceLog($Locale::strings{'failed_to_open_file'}."filesOnly in 1k: $filesOnly to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
 				return 0;
 			}
 			chmod $Configuration::filePermission, $BackupsetFile_Only;
@@ -920,12 +844,12 @@ sub createBackupSetFiles1k {
 		{
 			#print FD_WRITE "$BackupsetFile_new#".RELATIVE."#$current_source\n";
 			print FD_WRITE "$current_source' '".RELATIVE."' '$BackupsetFile_new\n";
-			#traceLog("\n in NORELATIVE BackupsetFile_new = $BackupsetFile_new", __FILE__, __LINE__);
+			traceLog("\n in NORELATIVE BackupsetFile_new = $BackupsetFile_new", __FILE__, __LINE__);
 			$BackupsetFile_new = $noRelativeFileset."$Configuration::noRelIndex"."_$backupfilecount";
 
 			close FH;
 			if (!open FH, ">", $BackupsetFile_new) {
-				traceLog('failed_to_open_file',"BackupsetFile_new in 1k: $BackupsetFile_new to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
+				traceLog($Locale::strings{'failed_to_open_file'}."BackupsetFile_new in 1k: $BackupsetFile_new to write, Reason: $!. $lineFeed", __FILE__, __LINE__);
 				return 0;
 			}
 			chmod $Configuration::filePermission, $BackupsetFile_new;
@@ -938,7 +862,7 @@ sub createBackupSetFiles1k {
 
 		close NEWFILE;
 		if (!open NEWFILE, ">", $BackupsetFile_new){
-			traceLog('failed_to_open_file',"BackupsetFile_new in 1k: $BackupsetFile_new to write, Reason: $!. $lineFeed");
+			traceLog($Locale::strings{'failed_to_open_file'}."BackupsetFile_new in 1k: $BackupsetFile_new to write, Reason: $!. $lineFeed");
 			return 0;
 		}
 		chmod $Configuration::filePermission, $BackupsetFile_new;
@@ -1001,13 +925,12 @@ sub createBackupTypeFile {
 # Modified By             : Dhritikana, Senthil pandian.
 #*****************************************************************************************************/
 sub changeSizeVal {
-	my $latestCulmnCmd = updateLocaleCmd('tput cols');
-	$latestCulmn = `$latestCulmnCmd`;
+	$latestCulmn = `tput cols`;
 	chomp($latestCulmn);
 	if ($latestCulmn < 100) {
-		$Configuration::progressSizeOp = 2;
+		$progressSizeOp = 2;
 	} else {
-		$Configuration::progressSizeOp = 1;
+		$progressSizeOp = 1;
 	}
 }
 
@@ -1022,19 +945,18 @@ sub checkAndUpdateServicePath {
 		return 1;
 	}
 	else {
-		my $serviceLocation = getCatfile($appPath, $Configuration::serviceLocationFile);
+		my $serviceLocation = $appPath."/" . $Configuration::serviceLocationFile;
 		return 0 if (!open(my $sp, '<:encoding(UTF-8)', $serviceLocation));
 		my $s = <$sp> || '';
 		close($sp);
 		unless ($s eq '') {
 			chomp($s);
 			my $ret;
-			if ($Configuration::callerEnv ne 'BACKGROUND') {
+			if($Configuration::callerEnv ne 'BACKGROUND'){
 				$Configuration::callerEnv = 'BACKGROUND';
 				$ret = createDir($s);
 				$Configuration::callerEnv = '' ;
-			}
-			else {
+			} else {
 				$ret = createDir($s);
 			}
 
@@ -1073,7 +995,7 @@ sub createDir {
 		}
 	}
 	unless (-w $parentDir[1]) {
-		display(['cannot_open_directory', " '$parentDir[1]'. ", 'permission_denied']);
+		display(['cannot_open_directory', " $parentDir[1]", 'permission_denied']);
 		return 0;
 	}
 	if (mkdir($_[0], 0777)) {
@@ -1111,16 +1033,16 @@ sub createLogFiles {
 	my $taskType = (defined($_[1]))?$_[1]:'';
 	our $progressDetailsFileName = "PROGRESS_DETAILS";
 	our $outputFileName = $jobType;
-	#our $errorFileName = $jobType."_ERRORFILE";
+	our $errorFileName = $jobType."_ERRORFILE";
 	my $logDir   = $Configuration::jobRunningDir."/".$Configuration::logDir;
 	my $errorDir = $Configuration::jobRunningDir."/ERROR";
-	#my $ifRetainLogs = getUserConfiguration('RETAINLOGS');
+	my $ifRetainLogs = getUserConfiguration('RETAINLOGS');
 	my $logPidFilePath = getCatfile($Configuration::jobRunningDir, $Configuration::logPidFile);
 
-	# if (!$ifRetainLogs) {
-		# chmod $Configuration::filePermission, $logDir;
-		# rmtree($logDir);
-	# }
+	if (!$ifRetainLogs) {
+		chmod $Configuration::filePermission, $logDir;
+		rmtree($logDir);
+	}
 
 	if (!-d $logDir)
 	{
@@ -1128,12 +1050,17 @@ sub createLogFiles {
 		chmod $Configuration::filePermission, $logDir;
 	}
 
+#=====================================================================================================================
+# TBE : ENH-003 TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
 #	my $currentTime = localtime;
 	my $currentTime = time;#This function will give the current epoch time.
-	@startTime = localtime();
 	#previous log file name use to be like 'BACKUP Wed May 17 12:34:47 2017_FAILURE'.Now log name will be '1495007954_SUCCESS'.
-	$Configuration::outputFilePath  = getCatfile($logDir, $currentTime."_Running_".$taskType);
-	$Configuration::errorFilePath   = $Configuration::jobRunningDir."/".$Configuration::exitErrorFile;
+# Correct timestamp string : YYYY-MM-DD_HH-MM-SS
+	$currentTime = Taryck::TS2ISO($currentTime);
+#=====================================================================================================================
+	@startTime = localtime();
+	$Configuration::outputFilePath = getCatfile($logDir, $currentTime."_Running_".$taskType);
+	$Configuration::errorFilePath  = $errorDir."/".$errorFileName;
 	$Configuration::progressDetailsFilePath = $Configuration::jobRunningDir."/".$progressDetailsFileName;
 
 	#Keeping current log file name in logpid file
@@ -1167,7 +1094,7 @@ sub createUserDir {
 		my $userPath = getUsersInternalDirPath($path);
 		createDir($userPath,1);
 	}
-	display(['user_directory_has_been_created_successfully'],1);
+	display(['user_directory_has_been_created_successfully',"\n"],1);
 	return 1;
 }
 
@@ -1185,7 +1112,7 @@ sub createUTF8File {
 	unless(reftype(\$evsOP) eq 'SCALAR'){
 		$evsPattern = $Configuration::evsAPIPatterns{$_[0]->[0]};
 		$utf8File   = $_[0]->[1];
-		$thirdParam = 1 if (defined($_[0]->[2]));
+		$thirdParam = 1 if(defined($_[0]->[2]));
 	}
 	elsif (-d getUserProfilePath()) {
 		$utf8File = (getUserProfilePath() ."/$Configuration::utf8File"."_".lc($evsOP));
@@ -1223,13 +1150,13 @@ sub createUTF8File {
 	my $isDedup  	   	= getUserConfiguration('DEDUP');
 	my $backupLocation  = getUserConfiguration('BACKUPLOCATION');
 	# Added to handle ITEMSTATUS for archive & remote validation
-	if ($evsOP eq 'FILEVERSION' or $thirdParam) {
+	if($evsOP eq 'FILEVERSION' or $thirdParam) {
 		$backupLocation = getUserConfiguration('RESTOREFROM');
 	}
 
 	if ($isDedup eq "on" and $backupLocation) {
 		if ($evsPattern !~ /(--list-device|--nick-update|--link-bucket|--create-bucket)/){
-			my $deviceID = (split("#",$backupLocation))[0];
+			my $deviceID 		= (split("#",$backupLocation))[0];
 			$evsParams .= "\n--device-id=$deviceID";
 		}
 	}
@@ -1237,9 +1164,8 @@ sub createUTF8File {
 		unless ($evsParams =~ /--password-file/) {
 			$evsParams .= "\n--password-file=" . getIDPWDFile();
 		}
-		my $pvtKey  = getIDPVTFile();
-		my $encType = getUserConfiguration('ENCRYPTIONTYPE');
-		if ($encType eq 'PRIVATE') {
+		my $pvtKey = getIDPVTFile();
+		if (-e $pvtKey) {
 			$evsParams .= "\n--pvt-key=".$pvtKey;
 		}
 		my $proxyStr = getUserConfiguration('PROXY');
@@ -1275,8 +1201,7 @@ sub createUTF8File {
 #****************************************************************************************************/
 sub createCRONLink {
 	my $cronpath = getScript('cron', 1);
-	my $linkCronPathCmd = updateLocaleCmd("ln -s $cronpath '$Configuration::cronLinkPath'");
-	`$linkCronPathCmd`;
+	`ln -s $cronpath '$Configuration::cronLinkPath'`;
 	chmod($Configuration::execPermission, $Configuration::cronLinkPath);
 }
 
@@ -1318,14 +1243,17 @@ sub updateUserLoginStatus {
 			%loginData	= %{JSON::from_json($fc)};
 		}
 	}
-
+	if ($_[1] == 0 and $loginData{$Configuration::mcUser}){
+		return 0;
+	}
+	###########################################
 	$loginData{$Configuration::mcUser} {'userid'} = $_[0];
 	$loginData{$Configuration::mcUser} {'isLoggedin'} = $_[1];
 	fileWrite($filename, JSON::to_json(\%loginData));
 	chmod $Configuration::filePermission, $filename;
 
 	# Updating the logged in user status to cron
-	my $status = ($_[1] or $Configuration::appType eq 'IBackup')?'ACTIVE':'INACTIVE';
+	my $status = ($_[1])?'ACTIVE':'INACTIVE';
 	loadCrontab();
 	createCrontab('otherInfo', {'settings' => {'status' => $status, 'lastActivityTime' => time()}});
 	setCrontab('otherInfo',  'settings', {'status' => $status} , ' ');
@@ -1350,7 +1278,6 @@ sub startJob {
 	$cmd   .= (" 1>/dev/null 2>/dev/null $scriptArgs &");
 
 	my %status;
-	$cmd = updateLocaleCmd($cmd);
 	unless (system($cmd) == 0) {
 		$status{'status'} = Configuration::FAILURE
 	}
@@ -1399,8 +1326,7 @@ sub checkAndUpdateClientRecord {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub changeMode {
-	my $changeModeCmd = updateLocaleCmd("chmod -R 0777 '$_[0]' 2>/dev/null");
-	return `$changeModeCmd`;
+	return `chmod -R 0777 '$_[0]' 2>/dev/null`;
 }
 
 #*****************************************************************************************************
@@ -1414,7 +1340,7 @@ sub createBucket {
 		$deviceName = $Configuration::hostname;
 		$deviceName =~ s/[^a-zA-Z0-9_-]//g;
 	}
-	display('setting_up_your_backup_location', 1);
+	display('setting_up_your_backup_location',1);
 	createUTF8File('CREATEBUCKET',$deviceName) or retreat('failed_to_create_utf8_file');
 	my @result = runEVS('item');
 
@@ -1439,13 +1365,6 @@ sub createNotification {
 	my $nf = getNotificationFile();
 	unless (-e $nf and !-z $nf) {
 		if (open(my $fh, '>', $nf)) {
-			unless (flock($fh, LOCK_EX)) {
-				traceLog("Cannot lock file $nf $!\n");
-				close($fh);
-				return 0;
-			}
-			seek $fh, 0, 0;
-			truncate $fh, 0;
 			map{$notifications{$_} = $Configuration::notificationsSchema{$_}} keys %Configuration::notificationsSchema;
 			print $fh JSON::to_json(\%notifications);
 			close($fh);
@@ -1518,7 +1437,7 @@ sub createEncodePwdFiles {
 	changeMode(getIDPWDFile());
 	copy(getIDPWDFile(), getIDPWDSCHFile());
 	changeMode(getIDPWDSCHFile());
-	encryptPWD($_[0]) or retreat('failed_to_encrypt');
+	encryptPWD($_[0]) or retreat('failed');
 }
 
 #*******************************************************************************************
@@ -1590,7 +1509,7 @@ sub getProgressDetails {
 
 			$progressDetails[1] += $progressData->[2] if ($progressData->[2] =~ /^\d+$/);
 			$progressDetails[2]  = $progressData->[3];
-			$progressDetails[3] += $progressData->[4] if ($progressData->[4] =~ /^(\d+(\.\d+)?)$/);
+			$progressDetails[3] += $progressData->[4] if ($progressData->[4] =~ /(\d+(\.\d+)?)/);
 			$count++;
 		}
 	}
@@ -1620,13 +1539,12 @@ sub cancelProcess {
 	my $pidPath  		= $Configuration::jobRunningDir."/".$Configuration::pidFile;
 
 	#Default Cleanup
-	system('stty','echo') if(-t STDIN);
+	system('stty','echo');
 	unlink($idevsOutputFile);
 	unlink($idevsErrorFile);
 	unlink($pidPath);
 	exit 1;
 }
-
 #****************************************************************************************************
 # Subroutine Name         : createDBPathsXmlFile.
 # Objective               : Creating DB paths XML file
@@ -1636,7 +1554,7 @@ sub createDBPathsXmlFile
 {
     my $username       = getUsername();
 	my $localUserPath  = $Configuration::expressLocalDir."/".$username;
-	my $xmlFile = $localUserPath."/".$Configuration::dbPathsXML;
+	my $xmlFile = $localUserPath."/dbpaths.xml";
 	my $xmlContent = '';
 	my ($actualDeviceID,$nickName);
 	my $dedup		= getUserConfiguration('DEDUP');
@@ -1715,13 +1633,7 @@ sub createLocalBackupDir {
 		$backupLocationDir  = "$localUserPath/$serverRoot/";
 	} else {
 		my $backupHost	  = getUserConfiguration('BACKUPLOCATION');
-		if ($Configuration::jobType eq "LocalBackup") {
-			my @backupTo = split("/",$backupHost);
-			$backupHost	 = (substr($backupHost,0,1) eq '/')? '/'.$backupTo[1]:'/'.$backupTo[0];
-			$backupLocationDir  = "$localUserPath/$backupHost/";
-		} else {
-			$backupLocationDir  = "$localUserPath/$backupHost/";
-		}
+		$backupLocationDir  = "$localUserPath/$backupHost/";
 	}
 	createDir($backupLocationDir, 1);
 }
@@ -1730,14 +1642,8 @@ sub createLocalBackupDir {
 # Subroutine			: confirmStartDashboard
 # Objective				: This is to restart IDrive Dashboard service
 # Added By				: Sabin Cheruvattil
-# Modified By			: Yogesh Kumar, Senthil Pandian
 #****************************************************************************************************/
 sub confirmStartDashboard {
-	unless (hasStaticPerlSupport() and (getRemoteManageIP() ne '')) {
-		display(['failed_to_start_dashboard_service', '.', "\n"]);
-		return 0;
-	}
-
 	my $display = ((defined($_[0]) && $_[0] == 1)? 1 : 0);
 
 	if (isDashboardRunning()) {
@@ -1747,7 +1653,7 @@ sub confirmStartDashboard {
 
 	my $reflag = ((defined $_[1])? 're' : '');
 	display(["\n", $reflag . 'starting_dashboard_service', '...']) if ($display);
-	system(updateLocaleCmd(getIDrivePerlBin() . " " . getScript('dashboard', 1) ." 2>/dev/null &"));
+	system(getIDrivePerlBin() . " " . getScript('dashboard', 1) . " 2>/dev/null &");
 	sleep(1);
 
 	if ($display) {
@@ -1772,8 +1678,8 @@ sub createExcludedLogFile30k {
 	my $excludedLogFilePath_new = $excludedLogFilePath.$Configuration::excludedFileIndex;
 	# require to open excludedItems file to log excluded details
 	if (!open(EXCLUDEDFILE, ">", $excludedLogFilePath_new)){
-		$Configuration::errStr = getStringConstant('failed_to_open_file')." : $excludedLogFilePath_new. Reason:$!\n";
-		display($Configuration::errStr);
+		$Configuration::errStr = $Locale::strings{'failed_to_open_file'}." : $excludedLogFilePath_new. Reason:$!\n";
+		print $Configuration::errStr;
 		traceLog($Configuration::errStr) and die;
 	}
 	chmod $Configuration::filePermission, $excludedLogFilePath_new;
@@ -1784,7 +1690,7 @@ sub createExcludedLogFile30k {
 # Subroutine		: checkErrorAndLogout
 # Objective			: This function will check the error & logout
 # Added By			: Senthil Pandian
-# Modified By		: Sabin Cheruvattil, Yogesh Kumar
+# Modified By		: Sabin Cheruvattil	
 #*****************************************************************************************************/
 sub checkErrorAndLogout {
 	return $_[0] if (!defined($_[0]) or $_[0] eq '');
@@ -1792,20 +1698,16 @@ sub checkErrorAndLogout {
 	my $errStr = $_[0];
 	my $cuser = getUsername();
 
-	if (loadUsername() and (getUsername() ne $cuser)) {
-		setUsername($cuser);
-		return 0;
-	}
-
+	return 0 if(defined($_[1]) && defined($cuser) && $_[1] ne '' && $cuser ne '' && $_[1] ne $cuser);
+	
 	if ($errStr =~ /account is under maintenance|account has been cancelled|account has been blocked/i){
 		my $cmd = sprintf("%s %s 1 0", $Configuration::perlBin, getScript('logout', 1));
-		$cmd = updateLocaleCmd($cmd);
 		my $res = system($cmd);
 
 		# if ($res){
 			# traceLog('unable_to_logout');
 		# } else {
-			stopDashboardService($Configuration::mcUser, getAppPath());
+			stopDashboardService($Configuration::mcUser, Helpers::getAppPath());
 			if ($errStr =~ /account is under maintenance/i){
 				if (defined($_[1])){
 					$errStr	 = $LS{'your_account_is_under_maintenance'}
@@ -1890,7 +1792,6 @@ sub confirmRestartIDriveCRON {
 	unless(-f $Configuration::cronLinkPath) {
 		my $sudoprompt = 'please_provide_' . ((isUbuntu() || isGentoo())? 'sudoers' : 'root') . '_pwd_for_cron';
 		my $sudosucmd = getSudoSuCRONPerlCMD('installcron', $sudoprompt);
-		$sudosucmd = updateLocaleCmd($sudosucmd);
 		system($sudosucmd);
 		return 1;
 	}
@@ -1904,10 +1805,9 @@ sub confirmRestartIDriveCRON {
 # Subroutine			: checkAndStartDashboard
 # Objective				: This confirms and starts the dashboard service
 # Added By				: Sabin Cheruvattil
-# Modified By			: Yogesh Kumar
 #****************************************************************************************************/
 sub checkAndStartDashboard {
-	unless (hasStaticPerlSupport() and !Helpers::getUserConfiguration('DDA')) {
+	unless (hasStaticPerlSupport()) {
 		return 1;
 	}
 
@@ -1917,7 +1817,7 @@ sub checkAndStartDashboard {
 	}
 
 	confirmStartDashboard(1, $_[1]);
-	sleep(1);
+	sleep(3);
 
 	return 1;
 }
@@ -1947,20 +1847,6 @@ sub checkAndUpdatePermissionDeniedList
 	return $summaryError;
 }
 
-
-#****************************************************************************************************
-# Subroutine Name	: currentLocale
-# Objective			: Check current machine language is english.
-# Modified By		: Vijay Vinoth
-#*****************************************************************************************************/
-sub currentLocale {
-	my $current_locale = setlocale(LC_CTYPE);
-	if(substr($current_locale, 0, 2) eq 'en'){
-		return 1;
-	}
-	return 0;
-}
-
 #****************************************************************************************************
 # Subroutine Name	: getPermissionDeniedCount
 # Objective			: This subroutine will return the count of permission denied error given by EVS.
@@ -1974,7 +1860,6 @@ sub getPermissionDeniedCount
 	if (-e $infoFile and !-z $infoFile){
 		$infoFile = getECatfile($Configuration::jobRunningDir,$Configuration::infoFile);
 		my $deniedCountCheckCmd = "cat $infoFile | grep \"^DENIEDCOUNT\"";
-		$deniedCountCheckCmd = updateLocaleCmd($deniedCountCheckCmd);
 		$noPermissionCount = `$deniedCountCheckCmd`;
 		$noPermissionCount =~ s/DENIEDCOUNT//;
 		Chomp(\$noPermissionCount);
@@ -2025,7 +1910,7 @@ sub createLogJsonForOldUser {
 						($startEpoch, $endEpoch) = getStartAndEndEpochTimeForMigration(\%logFileList);
 						my $slf = getLastOneWeekLogs(\%logFileList, $startEpoch, $endEpoch,$userLogDir);
 						my $logFileName;
-						addLogStat($userDir."/".$Configuration::userProfilePaths{$job}."/", $slf) if (%{$slf});
+						Helpers::addLogStat($userDir."/".$Configuration::userProfilePaths{$job}."/", $slf) if (%{$slf});
 					}
 				}
 			}
@@ -2042,44 +1927,44 @@ sub createLogJsonForOldUser {
 # Added By				  : Senthil Pandian
 #*****************************************************************************************************/
 sub createServiceDirectory {
-	display('enter_your_service_path', 0);
-	my $servicePathSelection = getUserChoice();
-	$servicePathSelection =~ s/^~/getUserHomePath()/g;
+	Helpers::display('enter_your_service_path', 0);
+	my $servicePathSelection = Helpers::getUserChoice();
+	$servicePathSelection =~ s/^~/Helpers::getUserHomePath()/g;
 
 	# In case user want to go for optional service path
 	if ($servicePathSelection eq ''){
-		$servicePathSelection = dirname(getAppPath());
-		display(['your_default_service_directory'],1);
+		$servicePathSelection = dirname(Helpers::getAppPath());
+		Helpers::display(['your_default_service_directory'],1);
 	}
 
 	# Check if service path exist
-	retreat(['invalid_location', " \"$servicePathSelection\". ", "Reason: ", 'no_such_directory']) if (!-d $servicePathSelection);
+	Helpers::retreat(['invalid_location', " \"$servicePathSelection\". ", "Reason: ", 'no_such_directory']) if (!-d $servicePathSelection);
 
 	# Check if service path have write permission
-	retreat(['cannot_open_directory', " $servicePathSelection ", 'permission_denied'])	if (!-w $servicePathSelection);
+	Helpers::retreat(['cannot_open_directory', " $servicePathSelection ", 'permission_denied'])	if (!-w $servicePathSelection);
 
 	# get full path for service directory
-	$servicePathSelection = getCatfile($servicePathSelection, $Configuration::servicePathName);
+	$servicePathSelection = Helpers::getCatfile($servicePathSelection, $Configuration::servicePathName);
 	my $sp = '';
 	my $servicePathExists = 0;
-	$sp = getAbsPath($servicePathSelection) or retreat('no_such_directory_try_again');
+	$sp = Helpers::getAbsPath($servicePathSelection) or Helpers::retreat('no_such_directory_try_again');
 	my $oldServiceLocation = $sp;
 	$oldServiceLocation =~ s/$Configuration::servicePathName$/$Configuration::oldServicePathName/;
-	if (-d $oldServiceLocation){
-		saveServicePath($oldServiceLocation) or retreat('failed_to_create_service_location_file');
-		initiateMigrate();
+	if(-d $oldServiceLocation){
+		Helpers::saveServicePath($oldServiceLocation) or Helpers::retreat('failed_to_create_service_location_file');
+		Helpers::initiateMigrate();
 	}
 
 	if (-d $sp) {
-		display(["Service directory ", "\"$sp\" ", 'already_exists']);
+		Helpers::display(["Service directory ", "\"$sp\" ", 'already_exists']);
 	}
 	else {
-		createDir($sp) or retreat('failed');
+		Helpers::createDir($sp) or Helpers::retreat('failed');
 	}
 
-	saveServicePath($sp) or retreat('failed_to_create_service_location_file');
-	loadServicePath() or retreat('invalid_service_directory');
-	display(["\n",'your_service_directory_is',getServicePath()]);
+	Helpers::saveServicePath($sp) or Helpers::retreat('failed_to_create_service_location_file');
+	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
+	Helpers::display(["\n",'your_service_directory_is',Helpers::getServicePath()]);
 }
 
 #*****************************************************************************************************
@@ -2113,146 +1998,6 @@ sub customReName{
 		}
 	}
 }
-
-#*****************************************************************************************************
-# Subroutine			: checkPidAndExit
-# Objective				: Exit if pid not present & display error if cancel.txt present
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub checkPidAndExit{
-	my $jobRunningDir	= defined($_[0])?$_[0]:$Configuration::jobRunningDir;
-	my $pidPath			= $jobRunningDir.'/'.$Configuration::pidFile;
-	unless (-e $pidPath){
-		my $cancelFilePath = $jobRunningDir.'/'.$Configuration::cancelFile;
-		if (-e $cancelFilePath and (-s $cancelFilePath > 0)){
-			retreat(['operation_cancelled_by_user']);
-		}
-		unlink($cancelFilePath);
-	}
-}
-
-#*****************************************************************************************************
-# Subroutine			: checkAndAvoidExecution
-# Objective				: check and avoid the execution of supporting perl scripts.
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub checkAndAvoidExecution {
-	$Configuration::displayHeader = 0;
-
-	my $ppid = getppid();
-	my $ps = `ps -o command $ppid`;
-	chomp $ps;
-	if ($ps !~ /\.pl|system|init|upstart|IDrive:dashboard/) {
-		traceLog("checkAndAvoidExecution ps:$ps");
-		retreat('you_cant_run_supporting_script');
-	}
-}
-
-#*****************************************************************************************************
-# Subroutine			: checkMinMaxVersion
-# Objective				: This subroutine is to check min/max version to update/downgrade the current package.
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub checkMinMaxVersion {
-	my @zipped  = split('\.', $_[1]);
-    my $pos = getMinMaxVersion($_[0]);
-	my %pos = %{$pos};
-
-	if (scalar(keys %pos)) {
-		my @min = split('\.', $pos{'min'});
-		my @max = split('\.', $pos{'max'});
-		for my $i (0 .. scalar(@zipped)) {
-			if (defined($zipped[$i]) && defined($min[$i])) {
-				return 2 if ($zipped[$i] < $min[$i]); # Returning if version is lower than limit.
-			}
-			# if (defined($zipped[$i]) && defined($max[$i])) {
-				# return 3 if ($zipped[$i] > $max[$i]); # Returning if version is higher than limit.
-			# }
-		}
-		return 1; # Returning if version is within limit.
-	}
-	return 0; # Returning if there is no limit avaialble for the current script version.
-}
-
-#*************************************************************************************************
-# Subroutine		: cleanupUpdate
-# Objective			: cleanup the update process
-# Added By			: Sabin Cheruvattil
-# Modified By		: Yogesh Kumar
-#*************************************************************************************************/
-sub cleanupUpdate {
-	my $packageName = qq(/$Configuration::tmpPath/$Configuration::appPackageName$Configuration::appPackageExt);
-	unlink($packageName) if (-e $packageName && (!defined($ARGV[0]) or $ARGV[0] ne $packageName));
-
-	my $packageDir = qq(/$Configuration::tmpPath/$Configuration::appPackageName);
-	Helpers::removeItems($packageDir) if ($packageDir ne '/' && -e $packageDir);
-	my $scriptBackupDir = qq(/$Configuration::tmpPath/$Configuration::appType) . q(_backup);
-	Helpers::removeItems("$scriptBackupDir") if ($scriptBackupDir ne '/' && -e $scriptBackupDir);
-	Helpers::removeItems("$Configuration::tmpPath/scripts") if (-e qq($Configuration::tmpPath/scripts));
-	unlink(Helpers::getAppPath() . qq(/$Configuration::unzipLog));
-	unlink(Helpers::getAppPath() . qq(/$Configuration::updateLog));
-
-	my $pidPath = Helpers::getCatfile(Helpers::getServicePath(), $Configuration::pidFile);
-	unlink($pidPath) if (-e $pidPath);
-	exit(0) unless(defined($_[0]));
-
-	$Configuration::displayHeader = 0;
-	Helpers::retreat($_[0]) if ($_[0] ne 'INIT');
-}
-
-#*****************************************************************************************************
-# Subroutine/Function   : configAccount
-# In Param    : configType (DEFAULT/PRIVATE)
-# Out Param   : 1 if success
-# Objective	  : This subroutine to configure the user account
-# Added By	  : Senthil Pandian
-# Modified By : 
-#****************************************************************************************************/
-sub configAccount {
-	my $configType = $_[0];
-	my $encKey	   = $_[1];
-	#my $configTypeKey = ($configType eq 'PRIVATE')?'PRIVATECONFIG':'DEFAULTCONFIG';
-
-	my $webAPI = getUserConfiguration('WEBAPI');
-	retreat('your_account_not_configured_properly') unless($webAPI);
-	my $configAccCGI = $Configuration::evsAPI{$Configuration::appType}{'configureAccount'};
-	$configAccCGI =~ s/EVSSERVERADDRESS/$webAPI/;
-	my %params = (
-		'host' => $configAccCGI,
-		'method' => 'POST',
-		'data' => {
-			'uid' => Helpers::getUsername(),
-			'pwd' => &Helpers::getPdata(Helpers::getUsername()),
-			'enctype' => lc($configType),
-			'pvtkey' => $encKey,
-		}
-	);
-
-	my $res = Helpers::requestViaUtility(\%params);
-	if(defined($res->{DATA})) {
-		my %responseData = parseXMLOutput(\$res->{DATA});
-		if($responseData{'message'} eq 'ERROR') {
-			Helpers::retreat($LS{'failed_to_configure'}.ucfirst($responseData{'desc'}));
-		}
-	}
-
-	return 1;
-}
-
-#*****************************************************************************************************
-# Subroutine			: convert_seconds_to_hhmmss
-# Objective				: This subroutine converts the seconds to hh:mm:ss format
-# Added By				: Vijay Vinoth
-#****************************************************************************************************/
-sub convert_seconds_to_hhmmss {
-  return $_[0] unless($_[0] =~ /^\d+$/);
-  my $hourz=int($_[0]/3600);
-  my $leftover=$_[0] % 3600;
-  my $minz=int($leftover/60);
-  my $secz=int($leftover % 60);
-  return sprintf ("%02d:%02d:%02d", $hourz,$minz,$secz);
-}
-
 #------------------------------------------------- D -------------------------------------------------#
 
 #*******************************************************************************************************
@@ -2261,23 +2006,21 @@ sub convert_seconds_to_hhmmss {
 # Added By                : Sabin Cheruvattil
 #********************************************************************************************************/
 sub deactivateOtherUserCRONEntries {
-	return 0 if($Configuration::appType eq 'IBackup');
 	return 0 unless($_[0]);
-
 	my $curuser = $_[0];
 
-	if (exists $crontab{$Configuration::mcUser}) {
+	if(exists $crontab{$Configuration::mcUser}) {
 		loadCrontab();
 
 		foreach my $idusername (keys %{$crontab{$Configuration::mcUser}}) {
-			if ($curuser ne $idusername) {
+			if($curuser ne $idusername) {
 				setUsername($idusername);
 				createCrontab('otherInfo', {'settings' => {'status' => 'INACTIVE', 'lastActivityTime' => time()}});
 				setCrontab('otherInfo', 'settings', {'status' => 'INACTIVE'}, ' ');
 				saveCrontab();
 			}
 		}
-
+		
 		setUsername($curuser);
 	}
 
@@ -2311,7 +2054,8 @@ sub deepCopyEntry {
 #****************************************************************************************************/
 sub decryptString {
 	return '' unless $_[0];
-
+# TBE override
+	return Taryck::decryptString($_[0]);
 	my $encString  = $_[0];
 	my $stringLength	= length $encString;
 	my $swapLength		= $stringLength - ($stringLength % 4);
@@ -2344,12 +2088,9 @@ sub display {
 		$message = [$message];
 	}
 	for my $i (0 .. $#{$message}) {
-		next if (!defined($message->[$i]) or $message->[$i] eq '');
+		next if(!defined($message->[$i]) or $message->[$i] eq '');
 		if (exists $LS{$message->[$i]}) {
 			$msg .= $LS{$message->[$i]};
-		}
-		elsif (exists $Help{$message->[$i]}) {
-			$msg .= $Help{$message->[$i]};
 		}
 		else {
 			$msg .= $message->[$i];
@@ -2368,9 +2109,9 @@ sub display {
 }
 
 #**********************************************************************************************
-#Subroutine Name        : displayFinalSummary(SCALAR,SCALAR);
-#Objective              : It display the final summary after the backup/restore job has been completed.
-#Usage                  : displayFinalSummary(JOB_TYPE,FINAL_SUMMARY_FILE_PATH);
+#Sbroutine Name         : displayFinalSummery(SCALAR,SCALAR);
+#Objective              : It display the final summery after the backup/restore job has been completed.
+#Usage                  : displayFinalSummery(JOB_TYPE,FINAL_SUMMARY_FILE_PATH);
 #Added By               : Abhishek Verma.
 #Modified By            : Senthil Pandian
 #***********************************************************************************************/
@@ -2403,7 +2144,7 @@ sub displayFinalSummary{
 # Subroutine			: displayHeader
 # Objective				: Display header for the script files
 # Added By				: Yogesh Kumar
-# Modified By			: Anil Kumar, Sabin Cheruvattil, Senthil Pandian
+# Modified By			: Anil Kumar, Sabin Cheruvattil
 #****************************************************************************************************/
 sub displayHeader {
 	return 1 if ($Configuration::callerEnv eq 'BACKGROUND');
@@ -2411,69 +2152,47 @@ sub displayHeader {
 	if ($Configuration::displayHeader) {
 		$Configuration::displayHeader = 0;
 		my $w = (split(' ', $Configuration::screenSize))[-1];
-		my $adjust = 0;
+		my $adjst = 0;
 		$w += 0;
-		$w = ($w > 90)?90:$w;
-
-		my $indent = 25;
-		if ($username and -e getServerAddressFile()) {
-			if (loadStorageSize() or reCalculateStorageSize()) {
-				$indent = 45;
-			}
-		}
+		$w = ($w > 80)?80:$w;
 
 		my $header = qq(=) x $w;
 		my $h = "Version: $Configuration::version";
 		my $l = length($h);
 		$header    .= qq(\n$h);
-		$header    .= (qq( ) x ($indent - ($l -$adjust)) . qq($LS{'developed_by'} ));
+		$header    .= (qq( ) x (25 - ($l -$adjst)) . qq($LS{'developed_by'} ));
 		$header    .= qq($LS{lc($Configuration::appType . '_maintainer')}\n);
-		$header    .= (qq(-) x $l . qq( ) x ($indent - ($l -$adjust)) . qq(-) x ($w - ($l+ ($indent - ($l -$adjust)))));
+		$header    .= (qq(-) x $l . qq( ) x (25 - ($l -$adjst)) . qq(-) x ($w - ($l+ (25 - ($l -$adjst)))));
 		$h = "Status: ";
 		if ($username) {
 			$h .= $LS{isLoggedin().'_login_status'};
+			#$h .= "Logged In";
 		}
 		else {
 			$h .= "--";
 		}
+		$l = length($h);
+		$header    .= qq(\n$h);
+		$header    .= (qq( ) x (25 - ($l -$adjst)) . qq($LS{'logged_in_user'} ));
+		$header    .= (($username ? $username: $LS{'no_logged_in_user'}) . qq(\n));
 
-		if($appPath) {
-			$l = length($h);
-			$header    .= qq(\n$h);
-			$header    .= (qq( ) x ($indent - ($l -$adjust)) . qq($LS{'logged_in_user'} ));
-			$header    .= (($username ? $username: $LS{'no_logged_in_user'}) . qq(\n));
-		} else {
-			getAppPath();
-			$header    .= qq(\n);
-		}
 
 		# $h = qq($LS{'logged_in_user'});
 		# $header    .= qq(\n$h);
-		# $header    .= ((qq( ) x (20 - ($l -$adjust) + ($l - length($h)))) . ($username ? $username: $LS{'no_logged_in_user'}) . qq(\n));
+		# $header    .= ((qq( ) x (20 - ($l -$adjst) + ($l - length($h)))) . ($username ? $username: $LS{'no_logged_in_user'}) . qq(\n));
 
-		$header    .= (qq(-) x $l . qq( ) x ($indent - ($l -$adjust)) . qq(-) x ($w - ($l+ ($indent - ($l -$adjust)))));
-		$header    .= qq(\n);
-		$h = qq($LS{'storage_used'} );
-
-		if ($storageUsed and $totalStorage){
-			$h .= ((getUserConfiguration('ADDITIONALACCOUNT') eq 'true')? qq($storageUsed) : qq($storageUsed of $totalStorage));
-			#$h .= qq(1000.26 GB of 1000.00 GB);
-			$l  = length($h);
-			$header   .= qq($h);
+		if ($username and -e getServerAddressFile()){
+			if (loadStorageSize() or reCalculateStorageSize()) {
+				$header    .= (qq(-) x $l . qq( ) x (25 - ($l -$adjst)) . qq(-) x ($w - ($l+ (25 - ($l -$adjst)))));
+				$header    .= qq(\n);
+				$h = qq($LS{'storage_used'});
+				$header    .= qq($h);
+				$header    .= ((qq( ) x (25 - ($l -$adjst) + ($l - length($h)))));
+				$header    .= ((getUserConfiguration('ADDITIONALACCOUNT') eq 'true')? qq($storageUsed) : qq($storageUsed of $totalStorage));
+				$header    .= " ( Available: ".getFreeStorage()." )";		#TBE Add
+				$header    .= qq(\n);
+			}
 		}
-		else {
-			$h .= "--";
-			$l  = length($h);
-			$header    .= qq($h);
-		}
-		if ($indent > ($l -$adjust)) {
-			$header    .= (qq( ) x ($indent - ($l -$adjust))) ;
-		}
-		else {
-			$header    .= qq( );
-		}
-		$header    .= qq($LS{'linux_user'} ).$Configuration::mcUser;
-		$header    .= qq(\n);
 
 		if (isUpdateAvailable() && getUserConfiguration('NOTIFYSOFTWAREUPDATE')) {
 			$header    .= qq(-) x $w;
@@ -2485,12 +2204,10 @@ sub displayHeader {
 		if ($username and -e getServerAddressFile()){
 			my $warningCount = 0;
 			my $warningHeader = '';
-			if($Configuration::appType eq 'IDrive') {
-				if (isDashboardRunning() == 0){
-					$warningHeader    .= qq(\n);
-					$warningHeader .= qq(* $LS{'dashboard_service_stopped'});
-					$warningCount++;
-				}
+			if (isDashboardRunning() == 0){
+				$warningHeader    .= qq(\n);
+				$warningHeader .= qq(* $LS{'dashboard_service_stopped'});
+				$warningCount++;
 			}
 			unless(checkCRONServiceStatus() == CRON_RUNNING) {
 				$warningHeader    .= qq(\n);
@@ -2553,14 +2270,14 @@ sub displayProgress{
 	my $progressMsg = $_[0];
 	if ($Configuration::machineOS =~ /freebsd/i){
 		my $noOfLineToClean = $_[1];
-		system(updateLocaleCmd("tput rc"));
-		system(updateLocaleCmd("tput ed"));
+		system("tput rc");
+		system("tput ed");
 		for(my $i=1;$i<=$noOfLineToClean;$i++){
 			print $Configuration::freebsdProgress;
 		}
 	}
-	system(updateLocaleCmd("tput rc"));
-	system(updateLocaleCmd("tput ed"));
+	system("tput rc");
+	system("tput ed");
 	print $progressMsg;
 }
 
@@ -2580,7 +2297,7 @@ sub download {
 	}
 
 	unless (defined($downloadsPath)) {
-		$downloadsPath = getCatfile($servicePath, $Configuration::downloadsPath);
+		$downloadsPath = "$servicePath/$Configuration::downloadsPath";
 	}
 
 	unless (-d $downloadsPath) {
@@ -2623,12 +2340,9 @@ sub download {
 	my $response;
 	for my $i (0 .. $#{$url}) {
 		my @parse = split('/', $url->[$i]);
-		my $tmpErrorFile = getECatfile($downloadsPath, $Configuration::errorFile);
-		my $cmd = "curl --tlsv1 --fail -k $proxy -L $url->[$i] -o ";
-		$cmd   .= getECatfile($downloadsPath, $parse[-1]);
-		$cmd   .= " 2>>$tmpErrorFile";
-		$cmd = updateLocaleCmd($cmd);
-		#print "cmd:$cmd#\n\n";		
+		my $tmpErrorFile  = $downloadsPath."/".$Configuration::errorFile;
+		my $cmd = "curl --tlsv1 --fail -k $proxy -L $url->[$i] -o '$downloadsPath/$parse[-1]' 2>>'$tmpErrorFile'";
+		#print "cmd:$cmd#\n\n";
 		$response = `$cmd`;
 
 		if (-e $tmpErrorFile and -s $tmpErrorFile){
@@ -2643,8 +2357,8 @@ sub download {
 		}
 		#print "response:$response#\n\n";
 		unlink($tmpErrorFile) if (-e $tmpErrorFile);
-		# if (($response =~ /Could not resolve proxy|Failed to connect to .* port [0-9]+: Connection refused|Failed connect to .* Connection refused|Failed to connect to .* port [0-9]+: Network is unreachable|Connection timed out|response code said error|407 Proxy Authentication Required|No route to host|Could not resolve host/)) {
-		if($response =~ /$Configuration::proxyNetworkError/i) {
+		if (($response =~ /Could not resolve proxy|Failed to connect to .* port [0-9]+: Connection refused|Failed connect to .* Connection refused|Connection timed out|response code said error|407|No route to host|Could not resolve host/)) {
+
 			retreat(["\n", 'kindly_verify_ur_proxy']) if (defined($_[2]));
 
 			display(["\n", 'kindly_verify_ur_proxy']);
@@ -2653,10 +2367,8 @@ sub download {
 
 			# saveUserConfiguration() or retreat('failed to save user configuration');
 		}
-		elsif ($response =~ /SSH-2.0-OpenSSH_6.8p1-hpn14v6|Protocol mismatch|404 Not Found|Unknown SSL protocol error/) {
-			#retreat($response);
-			display($response);
-			return 0;
+		elsif ($response =~ /SSH-2.0-OpenSSH_6.8p1-hpn14v6|Protocol mismatch/) {
+			retreat($response);
 		} else {
 			traceLog("CURL-ERROR: $response");
 		}
@@ -2678,11 +2390,8 @@ sub download {
 sub downloadEVSBinary {
 	my $status = 0;
 	loadMachineHardwareName();
-	my $ezf    = [@{$Configuration::evsZipFiles{$Configuration::appType}{$machineHardwareName}},
-								@{$Configuration::evsZipFiles{$Configuration::appType}{'x'}}];
-	if ($Configuration::machineOS =~ /freebsd/i) {
-		$ezf = [@{$Configuration::evsZipFiles{$Configuration::appType}{'freebsd'}}];
-	}
+	my $ezf    = [@{$Configuration::evsZipFiles{$machineHardwareName}},
+								@{$Configuration::evsZipFiles{'x'}}];
 	my $downloadPage = $Configuration::evsDownloadsPage;
 	my $domain       = lc($Configuration::appType);
 
@@ -2690,32 +2399,20 @@ sub downloadEVSBinary {
 
 	$downloadPage =~ s/__APPTYPE__/$domain/g;
 
-	my ($dp, $binPath);
+	my $dp;
 	for my $i (0 .. $#{$ezf}) {
 		$ezf->[$i] =~ s/__APPTYPE__/$Configuration::appType/g;
-		$dp = ("$downloadPage/$ezf->[$i]");
-
-		$binPath = getCatfile(getAppPath(), $Configuration::idriveDepPath, $ezf->[$i]);
-		$binPath =~ s/\.zip//g;
-
-		if (-d $binPath) {
-			if (hasEVSBinary($binPath)) {
-				$status = 1;
-				last;
-			}
-		}
-
+		$dp = ($downloadPage . "/$ezf->[$i]");
 		unless(download($dp)) {
 			$status = 0;
 			last;
 		}
-
-		$binPath = getCatfile(getServicePath(), $Configuration::downloadsPath, $ezf->[$i]);
-		if (!-f $binPath or !unzip($binPath)) {
+		unless (unzip("$servicePath/$Configuration::downloadsPath/$ezf->[$i]")) {
 			$status = 0;
 			last;
 		}
 
+		my $binPath = getServicePath() . "/$Configuration::downloadsPath/" . $ezf->[$i] ;
 		$binPath =~ s/\.zip//g;
 		if (hasEVSBinary($binPath)) {
 			$status = 1;
@@ -2723,7 +2420,7 @@ sub downloadEVSBinary {
 		}
 		last if ($status);
 	}
-	rmtree(getCatfile($servicePath, $Configuration::downloadsPath));
+	rmtree("$servicePath/$Configuration::downloadsPath");
 	return $status;
 }
 
@@ -2746,40 +2443,29 @@ sub downloadStaticPerlBinary {
 
 	$downloadPage =~ s/__APPTYPE__/$domain/g;
 
-	my ($dp, $binPath);
+	my $dp;
 	for my $i (0 .. $#{$ezf}) {
 		$ezf->[$i] =~ s/__APPTYPE__/$Configuration::appType/g;
 		$ezf->[$i] =~ s/__KVER__/$Configuration::kver/g;
-		$dp = ("$downloadPage/$ezf->[$i]");
-
-		$binPath = getCatfile(getAppPath(), $Configuration::idriveDepPath, $ezf->[$i]);
-		$binPath =~ s/\.zip//g;
-
-		if (-d $binPath) {
-			if (hasStaticPerlBinary($binPath)) {
-				$status = 1;
-				last;
-			}
-		}
-
+		$dp = ($downloadPage . "/$ezf->[$i]");
 		unless(download($dp)) {
 			$status = 0;
 			last;
 		}
-		unless (unzip(getCatfile($servicePath, $Configuration::downloadsPath, (fileparse($ezf->[$i]))[0]))) {
+		unless (unzip("$servicePath/$Configuration::downloadsPath/" . (fileparse($ezf->[$i]))[0])) {
 			$status = 0;
 			last;
 		}
 
-		$binPath = getCatfile(getServicePath(), $Configuration::downloadsPath, (fileparse($ezf->[$i]))[0]);
+		my $binPath = getCatfile(getServicePath(), $Configuration::downloadsPath, (fileparse($ezf->[$i]))[0]);
 		$binPath =~ s/\.zip//g;
-
 		if (hasStaticPerlBinary($binPath)) {
 			$status = 1;
 			last;
 		}
+		last if ($status);
 	}
-	rmtree(getCatfile($servicePath, $Configuration::downloadsPath));
+	rmtree("$servicePath/$Configuration::downloadsPath");
 	return $status;
 }
 
@@ -2844,12 +2530,12 @@ sub displayProgressBar {
 	my $kbps = $progressDetails[3];
 	my $percent = 0;
 	$TotalSize = $_[1] if (defined $_[1] and $_[1] > 0);
-	$TotalSize = 0 if ($TotalSize eq $LS{'calculating'} or $TotalSize =~ /calculating/i);
+	$TotalSize = 0 if ($TotalSize eq $LS{'calculating'});
 	if ($TotalSize != 0) {
 		$percent = int($incrFileSize/$TotalSize*100);
 		$percent = 100	if ($percent > 100);
-		$progress = "|"x($percent/$Configuration::progressSizeOp);
-		my $cellCount = (100-$percent)/$Configuration::progressSizeOp;
+		$progress = "|"x($percent/$progressSizeOp);
+		my $cellCount = (100-$percent)/$progressSizeOp;
 		$cellCount = $cellCount - int $cellCount ? int $cellCount + 1 : $cellCount;
 		$cellSize = " " x $cellCount;
 		$totalSizeUnit = convertFileSize($TotalSize);
@@ -2863,29 +2549,23 @@ sub displayProgressBar {
 	#$kbps =~ s/\s+//; Commented by Senthil : 26-Sep-2018
 	$percent = sprintf "%4s", "$percent%";
 	my $spAce = " "x6;
-	my $boundary = "-"x(100/$Configuration::progressSizeOp);
-	my $spAce1 = " "x(38/$Configuration::progressSizeOp);
+	my $boundary = "-"x(100/$progressSizeOp);
+	my $spAce1 = " "x(38/$progressSizeOp);
 
 	return if ($progressDetails[0] eq '');
 	my $fileDetailRow = "\[$progressDetails[0]\] \[$progressDetails[4]\] \[$progressDetails[5]\]";
 
 	my $strLen     = length $fileDetailRow;
-	my $emptySpaceDetail = " ";
-	$emptySpaceDetail = " "x($latestCulmn-$strLen) if ($latestCulmn>$strLen);
-
-	my $sizeRowDetail = "$spAce1\[$fileSizeUnit of $totalSizeUnit] [$kbps/s]";
-	$strLen  = length $sizeRowDetail;
-	my $emptySizeRowDetail = " ";
-	$emptySizeRowDetail = " "x($latestCulmn-$strLen) if ($latestCulmn>$strLen);
-
+	my $emptySpace = " ";
+	$emptySpace = " "x($latestCulmn-$strLen) if($latestCulmn>$strLen);
 	my $progressReturnData = $fullHeader;
-	$progressReturnData .=  "$fileDetailRow $emptySpaceDetail\n\n";
+	$progressReturnData .=  "$fileDetailRow $emptySpace\n\n";
 	$progressReturnData .= "$spAce$boundary\n";
 	$progressReturnData .= "$percent [";
 	$progressReturnData .= $progress.$cellSize;
 	$progressReturnData .= "]\n";
 	$progressReturnData .= "$spAce$boundary\n";
-	$progressReturnData .= "$sizeRowDetail $emptySizeRowDetail\n";
+	$progressReturnData .= "$spAce1\[$fileSizeUnit of $totalSizeUnit] [$kbps/s]$emptySpace\n";
 
 	if ($Configuration::jobType =~ /Backup/i) {
 		my $backupHost	  = getUserConfiguration('BACKUPLOCATION');
@@ -2894,16 +2574,12 @@ sub displayProgressBar {
 
 		if ($isDedup eq 'on'){
 			my $backupLoaction = ($backupHost =~ /#/)?(split('#',$backupHost))[1]:$backupHost;
-			$progressReturnData .= $lineFeed.$LS{'backup_location_progress'}.(' ' x 6)." : ".$backupLoaction.$lineFeed;
+			$progressReturnData .= "\nBackup Location       : $backupLoaction\n";
 		} else {
-			if($Configuration::jobType eq 'LocalBackup') {
-				my @backupTo = split("/",$backupHost);
-				$backupHost	 = (substr($backupHost,0,1) eq '/')? '/'.$backupTo[1]:'/'.$backupTo[0];
-			}
-			$progressReturnData .= $lineFeed.$LS{'backup_location_progress'}.(' ' x 6)." : ".$backupHost.$lineFeed;
-			$progressReturnData .= $LS{'backup_type'}.(' ' x 10)." : ".ucfirst($backupPathType).$lineFeed;
+			$progressReturnData .= "\nBackup Location       : $backupHost\n";
+			$progressReturnData .= "Backup Type           : ".ucfirst($backupPathType)."\n";
 		}
-		$progressReturnData .= $LS{'bandwidth_throttle'}." : ".$bwThrottle.$lineFeed;
+		$progressReturnData .= "Bandwidth Throttle(%) : $bwThrottle\n";
 	}
 	else {
 		my $restoreHost  = getUserConfiguration('RESTOREFROM');
@@ -2912,11 +2588,153 @@ sub displayProgressBar {
 		if ($isDedup eq 'on') {
 			$restoreFromLoaction = (split('#',$restoreHost))[1] if ($restoreHost =~ /#/);
 		}
-		$progressReturnData .= $lineFeed.$LS{'restore_from_location_progress'}." : ".$restoreFromLoaction.$lineFeed;
-		$progressReturnData .= $LS{'restore_location_progress'}.(' ' x 5)." : ".$restoreLocation.$lineFeed;
-
+		$progressReturnData .= "\nRestore From Location : $restoreFromLoaction\n";
+		$progressReturnData .= "Restore Location        : $restoreLocation\n";
 	}
-	displayProgress($progressReturnData, 20);
+	displayProgress($progressReturnData, 11);
+}
+
+#****************************************************************************************************
+# Subroutine Name : doBackupOperation.
+# Objective       : This subroutine performs the actual task of backing up files. It creates
+#							a child process which executes the backup command. It also creates a process
+#							which continuously monitors the temporary output file. At the end of backup,
+#							it inspects the temporary error file if present. It then deletes the temporary
+#							output file, temporary error file and the temporary directory created by
+#							idevsutil binary.
+# Usage			  : doBackupOperation($line);
+# Where			  : $line :
+# Modified By     : Deepak Chaurasia, Vijay Vinoth
+#*****************************************************************************************************/
+sub doBackupOperation
+{
+	my $parameters       = $_[0];
+	my $silentBackupFlag = $_[1];
+	my $scheduleFlag     = $_[2];
+	my $operationEngineId = $_[3];
+	my $retry_failedfiles_index = $_[4];
+	my $pidPath       = $Configuration::jobRunningDir."/".$Configuration::pidFile;
+	my $backupUTFpath = $Configuration::jobRunningDir.'/'.$Configuration::utf8File."_".$operationEngineId;
+	my $evsOutputFile = $Configuration::jobRunningDir.'/'.$Configuration::evsOutputFile.'_'.$operationEngineId;
+	my $evsErrorFile  = $Configuration::jobRunningDir.'/'.$Configuration::evsErrorFile.'_'.$operationEngineId;
+	my $isDedup  	      = getUserConfiguration('DEDUP');
+	my $bwPath     	      = getUserProfilePath()."/bw.txt";
+	my $defLocal	      = 1; #Need to tc
+	my $backupHost	      = getUserConfiguration('BACKUPLOCATION');
+	my $userName 	      = getUsername();
+	my $backupLocationDir = getLocalBackupDir();
+	my @parameter_list = split /\' \'/,$parameters,3;
+	my $engineLockFile = $Configuration::jobRunningDir."/".Configuration::ENGINE_LOCKE_FILE;
+	$backupUTFpath = $backupUTFpath;
+
+	open(my $startPidFileLock, ">>", $engineLockFile) or return 0;
+	if (!flock($startPidFileLock, 1)){
+		traceLog("Failed to lock engine file");
+		return 0;
+	}
+
+	open(my $engineFp, ">>", $pidPath.'_'.$operationEngineId) or return 0;
+
+	if (!flock($engineFp, 2)){
+		display('failed_to_lock',1);
+		return 0;
+	}
+
+	createUTF8File(['EXPRESSBACKUP',$backupUTFpath],
+				$parameter_list[2],
+				$bwPath,
+				$defLocal,
+				$Configuration::jobRunningDir."/",
+				$parameter_list[1],
+				$evsOutputFile,
+				$evsErrorFile,
+				$backupLocationDir,
+				$parameter_list[0],
+				$backupLocationDir
+				) or retreat('failed_to_create_utf8_file');
+
+	my $backupPid = fork();
+	if (!defined $backupPid) {
+		$Configuration::errStr = $Locale::strings{'cannot_fork_child'}."\n";
+		#return BACKUP_PID_FAIL;
+		return 2;
+	}
+
+	if ($backupPid == 0) {
+		$Configuration::pidOperationFlag = "EVS_process";
+		if ( -e $pidPath) {
+			#exec($idevsutilCommandLine);
+			my @responseData = runEVS('item',1);
+			if ($responseData[0]->{'STATUS'} eq 'FAILURE') {
+				if (open(ERRORFILE, ">> $Configuration::errorFilePath"))
+				{
+					autoflush ERRORFILE;
+					print ERRORFILE $Configuration::errStr;
+					close ERRORFILE;
+					chmod $Configuration::filePermission, $Configuration::errorFilePath;
+				}
+				else {
+					traceLog($Locale::strings{'failed_to_open_file'}."errorFilePath in doBackupOperation:".$Configuration::errorFilePath.", Reason:$! \n");
+				}
+			}
+
+			if (open OFH, ">>", $evsOutputFile) {
+				print OFH "\nCHILD_PROCESS_COMPLETED\n";
+				close OFH;
+				chmod $Configuration::filePermission, $evsOutputFile;
+			}
+			else {
+				$Configuration::errStr = $Locale::strings{'failed_to_open_file'}.": $Configuration::outputFilePath in doBackupOperation. Reason: $!";
+				print $Configuration::errStr;
+				traceLog($Configuration::errStr);
+				return 0;
+			}
+		}
+		exit 1;
+	}
+
+	$Configuration::pidOperationFlag = "child_process";
+	$Configuration::pidOutputProcess = $backupPid;
+	exit(1) unless(-f $pidPath);
+
+	#$isLocalBackup = 0;
+	my $currentDir = getAppPath();
+	my $workingDir = $currentDir;
+	$workingDir =~ s/\'/\'\\''/g;
+	my $tmpoutputFilePath = $Configuration::outputFilePath;
+	$tmpoutputFilePath =~ s/\'/\'\\''/g;
+	my $TmpBackupSetFile = $parameter_list[2];
+	$TmpBackupSetFile =~ s/\'/\'\\''/g;
+	my $TmpSource = $parameter_list[0];
+	$TmpSource =~ s/\'/\'\\''/g;
+	my $tmp_jobRunningDir = $Configuration::jobRunningDir;
+	$tmp_jobRunningDir =~ s/\'/\'\\''/g;
+	my $tmpBackupHost = $backupHost;
+	$tmpBackupHost =~ s/\'/\'\\''/g;
+	#$fileChildProcessPath = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
+	my $fileChildProcessPath = $currentDir.'/'.$Configuration::idriveScripts{'operations'};
+	my $bwThrottle 			 = getUserConfiguration('BWTHROTTLE');
+	my $backupPathType       = getUserConfiguration('BACKUPTYPE');
+	my @param = join ("\n",('LOCAL_BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType,$scheduleFlag,$operationEngineId));
+
+	writeParamToFile("$tmp_jobRunningDir/$Configuration::operationsfile"."_".$operationEngineId,@param);
+	my $perlPath = getPerlBinaryPath();
+	#traceLog("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");
+	{
+	my $cmd = "cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\' \'$operationEngineId\' \'$retry_failedfiles_index\'";
+	system($cmd);
+	}
+	waitpid($backupPid, 0);
+	return 0 unless(updateServerAddr());
+
+	unlink($parameter_list[2]);
+	unlink($evsOutputFile.'_'.$operationEngineId);
+	flock($startPidFileLock, 8);
+	flock($engineFp, 8);
+	unlink($pidPath.'_'.$operationEngineId);
+
+	return 0 if(-e $Configuration::errorFilePath && -s $Configuration::errorFilePath);
+	return 1; #Success
 }
 
 #*****************************************************************************************************
@@ -2934,54 +2752,12 @@ sub doSilentLogout {
 	}
 	return 0;
 }
-
-#****************************************************************************************************
-# Subroutine			: displayMainMenu
-# Objective				: This subroutine displays the date options menu
-# Added By				: Sabin Cheruvattil
-#****************************************************************************************************/
-sub displayMainMenu {
-	unless (defined($_[0]) and ref($_[0]) eq 'HASH') {
-		retreat('invalid_parameter');
-	}
-	my %mainMenuOptions = %{$_[0]};
-	my $title = defined($_[1])?$_[1]:'menu_options_title';
-	display([$title, ':', "\n"]);
-	display([map{$_ . ") ", getStringConstant($mainMenuOptions{$_}) . "\n"} sort keys %mainMenuOptions], 0);
-}
-
-#*****************************************************************************************************
-# Subroutine			: displayTitlewithUnderline
-# Objective				: To display the title with underline
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub displayTitlewithUnderline {
-	return if(!defined($_[0]) or $_[0] eq '');
-	my $underline 	= qq(\n).qq(=) x length($_[0]) . qq(\n);
-	display(["\n",$_[0],$underline],0);
-}
-
-#*****************************************************************************************************
-# Subroutine			: deleteNS
-# Objective				: delete ns value
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub deleteNS {
-	if (exists $ns{'nsq'}{$_[0]}) {
-		$ns{'nsd'}{$_[0]} = $ns{'nsq'}{$_[0]};
-		delete $ns{'nsq'}{$_[0]};
-		return 1;
-	}
-	return 0;
-}
-
 #------------------------------------------------- E -------------------------------------------------#
 
 #*****************************************************************************************************
 # Subroutine			: editRestoreLocation
 # Objective				: Edit restore location for the current user
 # Added By				: Anil Kumar
-# Modified By 			: Senthil Pandian
 #****************************************************************************************************/
 sub editRestoreLocation {
 	my $restoreLocation = getUserConfiguration('RESTORELOCATION');
@@ -2992,8 +2768,9 @@ sub editRestoreLocation {
 		return 1;
 	}
 	else {
-		display(['your_restore_location_remains',"'$restoreLocation'."]);
-		return 0 if (defined($_[0]));
+		if (defined($_[0])) {
+			return 0 ;
+		}
 		return 1;
 	}
 }
@@ -3006,7 +2783,7 @@ sub editRestoreLocation {
 #****************************************************************************************************/
 sub editRestoreFromLocation {
 	my $rfl = getUserConfiguration('RESTOREFROM');
-	$rfl = (split('#', $rfl))[-1] if (getUserConfiguration('DEDUP') eq 'on');
+	$rfl = (split('#', $rfl))[-1];
 	display(["\n",'your_restore_from_device_is_set_to', " \"$rfl\". ", 'do_you_want_edit_this_y_or_n_?'],1);
 	my $answer = getAndValidate(['enter_your_choice'], "YN_choice", 1);
 	if (lc($answer) eq "y") {
@@ -3015,16 +2792,11 @@ sub editRestoreFromLocation {
 			my @devices = fetchAllDevices();
 			if ($devices[0]{'STATUS'} eq Configuration::FAILURE) {
 				if ($devices[0]{'MSG'} =~ 'No devices found') {
-					retreat('your_account_not_configured_properly');
+					retreat('failed');
 				}
-				elsif($devices[0]{'MSG'} =~ /unauthorized user|user information not found/i) {
-					saveServerAddress(fetchServerAddress());
-				}
-				retreat('operation_could_not_be_completed_please_try_again');
-				return 0;
 			}
 			elsif ($devices[0]{'STATUS'} eq Configuration::SUCCESS) {
-				linkBucket('restore', \@devices) or retreat('please_try_again');
+				linkBucket('restore', \@devices) or retreat("Please try again.");
 				return 1;
 			}
 		}
@@ -3052,10 +2824,6 @@ sub editRestoreFromLocation {
 					createUTF8File('ITEMSTATUS',getValidateRestoreFromFile(),$evsErrorFile) or retreat('failed_to_create_utf8_file');
 					my @result = runEVS('item');
 					if (-s $evsErrorFile > 0) {
-						my $err = getFileContents($evsErrorFile);
-						if($err =~ /unauthorized user|user information not found/i) {
-							saveServerAddress(fetchServerAddress());
-						}
 						unlink($evsErrorFile);
 						retreat('operation_could_not_be_completed_please_try_again');
 					}
@@ -3121,9 +2889,6 @@ sub encodePVT {
 	unless (($result[0]->{'STATUS'} eq Configuration::SUCCESS) and ($result[0]->{'MSG'} eq 'no_stdout')) {
 		retreat('failed_to_encode_private_key');
 	}
-	if (loadNotifications() and (getNotifications('alert_status_update') eq $Configuration::alertErrCodes{'pvt_verification_failed'})) {
-		setNotification('alert_status_update', 0) and saveNotifications();
-	}
 	copy(getIDPVTFile(), getIDPVTSCHFile());
 	changeMode(getIDPVTFile());
 	changeMode(getIDPVTSCHFile());
@@ -3136,7 +2901,8 @@ sub encodePVT {
 #****************************************************************************************************/
 sub encryptString {
 	return '' unless $_[0];
-
+# TBE override
+	return Taryck::encryptString($_[0]);
 	my $plainString  = $_[0];
 
 	$plainString = encode_base64($plainString);
@@ -3301,8 +3067,7 @@ sub findDependencies {
 	my $status = 0;
 	for my $binary (@Configuration::dependencyBinaries) {
 		display("dependency_$binary...", 0) if ($display);
-		my $findbinaryCmd = updateLocaleCmd("which $binary 2>/dev/null");
-		my $r = `$findbinaryCmd`;
+		my $r = `which $binary 2>/dev/null`;
 		if ($? == 0) {
 			display(['found']) if ($display);
 			$status = 1;
@@ -3321,27 +3086,11 @@ sub findDependencies {
 # Subroutine			: fetchServerAddress
 # Objective				: Fetch current user's evs server ip
 # Added By				: Yogesh Kumar
-# Modified By 			: Senthil Pandian
 #****************************************************************************************************/
 sub fetchServerAddress {
-	my @responseData;
-	my $authCGI = $Configuration::IDriveAuthCGI;
-	$authCGI = $Configuration::IBackupAuthCGI if ($Configuration::appType eq 'IBackup');
-
-	my %params = (
-		'host' => $authCGI,
-		'method' => 'POST',
-		'data' => {
-			'username' => Helpers::getUsername(),
-			'password' => &Helpers::getPdata(Helpers::getUsername()),
-		}
-	);
-
-	my $res = Helpers::requestViaUtility(\%params);
-	if(defined($res->{DATA})) {
-		my %evsServerHashOutput = parseXMLOutput(\$res->{DATA});
-		$responseData[0] = \%evsServerHashOutput;
-	}
+	createUTF8File('GETSERVERADDRESS') or retreat('failed_to_create_utf8_file');
+	my @responseData = runEVS('tree');
+	retreat('failed_to_fetch_server_address') if ($responseData[0]->{'STATUS'} eq Configuration::FAILURE);
 	return @responseData;
 }
 
@@ -3368,6 +3117,40 @@ sub formatEmailAddresses {
 }
 
 #*****************************************************************************************************
+# Subroutine Name         : formSendMailCurlcmd
+# Objective               : forms curl command to send mail based on proxy settings
+# Added By                : Dhritikana
+#*****************************************************************************************************
+sub formSendMailCurlcmd {
+	#Assigning curl path
+	my $curlPath = `which curl`;
+	chomp($curlPath);
+	if ($curlPath eq ''){
+		$curlPath = '/usr/local/bin/curl';
+	}
+	my $cmd  = '';
+	my $data = $_[0];
+	my $proxyStr = getUserConfiguration('PROXY');
+	if ($proxyStr) {
+		my ($uNPword, $ipPort) = split(/\@/, $proxyStr);
+		my @UnP = split(/\:/, $uNPword);
+		if (scalar(@UnP) >1 and $UnP[0] ne "") {
+			$UnP[1] = ($UnP[1] ne '')?decryptString($UnP[1]):$UnP[1];
+			foreach ($UnP[0], $UnP[1]) {
+				$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
+			}
+			$uNPword = join ":", @UnP;
+			$cmd = "$curlPath -x http://$uNPword\@$ipPort -s -d '$data' '$Configuration::notifyPath'";
+		} else {
+			$cmd = "$curlPath -x http://$ipPort -s -d '$data' '$Configuration::notifyPath'";
+		}
+	} else {
+		$cmd = "$curlPath -s -d '$data' '$Configuration::notifyPath'";
+	}
+	return $cmd;
+}
+
+#*****************************************************************************************************
 # Subroutine		: fileWrite
 # Objective			: Write/create a file with given data
 # Added By			: Yogesh Kumar
@@ -3387,31 +3170,6 @@ sub fileWrite {
 }
 
 #*****************************************************************************************************
-# Subroutine	: fileWrite2
-# Objective		: Write/create a file with given data and lock while modifying content
-# Added By		: Yogesh Kumar
-#****************************************************************************************************/
-sub fileWrite2 {
-	my $mode = '>';
-	$mode .= '>' if (defined($_[2] and $_[2] eq 'APPEND'));
-	if (open(my $fh, $mode, $_[0])) {
-		unless (flock($fh, LOCK_EX)) {
-			traceLog("Cannot lock file $_[0] $!\n");
-			close($fh);
-			return 0;
-		}
-		seek $fh, 0, 0;
-		truncate $fh, 0;
-		print $fh $_[1];
-		close($fh);
-		return 1;
-	}
-
-	display(['failed_to_open_file', " $_[0]. $!"]);
-	return 0;
-}
-
-#*****************************************************************************************************
 # Subroutine		: findMyDevice
 # Objective			: Find the bucket which was linked with this machine
 # Added By			: Yogesh Kumar
@@ -3420,71 +3178,52 @@ sub fileWrite2 {
 sub findMyDevice {
 	my $devices = $_[0];
 	my $displayStatus = defined($_[1]);
-	my $muid = getMachineUID() || retreat('unable_to_find_mac_address');
-	my $muname = getMachineUser();
+	my $muid = getMachineUID() or retreat('unable_to_find_mac_address');
 	foreach (@{$devices}) {
-		next if (!defined($_->{'uid'}) or $muid ne $_->{'uid'});
+		next	if ($muid ne $_->{'uid'});
 
-		if ('NA' eq $_->{'loc'}) {
-			retreat('update_device_name_failed_try_again_later') unless (linkBucket('backup', [$_], undef, 1, 1));
-			$_->{'loc'} = $muname;
-			$_->{'server_root'} = getUserConfiguration('SERVERROOT');
-			$_->{'device_id'} = getUserConfiguration('BACKUPLOCATION');
-			$_->{'device_id'} = (split('#', $_->{'device_id'}))[0];
-			$_->{'device_id'} =~ s/$Configuration::deviceIDPrefix//;
-			$_->{'device_id'} =~ s/$Configuration::deviceIDSuffix//;
-		}
+		display(['your_backup_to_device_name_is',(" \"" . $_->{'nick_name'} . "\". "),'do_you_want_edit_this_y_or_n_?'], 1);
 
-		if ($displayStatus) {
-			display(['your_backup_to_device_name_is',(" \"" . $_->{'nick_name'} . "\". "),'do_you_want_edit_this_y_or_n_?'], 1);
-
-			my $answer = getAndValidate(['enter_your_choice'], "YN_choice", 1);
-			if (lc($answer) eq 'y') {
-				my $deviceName = getAndValidate(["\n", 'enter_your_backup_location_optional', ": "], "backup_location", 1);
-				if ($deviceName eq '') {
-					$deviceName = $Configuration::hostname;
-					$deviceName =~ s/[^a-zA-Z0-9_-]//g;
-				}
-				display('setting_up_your_backup_location',1);
-				if ($deviceName and ($deviceName ne $_->{'nick_name'})) {
-					my $restoreFrom = getUserConfiguration('RESTOREFROM');
-					my $bkpLoc      = getUserConfiguration('BACKUPLOCATION');
-					my $isSameDeviceID = 1;
-					if ($restoreFrom and $restoreFrom eq $bkpLoc){
-						$isSameDeviceID = 1;
-					}
-					retreat('update_device_name_failed_try_again_later') unless (renameDevice($_, $deviceName));
-					$_->{'nick_name'} = $deviceName; # Added for Snigdha_2.17_74_4
-					setUserConfiguration('RESTOREFROM',($Configuration::deviceIDPrefix .
-						$_->{'device_id'} .$Configuration::deviceIDSuffix ."#" . $_->{'nick_name'})) if ($isSameDeviceID);
-				}
-				$displayStatus = 0;
+		my $answer = getAndValidate(['enter_your_choice'], "YN_choice", 1);
+		if (lc($answer) eq 'y') {
+			my $deviceName = getAndValidate(["\n", 'enter_your_backup_location_optional', ": "], "backup_location", 1);
+			if ($deviceName eq '') {
+				$deviceName = $Configuration::hostname;
+				$deviceName =~ s/[^a-zA-Z0-9_-]//g;
 			}
-			display(['your_backup_to_device_name_is',(" \"" . $_->{'nick_name'} . "\".")]);
+			display('setting_up_your_backup_location',1);
+			if ($deviceName and ($deviceName ne $_->{'nick_name'})) {
+				my $restoreFrom = getUserConfiguration('RESTOREFROM');
+				my $bkpLoc      = getUserConfiguration('BACKUPLOCATION');
+				my $isSameDeviceID = 1;
+				if ($restoreFrom and $restoreFrom eq $bkpLoc){
+					$isSameDeviceID = 1;
+				}
+				retreat('update_device_name_failed_try_again_later') unless (renameDevice($_, $deviceName));
+				$_->{'nick_name'} = $deviceName; # Added for Snigdha_2.17_74_4
+				setUserConfiguration('RESTOREFROM',($Configuration::deviceIDPrefix .
+					$_->{'device_id'} .$Configuration::deviceIDSuffix ."#" . $_->{'nick_name'})) if ($isSameDeviceID);
+			}
+			$displayStatus = 0;
 		}
 
+		display(['your_backup_to_device_name_is',(" \"" . $_->{'nick_name'} . "\".")]) unless($displayStatus);
 		setUserConfiguration('SERVERROOT', $_->{'server_root'});
 		setUserConfiguration('BACKUPLOCATION',($Configuration::deviceIDPrefix .
 			$_->{'device_id'} .$Configuration::deviceIDSuffix ."#" . $_->{'nick_name'}));
 		loadNotifications() and setNotification('register_dashboard') and saveNotifications();
-		setUserConfiguration('MUID',$muid);
 		return 1;
 	}
 
 	foreach (@{$devices}) {
-		next unless(defined($_->{'uid'}));
 		$_->{'uid'} =~ s/_1$//g;
 		next	if ($muid ne $_->{'uid'});
-
-		if ($muname ne $_->{'loc'}) {
-			next;
-		}
 
 		createUTF8File('LINKBUCKET',
 		$Configuration::evsAPIPatterns{'LINKBUCKET'},
 		$_->{'nick_name'},
 		$_->{'device_id'},
-		$muid) or retreat('failed_to_create_utf8_file');
+		getMachineUID()) or retreat('failed_to_create_utf8_file');
 		my @result = runEVS('item');
 
 		if ($result[0]->{'STATUS'} eq Configuration::FAILURE) {
@@ -3500,7 +3239,6 @@ sub findMyDevice {
 			loadNotifications() and setNotification('register_dashboard') and saveNotifications();
 		}
 
-		setUserConfiguration('MUID',$muid);
 		setUserConfiguration('SERVERROOT', $_->{'server_root'});
 		return 1;
 	}
@@ -3528,7 +3266,6 @@ sub fileLock {
 	else {
 		print $fh $$;
 		autoflush $fh;
-		chmod $Configuration::filePermission, $_[0];
 		return 1;
 	}
 }
@@ -3541,8 +3278,7 @@ sub fileLock {
 #*********************************************************************************************/
 sub getItemFullPath{
 	my $partialPath = $_[0];
-	my $pwdCmd = updateLocaleCmd('pwd');
-	chomp(my $presentWorkingDir =`$pwdCmd`);
+	chomp(my $presentWorkingDir =`pwd`);
 	$partialPath =~ s/^\.\/// if ($partialPath =~ /^\.\//);
 	#print "\n PartialPath :: $partialPath\n";
 	#print "\n presentWorkingDir :: $presentWorkingDir\n";
@@ -3712,7 +3448,7 @@ sub getCatfile {
 #****************************************************************************************************/
 sub getECatfile {
 	my $file = catfile(@_);
-	$file =~ s/([^a-zA-Z0-9_\/.-@#])/\\$1/g;
+	$file =~ s/([^a-zA-Z0-9_])/\\$1/g;
 	return qq($file);
 }
 
@@ -3722,12 +3458,7 @@ sub getECatfile {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub getIDrivePerlBin {
-	if($Configuration::appType eq 'IDrive') {
-		return getECatfile(getServicePath(), $Configuration::staticPerlBinaryName);
-	}
-	else {
-		return $Configuration::perlBin;
-	}
+	return getECatfile(getServicePath(), $Configuration::staticPerlBinaryName);
 }
 
 #*****************************************************************************************************
@@ -3736,7 +3467,8 @@ sub getIDrivePerlBin {
 # Added By				: Senthil pandian
 #****************************************************************************************************/
 sub getEditor {
-	return $ENV{EDITOR} || 'vi';
+#	return $ENV{EDITOR} || 'vi';
+	return $ENV{EDITOR} || 'nano';
 }
 
 #*****************************************************************************************************
@@ -3758,6 +3490,8 @@ sub getMountPoints {
 		'/sys/',
 		'/usr/',
 		'/var/',
+		'/run',
+		'/run/',
 		'/tmp',
 		'/.snapshots',
 		'/srv',
@@ -3766,8 +3500,7 @@ sub getMountPoints {
 		'/home'
 	);
 
-	my $FilesystemCmd = updateLocaleCmd('df -k | grep -v Filesystem');
-	my $fileSystems = `$FilesystemCmd`;
+	my $fileSystems = `df -k | grep -v Filesystem`;
 	my @fsDetails;
 	my @matches;
 	my $targetMountDevice;
@@ -3857,13 +3590,12 @@ sub getCursorPos {
 	system "stty -cbreak </dev/tty >/dev/tty 2>&1";
 	my ($curLines, $cols)=$x=~m/(\d+)\;(\d+)/;
 	system('stty', 'echo');
-	my $totalLinesCmd = updateLocaleCmd('tput lines');
-	my $totalLines = `$totalLinesCmd`;
+	my $totalLines = `tput lines`;
 
 	chomp($totalLines);
 	my $threshold = $totalLines-$linesToRedraw;
 	if ($curLines >= $threshold) {
-		system(updateLocaleCmd("clear"));
+		system("clear");
 		print "\n";
 		$curLines = 0;
 	} else {
@@ -3873,13 +3605,12 @@ sub getCursorPos {
 	changeSizeVal();
 	#Added for FreeBSD machine's progress bar display
 	if ($Configuration::machineOS =~ /freebsd/i) {
-		my $latestCulmnCmd = updateLocaleCmd('tput cols');
-		$latestCulmn = `$latestCulmnCmd`;
+		$latestCulmn = `tput cols`;
 		my $freebsdProgress .= (' ')x$latestCulmn;
 		$freebsdProgress .= "\n";
 		$Configuration::freebsdProgress = $freebsdProgress;
 	}
-	system(updateLocaleCmd("tput sc"));
+	system("tput sc");
 	print "$_[1]" if ($_[1] and $_[1] ne '');
 }
 
@@ -3890,38 +3621,13 @@ sub getCursorPos {
 # Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getEVSBinaryFile {
-	if ($Configuration::appType eq 'IDrive') {
-		return ((defined(getUserConfiguration('DEDUP')) && getUserConfiguration('DEDUP') eq 'off')? "$servicePath/$Configuration::evsBinaryName" : "$servicePath/$Configuration::evsDedupBinaryName");
-	} else {
-		return "$servicePath/$Configuration::evsBinaryName";
-	}
-}
-
-
-#*****************************************************************************************************
-# Subroutine			: getEVSBinaryDownloadPath
-# Objective				: Return the EVS binary file download path based on app & arch
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub getEVSBinaryDownloadPath {
-	my $arch = $_[0];
-	my $evsWebPath  = '';
-
-	my $downloadPage = $Configuration::evsDownloadsPage;
-	my $domain       = lc($Configuration::appType);
-	$domain .= 'downloads' if ($Configuration::appType eq 'IDrive');
-
-	$downloadPage =~ s/__APPTYPE__/$domain/g;
-	$downloadPage .= "/".$Configuration::appType."_Linux_" . $arch . ".zip";
-
-	return $downloadPage;
+	return ((defined(getUserConfiguration('DEDUP')) && getUserConfiguration('DEDUP') eq 'off')? "$servicePath/$Configuration::evsBinaryName" : "$servicePath/$Configuration::evsDedupBinaryName");
 }
 
 #****************************************************************************************************
 # Subroutine Name         : getFinalMailAddrList
 # Objective               : To get valid multiple mail address list
 # Added By                : Dhritikana
-# Modified By             : Senthil Pandian
 #*****************************************************************************************************
 sub getFinalMailAddrList
 {
@@ -3947,16 +3653,14 @@ sub getFinalMailAddrList
 				$count++;
 				$finalAddrList .= "$addr,";
 			} else {
-				#print $Locale::strings{'failed_to_send_mail'}.$Locale::strings{'invalid_email_addresses_are_'}." $addr $lineFeed";
-				display(['failed_to_send_mail','invalid_email_addresses_are_'," $addr $lineFeed"]);
-				traceLog($LS{'failed_to_send_mail'}.$LS{'invalid_email_addresses_are_'}." $addr $lineFeed", __FILE__, __LINE__);
-				if (open ERRORFILE, ">>", $Configuration::errorFilePath) {
-					chmod $Configuration::filePermission, $Configuration::errorFilePath;
-					autoflush ERRORFILE;
+				print $Locale::strings{'failed_to_send_mail'}.$Locale::strings{'invalid_email_addresses_are_'}." $addr $lineFeed";
+				traceLog($Locale::strings{'failed_to_send_mail'}.$Locale::strings{'invalid_email_addresses_are_'}." $addr $lineFeed", __FILE__, __LINE__);
+				open ERRORFILE, ">>", $Configuration::errorFilePath;
+				chmod $Configuration::filePermission, $Configuration::errorFilePath;
+				autoflush ERRORFILE;
 
-					print ERRORFILE $LS{'failed_to_send_mail'}.$LS{'invalid_email_addresses_are_'}." $addr $lineFeed";
-					close ERRORFILE;
-				}
+				print ERRORFILE $Locale::strings{'failed_to_send_mail'}.$Locale::strings{'invalid_email_addresses_are_'}." $addr $lineFeed";
+				close ERRORFILE;
 			}
 		}
 
@@ -3964,7 +3668,7 @@ sub getFinalMailAddrList
 			return $finalAddrList;
 		}
 		else {
-			traceLog($LS{'failed_to_send_mail'}.$LS{'no_emails_configured'});
+			traceLog($Locale::strings{'failed_to_send_mail'}.$Locale::strings{'no_emails_configured'});
 			return "NULL";
 		}
 	}
@@ -4073,15 +3777,15 @@ sub getIDPWDSCHFile {
 # Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub getLogsList {
+	return Taryck::getLogsList(@_);
 	my %timestampStatus = ();
 	my @tempLogFiles;
 	my $currentLogFile ='';
 	my $logDir = $_[0];
 
 	if (-e $logDir) {
-		my $tempLogFilesCmd = updateLocaleCmd("ls '$logDir'");
-		@tempLogFiles = `$tempLogFilesCmd`;
-		%timestampStatus = map {m/(\d+)_([A-Za-z*\_]+)/} @tempLogFiles;
+		@tempLogFiles = `ls '$logDir'`;
+		%timestampStatus = map {m/(\d+)_([A-Za-z\_]+)/} @tempLogFiles;
 	}
 	return %timestampStatus;
 }
@@ -4113,20 +3817,17 @@ sub getIPAddr {
 	return $mipa if ($mipa);
 
 	my $cmd;
-	my $ifConfigPathCmd = updateLocaleCmd('which ifconfig 2>/dev/null');
-	my $ifConfigPath = `$ifConfigPathCmd`;
+	my $ifConfigPath = `which ifconfig 2>/dev/null`;
 	$mipa = '0.0.0.0';
 	my $result = '';
 	chomp($ifConfigPath);
 	if (-f '/sbin/ip') {
-		my $ipCmd = updateLocaleCmd("/sbin/ip r | grep 'src'");
-		my @ip = `$ipCmd`;
+		my @ip = `/sbin/ip r | grep 'src'`;
 		@ip = split(' ', (split(' src ', $ip[0]))[1]);
 		$mipa = $ip[0];
 	}
 	elsif ($ifConfigPath ne '') {
-		my $ipCmd = updateLocaleCmd("ifconfig -a");
-		my $ip = `$ipCmd`;
+		my $ip = `ifconfig -a`;
 		if ($ip =~ m/\s*inet (?:addr:)?([\d.]+).*?cast/) {
 			$mipa = qq($1);
 		}
@@ -4139,46 +3840,38 @@ sub getIPAddr {
 # Subroutine			: getMachineUID
 # Objective				: Find the mac address
 # Added By				: Yogesh Kumar
-# Modified By			: Vijay Vinoth, Senthil Pandian
+# Modified By			: Vijay Vinoth
 #****************************************************************************************************/
 sub getMachineUID {
-	if (getUserConfiguration('MUID')) {
-		$muid = getUserConfiguration('MUID');
+	return $muid if ($muid);
+
+	my $cmd;
+	my $prepend = '';
+	$prepend = 'Linux' unless (defined($_[0]));
+	my $ifConfigPath = `which ifconfig 2>/dev/null`;
+	chomp($ifConfigPath);
+	if ($ifConfigPath ne '') {
+		$cmd = 'ifconfig -a';
 	}
-	elsif ((getUserConfiguration('DEDUP') eq 'on') and getUserConfiguration('BACKUPLOCATION')) {
-		my $deviceID = (split('#', getUserConfiguration('BACKUPLOCATION')))[0];
-		$deviceID =~ s/$Configuration::deviceIDPrefix//g;
-		$deviceID =~ s/$Configuration::deviceIDSuffix//g;
-		my @result = fetchAllDevices();
-		#Added to consider the bucket type 'D' only
-		my @devices;
-		foreach (@result){
-			next if(!defined($_->{'bucket_type'}) or $_->{'bucket_type'} !~ /D/);
-			push @devices, $_;
-		}
-		
-		foreach(@devices) {
-			next if (!defined($_->{'device_id'}) or ($deviceID ne $_->{'device_id'}));
-			setUserConfiguration('MUID', $_->{'uid'});
-			if (saveUserConfiguration(0, 1)) {
-				$muid = $_->{'uid'};
-			}
-			last;
-		}
+	elsif (-f '/sbin/ifconfig') {
+		$cmd = '/sbin/ifconfig -a';
+	}
+	elsif (-f '/sbin/ip') {
+		$cmd = '/sbin/ip addr';
+	}
+	else {
+		retreat('unable_to_find_mac_address');
 	}
 
-	unless($muid) {
-		$muid = parseMachineUID();
+	my $result = `$cmd`;
+	my ($a, $macAddr, $b) = split(/((?:[0-9A-Fa-f:]{2}[:-]){5}[0-9A-Fa-f:]{2})/,$result);
+	$macAddr =~ s/|:|-//g;
+	if ($macAddr) {
+		return ($muid = ("$prepend" . $macAddr)) ;
 	}
-
-	if (defined($_[0]) and $_[0] == 0) {
-		$muid =~ s/$Configuration::deviceUIDPrefix//;
-	}
-	elsif (!($muid =~ /^$Configuration::deviceUIDPrefix/)) {
-		$muid = ($Configuration::deviceUIDPrefix . $muid);
-	}
-
-	return $muid;
+	my $hostName = $Configuration::hostname;
+	$result = 'Linux'.$hostName;
+	return $result;
 }
 
 #*********************************************************************************************************
@@ -4200,20 +3893,17 @@ sub getAndSetMountedPath {
 		chomp($localBackupLocation);
 		if ($localBackupLocation ne '') {
 			if (!-e "$localBackupLocation") {
-				$Configuration::errStr = $LS{'mount_point_not_exist'};
-				traceLog('mount_point_not_exist');
-				return 0;
+				traceLog($LS{'mount_point_not_exist'});
+				exit 0;
 			}
 			elsif (!-w "$localBackupLocation") {
-				$Configuration::errStr = $LS{'mount_point_doesnt_have_permission'};
-				traceLog('mount_point_doesnt_have_permission');
-				return 0;
+				traceLog($LS{'mount_point_doesnt_have_permission'});
+				exit 0;
 			}
 			return $localBackupLocation;
 		} else {
-			$Configuration::errStr = $LS{'unable_to_find_mount_point'};
-			traceLog('unable_to_find_mount_point');
-			return 0;
+			traceLog($LS{'unable_to_find_mount_point'});
+			exit 0;
 		}
 	}
 
@@ -4226,8 +3916,10 @@ sub getAndSetMountedPath {
 	}
 
 	if ($localBackupLocation){
-		display(['your_previous_mount_point',"'$localBackupLocation'.",' ', 'do_you_really_want_to_edit_(_y_n_)', '?']);
-
+		#my $mountPointQuery = Constants->CONST->{'YourPreviousMountPoint'}->($localBackupLocation);
+		my $mountPointQuery = $LS{'your_previous_mount_point'};
+		$mountPointQuery =~ s/<ARG>/$localBackupLocation/;
+		display("\n$mountPointQuery");
 		my $msg = $LS{'enter_your_choice'};
 		my $loginConfirmation = getAndValidate($msg, "YN_choice", 1);
 		if (lc($loginConfirmation) eq 'n'){
@@ -4271,7 +3963,7 @@ sub getAndSetMountedPath {
 			push (@linkDataList,$mountPath);
 		}
 		if ($tableData ne ''){
-			display($tableHeader.$tableData);
+			print $tableHeader.$tableData;
 		}
 	} else {
 		display('unable_to_find_mount_point');
@@ -4279,8 +3971,7 @@ sub getAndSetMountedPath {
 	}
 
 	if (scalar(@linkDataList)>0){
-		my $userChoice = getValidMountPointChoice('Enter the S.No. to select mount point. Press \'q\' in case your mount point is not listed above: ',@linkDataList);
-
+		my $userChoice = getUserMenuOrCustomChoice('Enter the S.No. to select mount point. Press \'q\' in case your mount point is not listed above: ',@linkDataList);
 		if ($userChoice eq 'q' or $userChoice eq 'Q'){
 			@linkDataList = ();
 		}
@@ -4362,8 +4053,7 @@ sub getPdata
 #****************************************************************************************************/
 sub getPerlBinaryPath {
 	#Assigning Perl path
-	my $perlPathCmd = updateLocaleCmd('which perl');
-	my $perlPath = `$perlPathCmd`;
+	my $perlPath = `which perl`;
 	Chomp(\$perlPath);
 	if ($perlPath eq ''){
 		$perlPath = '/usr/local/bin/perl';
@@ -4377,9 +4067,9 @@ sub getPerlBinaryPath {
 # Added By				: Sabin Cheruvattil
 #*************************************************************************************************/
 sub getCRONScheduleTime {
-	loadCrontab();
+	Helpers::loadCrontab();
 	my ($mcuser, $idriveuser, $job, $jobset) = ($_[0], $_[1], $_[2], $_[3]);
-	my $crontab = getCrontab();
+	my $crontab = Helpers::getCrontab();
 
 	if (defined($crontab->{$mcuser}) && defined($crontab->{$mcuser}{$idriveuser}) && defined($crontab->{$mcuser}{$idriveuser}{$job}) &&
 	defined($crontab->{$mcuser}{$idriveuser}{$job}{$jobset})) {
@@ -4404,35 +4094,30 @@ sub getCRONScheduleTime {
 # Subroutine			: getOSBuild
 # Objective				: This subroutine helps to find OS build and release version
 # Added By				: Sabin Cheruvattil
-# Modified By			: Yogesh Kumar
 #*************************************************************************************************/
 sub getOSBuild {
 	my ($os, $build) = ('', 0);
 
 	# check OS release file
 	if (-f '/etc/os-release') {
-		my $osresCmd = updateLocaleCmd('cat /etc/os-release');
-		my $osres = `$osresCmd`;
+		my $osres = `cat /etc/os-release`;
 		Chomp(\$osres);
 
-		$os = $1 if ($osres =~ /ID=(.*?)\n/s);
-		$os =~ s/\"//gs;
-		my $hostnameCmd = updateLocaleCmd('uname -a');
-		$os = 'debian' if (index(lc(`$hostnameCmd`), 'debian') != -1);
+		$os		= $1 if ($osres =~ /ID=(.*?)\n/s);
+		$os		=~ s/\"//gs;
+		$os		= 'debian' if (index(`uname -n`, 'debian') != -1);
 
-		$build = $1 if ($osres =~ /VERSION_ID="(.*?)"\n/s);
-		$build = $1 if (($osres =~ /VERSION_ID=(.*?)\n/s) && $build == 0);
+		$build	= $1 if ($osres =~ /VERSION_ID="(.*?)"\n/s);
+		$build	= $1 if (($osres =~ /VERSION_ID=(.*?)\n/s) && $build == 0);
 
 		if (($build eq '' || $build == 0) && -f '/etc/gentoo-release') {
-			my $releaseNameCmd = updateLocaleCmd('uname -r');
-			$osres = `$releaseNameCmd`;
+			$osres = `uname -r`;
 			Chomp(\$osres);
 			$build = qq($1.$2) if ($osres =~ /(.*?)\.(.*?)\.(.*?)-(.*?)/is);
 		}
 
 		if (-f '/etc/issue') {
-			my $osresIssueCmd = updateLocaleCmd('cat /etc/issue');
-			$osres = `$osresIssueCmd`;
+			$osres = `cat /etc/issue`;
 			Chomp(\$osres);
 
 			$os = 'opensuse' if (index(lc($osres), 'opensuse') != -1);
@@ -4442,72 +4127,60 @@ sub getOSBuild {
 	}
 
 	# Check lsb_release is avaialble or not
-	my $isLsbReleaseCmd = updateLocaleCmd('which lsb_release 2>/dev/null');
-	my $isLsbRelease = `$isLsbReleaseCmd`; #Added for FreeBSD: Senthil
+	my $isLsbRelease = `which lsb_release 2>/dev/null`; #Added for FreeBSD: Senthil
 	if ($isLsbRelease) {
-		my $lsbresCmd = updateLocaleCmd('lsb_release -a 2> /dev/null');
-		my $lsbres = `$lsbresCmd`;
+		my $lsbres	= `lsb_release -a 2> /dev/null`;
 		Chomp(\$lsbres);
 		if ($lsbres ne '') {
-			$os = $2 if ($lsbres =~ /Distributor ID:(\s*)(.*?)(\s*)\n/s);
-			$build = $2 if ($lsbres =~ /Release:(\s*)(.*?)(\s*)\n/s);
+			$os		= $2 if ($lsbres =~ /Distributor ID:(\s*)(.*?)(\s*)\n/s);
+			$build	= $2 if ($lsbres =~ /Release:(\s*)(.*?)(\s*)\n/s);
 			my @buildvers = split('\.', $build);
-			$build = qq($buildvers[0].$buildvers[1]) if (scalar(@buildvers) > 2);
+			$build	= qq($buildvers[0].$buildvers[1]) if (scalar(@buildvers) > 2);
 			return {'os' => lc($os), 'build' => $build} if ($os ne '' && ($build ne '' && $build != 0));
 		}
 	}
 
-	my $isHostnamectlCmd = updateLocaleCmd('which hostnamectl 2>/dev/null');
-	my $isHostnamectl = `$isHostnamectlCmd`; #Added for FreeBSD: Senthil
+	my $isHostnamectl = `which hostnamectl 2>/dev/null`; #Added for FreeBSD: Senthil
 	if ($isHostnamectl) {
-		my $hostctlstatCmd = updateLocaleCmd('hostnamectl status');
-		my $hostctlstat = `$hostctlstatCmd`;
-		my $unameCmd = updateLocaleCmd('uname -n');
-		my $uname = `$unameCmd`;
+		my $hostctlstat = `hostnamectl status`;
+		my $uname		= `uname -n`;
 		Chomp(\$hostctlstat); Chomp(\$uname);
 		if ($hostctlstat ne '' && $uname ne '') {
-			$os = $uname;
-			$build = $3 if ($hostctlstat =~ /Operating System:(\s*)$os(\s*)(.*?)(\s*)(.*?)\n/si);
+			$os		= $uname;
+			$build	= $3 if ($hostctlstat =~ /Operating System:(\s*)$os(\s*)(.*?)(\s*)(.*?)\n/si);
 			return {'os' => lc($os), 'build' => $build} if ($os ne '' && ($build ne '' && $build != 0));
 		}
 	}
 
-	my $isSysctlCmd = updateLocaleCmd('which sysctl 2>/dev/null');
-	my $isSysctl = `$isSysctlCmd`;
+	my $isSysctl = `which sysctl 2>/dev/null`; #Added by Senthil
 	if ($isSysctl) {
-		my $sysctlosCmd = updateLocaleCmd('sysctl -n kern.ostype 2>/dev/null');
-		my $sysctlos = `$sysctlosCmd`;
-		my $sysctlbuildCmd = updateLocaleCmd('sysctl -n kern.osrelease 2>/dev/null');
-		my $sysctlbuild = `$sysctlbuildCmd`;
+		my $sysctlos = `sysctl -n kern.ostype 2>/dev/null`;
+		my $sysctlbuild = `sysctl -n kern.osrelease 2>/dev/null`;
 		chomp($sysctlos); chomp($sysctlbuild);
 		if ($sysctlos ne '' && $sysctlbuild ne '') {
-			$os = $sysctlos;
-			$build = $1 if ($sysctlbuild =~ /(.*?)-(.*?)/i);
+			$os		= $sysctlos;
+			$build	= $1 if ($sysctlbuild =~ /(.*?)-(.*?)/i);
 			return {'os' => lc($os), 'build' => $build} if ($os ne '' && ($build ne '' && $build != 0));
 		}
 	}
 
-	my $hostnameCmd = updateLocaleCmd('uname -n');
-	if (-f '/etc/issue' && index(`$hostnameCmd`, 'debian') != -1) {
-		my $osresDetailCmd = updateLocaleCmd('cat /etc/issue');
-		my $osres = `$osresDetailCmd`;
+	if (-f '/etc/issue' && index(`uname -n`, 'debian') != -1) {
+		my $osres = `cat /etc/issue`;
 		Chomp(\$osres);
 
-		$os = 'debian';
-		my @dbuild = split('\ ', $osres);
-		$build = $dbuild[2];
+		$os			= 'debian';
+		my @dbuild	= split('\ ', $osres);
+		$build		= $dbuild[2];
 		return {'os' => lc($os), 'build' => $build} if ($os ne '' && ($build ne '' && $build != 0));
 	}
 
 	if (-f '/etc/issue') {
-		my $osresCmd = updateLocaleCmd('cat /etc/issue');
-		my $osres = `$osresCmd`;
-		$os = 'fedora' if (index($osres, 'Fedora') != -1);
+		my $osres = `cat /etc/issue`;
+		$os			= 'fedora' if (index($osres, 'Fedora') != -1);
 		if ($os eq 'fedora') {
-			my $osresCmd = updateLocaleCmd('cat /etc/fedora-release');
-			$osres = `$osresCmd`;
+			$osres	= `cat /etc/fedora-release`;
 			Chomp(\$osres);
-			$build = $1 if ($osres =~ /fedora release\s(.*)\s/si);
+			$build	= $1 if ($osres =~ /fedora release\s(.*)\s/si);
 
 			return {'os' => lc($os), 'build' => $build} if ($os ne '' && ($build ne '' && $build != 0));
 		}
@@ -4540,82 +4213,6 @@ sub getCRONSetupTemplate {
 }
 
 #*****************************************************************************************************
-# Subroutine/Function   : getUsernameList
-# In Param    : email address, password(Optional)
-# Out Param   : username, password(Optional)
-# Objective	  : This is to get IDrive/IBackup username list associated with email address
-# Added By	  : Senthil Pandian
-# Modified By :
-#****************************************************************************************************/
-sub getUsernameList {
-	my $uname   = $_[0];
-	my $upasswd = $_[1];
-	my $userCGI = $Configuration::IDriveUsersCGI;
-	$userCGI = $Configuration::IBackupUsersCGI if($Configuration::appType eq 'IBackup');
-	my @responseData;
-	my %params = (
-		'host' => $userCGI,
-		'method'=> 'POST',
-		'data' => {
-			'email' => $uname,
-		}
-	);
-
-	my $res = requestViaUtility(\%params);
-	if(defined($res->{DATA})) {
-		chomp($res->{DATA});
-		traceLog("getUsernameList Resp for '$uname' : ".$res->{DATA});
-		if($res->{DATA} and $res->{DATA} !~ /Not found|Unknown error/) {
-			my @splitUserList = split(" ",$res->{DATA});
-			my @tempUserList = ();
-			foreach my $username (@splitUserList){
-				if($username !~ /Cancel|Success/i){
-					#$username =~ s/:Active//;
-					$username = (split(":",$username))[0];
-					chomp($username);
-					push @tempUserList, $username;
-				}
-			}
-			@splitUserList = @tempUserList;
-
-			if(scalar(@splitUserList) > 1) {
-				my @userList = sort @splitUserList; #Ascending sort
-				#my @userList = sort {$b cmp $a} @splitUserList; #Descending sort
-				display(["\n",'multiple_acc_are_associated_with_email']);
-				my @usernameColumnNames = (['S.No','Username'],[8,9]);
-				my $tableHeader = getTableHeader(@usernameColumnNames);
-				my ($tableData,$columnIndex,$serialNumber) = ('',1,1);
-
-				foreach my $username (@userList){
-					$columnIndex = 1;
-					$tableData .= $serialNumber;
-					$tableData .= (' ') x ($usernameColumnNames[1]->[0] - length($serialNumber));
-					$tableData .= $username;
-					$columnIndex++;
-					$tableData .= "\n";
-					$serialNumber += 1;
-				}
-				if ($tableData ne ''){
-					display($tableHeader.$tableData);
-				}
-
-				my $userChoice= Helpers::getUserMenuChoice(scalar(@userList));
-				$userChoice = $userChoice-1;
-				$uname = $userList[$userChoice] if ($userChoice >= 0);
-
-				$upasswd = getAndValidate(['enter', " ", $Configuration::appType, " ", 'password for', " '$uname'", ': '], "password", 0);
-				display('verifying_your_account_info', 1);
-			}
-			elsif(defined($splitUserList[0])) {
-				$uname = $splitUserList[0];
-			}
-		}
-	}
-	setUsername($uname); # Re-assign username
-	return ($uname,$upasswd);
-}
-
-#*****************************************************************************************************
 # Subroutine			: getIDriveFallBackCRONEntry
 # Objective				: This is to prepare fall back cron entry
 # Added By				: Sabin Cheruvattil
@@ -4632,8 +4229,7 @@ sub getIDriveFallBackCRONEntry {
 #*************************************************************************************************/
 sub getPSoption{
 	my $psOption = "-elf";
-	my $machineInfoCmd = updateLocaleCmd('uname -a');
-	$machineInfo = `$machineInfoCmd`;
+	$machineInfo = `uname -a`;
 	chomp($machineInfo);
 	if ($machineInfo =~ /freebsd/i){
 		$psOption = "-auxww";
@@ -4645,26 +4241,20 @@ sub getPSoption{
 # Subroutine			: getRunningJobs
 # Objective				: Check if pid file exists & file is locked, then return it all
 # Added By				: Yogesh Kumar
-# Modified By			: Sabin Cheruvattil, Senthil Pandian
+# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getRunningJobs {
 	my @availableJobs;
-	my $jobType  = $_[1] || 0; # 0 - all, 1 - manual, 2 - scheduled
-	my $userProfilePath = getUserProfilePath();
-
-	if(defined($_[2]) and defined($_[3])) {
-		$userProfilePath = getCatfile($servicePath, $Configuration::userProfilePath, $_[2], $_[3]);
-	}
+	my $jobType = $_[1] || 0; # 0 - all, 1 - manual, 2 - scheduled
 
 	if (defined($_[0]) and reftype(\$_[0]) eq 'SCALAR') {
 		@availableJobs = $_[0];
 	}
-	elsif (defined($_[0]) and $_[0] ne 'allOp') {
-		unless (exists $Configuration::availableJobsSchema{$_[0]}) {
-			push @availableJobs, lc($_[0]);
-		}
-		else {
-			push @availableJobs, $_[0];
+	elsif (defined($_[0])) {
+		unless (exists $Configuration::availableJobsSchema{$ARGV[0]}) {
+			push @availableJobs, lc($ARGV[0]);
+		} else {
+			push @availableJobs, $ARGV[0];
 		}
 	}
 	else {
@@ -4680,7 +4270,7 @@ sub getRunningJobs {
 			retreat(['undefined_job_name', ': ', $_]);
 		}
 
-		my $pidFile = getCatfile($userProfilePath, $Configuration::userProfilePaths{$_}, 'pid.txt');
+		my $pidFile = getCatfile(getUserProfilePath(), $Configuration::userProfilePaths{$_}, 'pid.txt');
 		if (-f $pidFile) {
 			if (!isFileLocked($pidFile)) {
 				unlink($pidFile);
@@ -4689,10 +4279,8 @@ sub getRunningJobs {
 
 			if ($jobType) {
 				$pid = getFileContents($pidFile);
-				my $psCmd = updateLocaleCmd("ps -w $pid | grep '.pl SCHEDULED $username'");
-				$ps = `$psCmd`;
-				my $psimmdCmd = updateLocaleCmd("ps -w $pid | grep '.pl immediate $username'");
-				$psimmd = `$psimmdCmd`;
+				$ps = `ps $pid | grep '.pl SCHEDULED $username'`;
+				$psimmd = `ps $pid | grep '.pl immediate $username'`;
 				next if (($ps ne '' || $psimmd ne '') and $jobType == 1);
 				next if (($ps eq '' && $psimmd eq '') and $jobType == 2);
 			}
@@ -4859,7 +4447,7 @@ sub getLocaleString {
 # Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getUserProfilePath {
-	return getCatfile($servicePath, $Configuration::userProfilePath, $Configuration::mcUser, $username);
+	return ("$servicePath/$Configuration::userProfilePath/$Configuration::mcUser/$username");
 }
 
 #****************************************************************************************************
@@ -4871,7 +4459,7 @@ sub getUsersInternalDirPath {
 	unless(exists $Configuration::userProfilePaths{$_[0]}) {
 		retreat(["$_[0]: ", 'does_not_exists']);
 	}
-	return getCatfile(getUserProfilePath(), $Configuration::userProfilePaths{$_[0]});
+	return getUserProfilePath() . qq(/$Configuration::userProfilePaths{$_[0]});
 }
 
 #*****************************************************************************************************
@@ -4880,7 +4468,7 @@ sub getUsersInternalDirPath {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub getUserConfigurationFile {
-	return getCatfile(getUserProfilePath(), $Configuration::userConfigurationFile);
+	return getUserProfilePath() . ("/$Configuration::userConfigurationFile");
 }
 
 #*****************************************************************************************************
@@ -4889,7 +4477,7 @@ sub getUserConfigurationFile {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub getUpdateVersionInfoFile {
-	return getCatfile($appPath, $Configuration::updateVersionInfo);
+	return ("$appPath/$Configuration::updateVersionInfo");
 }
 
 #*****************************************************************************************************
@@ -4928,21 +4516,6 @@ sub getUsername {
 }
 
 #*****************************************************************************************************
-# Subroutine : getParentUsername
-# In Param   :
-# Out Param  : STRING
-# Objective  : Read parent account name
-# Added By   : Yogesh Kumar
-#****************************************************************************************************/
-sub getParentUsername {
-	if (getUserConfiguration('ADDITIONALACCOUNT') eq 'true') {
-		return getUserConfiguration('PARENTACCOUNT');
-	}
-
-	return $username;
-}
-
-#*****************************************************************************************************
 # Subroutine			: getServerAddress
 # Objective				: Get server address from $serverAddress
 # Added By				: Yogesh Kumar
@@ -4962,6 +4535,21 @@ sub getServerAddress {
 sub getTotalStorage {
 	return $totalStorage;
 }
+sub getTotalStorage_raw {
+	return $totalStorage_Raw_TBE;
+}
+
+#*****************************************************************************************************
+# Subroutine			: getFreeStorage
+# Objective				: This subroutine return the free storage 
+# Added By				: TBE
+#****************************************************************************************************/
+sub getFreeStorage {
+	return getHumanReadableSizes( $totalStorage_Raw_TBE - $storageUsed_Raw_TBE );
+}
+sub getFreeStorage_raw {
+	return ( $totalStorage_Raw_TBE - $storageUsed_Raw_TBE );
+}
 
 #*****************************************************************************************************
 # Subroutine			: getStorageUsed
@@ -4971,7 +4559,9 @@ sub getTotalStorage {
 sub getStorageUsed {
 	return $storageUsed;
 }
-
+sub getStorageUsed_raw {
+	return $storageUsed_Raw_TBE;
+}
 #*****************************************************************************************************
 # Subroutine			: getTableHeader
 # Objective				: This is to process table header to display list of buckets
@@ -5007,38 +4597,61 @@ sub getUserFilePath {
 # Subroutine			: getUserMenuChoice
 # Objective				: This subroutine helps to get the user's choices
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub getUserMenuChoice {
-	my($userMenuChoice, $maxChoice) = (0, shift);
-	$userMenuChoice = getAndValidate(['enter_your_choice'], "choice", 1,1,$maxChoice);
+	my($userMenuChoice, $choiceRetry, $maxChoice) = (0, 0, shift);
+	while($choiceRetry < $Configuration::maxChoiceRetry) {
+		display(["\n", 'enter_your_choice_', ': '], 0);
+		$userMenuChoice = getUserChoice();
+		$choiceRetry++;
+		if ($userMenuChoice eq '') {
+			display(['cannot_be_empty', '.', ' ', 'enter_again', '.']);
+			checkRetryAndExit($choiceRetry);
+		}
+		elsif (!validateMenuChoice($userMenuChoice, 1, $maxChoice)) {
+			$userMenuChoice = '';
+			display(['invalid_choice', ' ', 'please_try_again', '.']);
+			checkRetryAndExit($choiceRetry);
+		} else {
+			last;
+		}
+	}
 	return $userMenuChoice;
 }
 
 #*****************************************************************************************************
-# Subroutine			: getValidMountPointChoice
-# Objective				: Get the mount point choice & validate
+# Subroutine			: getUserMenuOrCustomChoice
+# Objective				: This subroutine helps to get the user's choices
 # Added By				: Senthil Pandian
 #****************************************************************************************************/
-sub getValidMountPointChoice {
+sub getUserMenuOrCustomChoice {
 	my($userMenuChoice, $choiceRetry) = (0, 0);
 	my($customMsg,@option) = @_;
 	my $maxChoice = scalar(@option);
 	while($choiceRetry < $Configuration::maxChoiceRetry) {
-		$userMenuChoice = getAndValidate([$customMsg], "Q_choice", 1,1,$maxChoice);
-		if ($userMenuChoice eq 'q' or $userMenuChoice eq 'Q'){
+		display(["\n", $customMsg], 0);
+		$userMenuChoice = getUserChoice();
+		$userMenuChoice	=~ s/^[\s\t]+|[\s\t]+$//g;
+		$choiceRetry++;
+		if ($userMenuChoice eq '') {
+			display(['cannot_be_empty', '.', ' ', 'enter_again', '.']);
+		}
+		elsif ($userMenuChoice eq 'q' or $userMenuChoice eq 'Q'){
 			last;
 		}
-		my $path = $option[$userMenuChoice-1];
-		my $permissionMode = getFileFolderPermissionMode($path);
-		if ($permissionMode eq 'Writeable') {
-			last;
+		elsif (!validateMenuChoice($userMenuChoice, 1, $maxChoice)) {
+			$userMenuChoice = '';
+			display(['invalid_choice', ' ', 'please_try_again', '.']);
 		}
 		else {
-			display('mount_point_doesnt_have_permission');
-			$choiceRetry++;
+			my $path 		   = $option[$userMenuChoice-1];
+			my $permissionMode = getFileFolderPermissionMode($path);
+			if ($permissionMode eq 'Writeable'){
+				last;
+			} else {
+				display('mount_point_doesnt_have_permission');
+			}
 		}
-
 		if ($choiceRetry == $Configuration::maxChoiceRetry){
 			display(["\n", 'your_max_attempt_reached', "\n"]);
 			cancelProcess();
@@ -5055,7 +4668,7 @@ sub getValidMountPointChoice {
 sub getUserMenuChoiceBuckSel {
 	my($userMenuChoice, $choiceRetry, $maxChoice) = ('', 0, shift);
 	while($choiceRetry < $Configuration::maxChoiceRetry) {
-		display(["\n", 'enter_your_choice'], 0);
+		display(["\n", 'enter_your_choice_', ': '], 0);
 		$userMenuChoice = getUserChoice();
 		$userMenuChoice	=~ s/^[\s\t]+|[\s\t]+$//g;
 		$choiceRetry++;
@@ -5064,7 +4677,7 @@ sub getUserMenuChoiceBuckSel {
 		}
 		elsif (!validateMenuChoice($userMenuChoice, 1, $maxChoice)) {
 			$userMenuChoice = '';
-			display(['invalid_choice', ' ', 'please_try_again']);
+			display(['invalid_choice', ' ', 'please_try_again', '.']);
 			checkRetryAndExit($choiceRetry);
 		} else {
 			last;
@@ -5098,8 +4711,7 @@ sub getStringWithScriptName {
 #****************************************************************************************************/
 sub getMachineUser {
 	#return $ENV{'LOGNAME'};
-	my $mcUserCmd = updateLocaleCmd('whoami');
-	my $mcUser = `$mcUserCmd`;
+	my $mcUser = `whoami`;
 	Chomp(\$mcUser);
 	return $mcUser;
 }
@@ -5111,14 +4723,13 @@ sub getMachineUser {
 #****************************************************************************************************/
 sub getTraceLogPath {
 	$username = '' unless defined $username;
-	return getCatfile(getUserProfilePath(), $Configuration::traceLogDir, $Configuration::traceLogFile);
+	return getUserProfilePath() . qq(/$Configuration::traceLogDir/$Configuration::traceLogFile);
 }
 
 #*****************************************************************************************************
 # Subroutine			: getUserModUtilCMD
 # Objective				: Helps to user mod change utility
 # Added By				: Sabin Cheruvattil
-# Modified By           : Senthil Pandian
 #****************************************************************************************************/
 sub getUserModUtilCMD {
 	my $modUtils	= ['runuser', 'su'];
@@ -5128,15 +4739,10 @@ sub getUserModUtilCMD {
 	return 'su -m ' if (isGentoo());
 
 	for my $i (0 .. $#{$modUtils}) {
-		my $cmdCheckCmd = updateLocaleCmd("which $modUtils->[$i]");
-		$cmdCheck = `$cmdCheckCmd`;
+		$cmdCheck = `which $modUtils->[$i]`;
 		Chomp(\$cmdCheck);
 
-		# Commented by Senthil to resolve FreeBSD scheduled job issue 
-		# Got error "su: perl: command not found"
-		# return qq($modUtils->[$i] $modFlags->[$i]) if ($cmdCheck ne '');
-
-		return qq($cmdCheck $modFlags->[$i]) if ($cmdCheck ne '');
+		return qq($modUtils->[$i] $modFlags->[$i]) if ($cmdCheck ne '');
 	}
 
 	return '';
@@ -5146,14 +4752,12 @@ sub getUserModUtilCMD {
 # Subroutine			: getAndValidate
 # Objective				: This subroutine is used to take input ad ask for the retry option if it fails to validate.
 # Added By				: Anil Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub getAndValidate {
 	my $message = $_[0];
 	my $fieldType = $_[1];
 	my $isEchoEnabled = $_[2];
 	my $isMandatory = (defined($_[3]) ? $_[3] : 0) ;
-	my $maxLimit    = $_[4];
 	my ($userInput, $choiceRetry) = ('', 0);
 
 	while($choiceRetry < $Configuration::maxChoiceRetry) {
@@ -5164,7 +4768,7 @@ sub getAndValidate {
 			display(['cannot_be_empty', '.', ' ', 'enter_again', '.', "\n"], 1);
 			checkRetryAndExit($choiceRetry, 0);
 		}
-		elsif (!validateDetails($fieldType, $userInput, $maxLimit)) {
+		elsif (!validateDetails($fieldType, $userInput)) {
 			checkRetryAndExit($choiceRetry, 0);
 		} else {
 			last;
@@ -5209,20 +4813,18 @@ sub getRemoteAccessToken {
 		'json'   => 1,
 		'data'=> {
 			'uid' => getUsername(),
-			'pwd' => &getPdata(getUsername())
+			'pwd'  => &Helpers::getPdata(getUsername())
 		}
 	);
 
 	my $response = request(\%params);
 	if ($response->{STATUS} eq 'FAILURE') {
-		traceLog('Failed to get access token');
 		return 0;
 	}
-	elsif ((ref($response) eq 'HASH') and ($response->{'DATA'} ne '') and (exists $response->{'DATA'}{'token'})) {
+	elsif (ref($response) eq 'HASH') {
 		return $response->{DATA}{'token'};
 	}
 
-	traceLog('Failed to get access token');
 	return 0;
 }
 
@@ -5270,15 +4872,6 @@ sub getNotificationFile {
 }
 
 #*****************************************************************************************************
-# Subroutine			: getNSFile
-# Objective				: Path to ns file
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub getNSFile {
-	return (getUserProfilePath() . "/$Configuration::nsFile");
-}
-
-#*****************************************************************************************************
 # Subroutine			: getNotifications
 # Objective				: Get notification value
 # Added By				: Yogesh Kumar
@@ -5289,19 +4882,10 @@ sub getNotifications {
 	if (exists $notifications{$_[0]}) {
 		return $notifications{$_[0]};
 	}
-	return 0;
-}
-
-#*****************************************************************************************************
-# Subroutine			: getNS
-# Objective				: Get ns value
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub getNS {
-	return \%ns unless(defined $_[0]);
-
-	if (exists $ns{'nsq'}{$_[0]}) {
-		return $ns{'nsq'}{$_[0]};
+	elsif (exists $Configuration::notificationsSchema{$_[0]}) {
+		loadNotifications();
+		$notifications{$_[0]} = $Configuration::notificationsSchema{$_[0]};
+		saveNotifications();
 	}
 	return 0;
 }
@@ -5348,7 +4932,7 @@ sub getCRONLockInfo {
 #*****************************************************************************************************
 # Subroutine			: getSudoSuCRONPerlCMD
 # Objective				: This is to get sudo/su command for running perl scripts in root mode
-# Modified By			: Sabin Cheruvattil, Yogesh Kumar
+# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getSudoSuCRONPerlCMD {
 	return '' unless(defined($_[0]));
@@ -5399,14 +4983,14 @@ sub getCrontab {
 		return eval("\$crontab{\$Configuration::mcUser}{\$username}{\$jobType}{\$jobName}$key");
 	}
 
-	return 0;
+#TBE	return 0;
+	return undef;
 }
 
 #*****************************************************************************************************
 # Subroutine			: getFileContents
 # Objective				: Get a file content
 # Added By				: Yogesh Kumar
-# Modified By 			: Senthil Pandian
 #****************************************************************************************************/
 sub getFileContents {
 	unless (defined($_[0])) {
@@ -5428,51 +5012,23 @@ sub getFileContents {
 		return $fileContent;
 	}
 
-	# retreat(['unable_to_open_file',' : ', $_[0], " $!"]);
-	traceLog($LS{'unable_to_open_file'}.' : '.$_[0]." $!");
-	return $fileContent;
-}
-
-#*****************************************************************************************************
-# Subroutine : getBackupDeviceName
-# In Param   : -
-# Out Param  : STRING
-# Objective  : Get's backup location name.
-# Added By   : Yogesh Kumar
-#****************************************************************************************************/
-sub getBackupDeviceName {
-	if (getUserConfiguration('DEDUP') eq 'off') {
-		return getUserConfiguration('BACKUPLOCATION');
-	}
-
-	return (split("#", getUserConfiguration('BACKUPLOCATION')))[1];
-}
-
-#*****************************************************************************************************
-# Subroutine : getBackupDeviceID
-# In Param   : -
-# Out Param  : STRING
-# Objective  : Get's backup location id.
-# Added By   : Yogesh Kumar
-#****************************************************************************************************/
-sub getBackupDeviceID {
-	if (getUserConfiguration('DEDUP') eq 'off') {
-		return getUserConfiguration('BACKUPLOCATION');
-	}
-
-	return (split("#", getUserConfiguration('BACKUPLOCATION')))[0];
+	retreat(['unable_to_open_file',' : ', $_[0], " $!"]);
 }
 
 #*****************************************************************************************************
 # Subroutine			: getStartAndEndEpochTime
 # Objective				: To return the start and end date epoch time.
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub getStartAndEndEpochTime {
+	# $userChoice => 1) One week before, 2) Two week before, 3) One month before, 4) Given date range
+	my $userOption = shift;
 	my $currentTimeStamp = time();
-	my $daysToSubstract = shift;
+	my $daysToSubstract = ($userOption == 1) ? 7 : ($userOption == 2) ? 14 : 30;
 	my $startTimeStamp = $currentTimeStamp - ($daysToSubstract * 24 * 60 * 60);
+#	my $startTimeStamp_ISO = Taryck::TS2ISO($startTimeStamp);
+#	my $currentTimeStamp_ISO = Taryck::TS2ISO($currentTimeStamp);
+#	return ($startTimeStamp_ISO, $currentTimeStamp_ISO);
 	return ($startTimeStamp, $currentTimeStamp);
 }
 
@@ -5496,39 +5052,6 @@ sub getStartAndEndEpochTimeForMigration {
 }
 
 #*****************************************************************************************************
-# Subroutine			: getStringConstant
-# Objective				: To return the string constant.
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub getStringConstant {
-	my $message = $_[0];
-	my $msg		= '';
-
-	if (reftype(\$message) eq 'SCALAR') {
-		$message = [$message];
-	}
-	for my $i (0 .. $#{$message}) {
-		if (exists $LS{$message->[$i]}) {
-			$msg .= $LS{$message->[$i]};
-		}
-		elsif (exists $Help{$message->[$i]}) {
-			$msg .= $Help{$message->[$i]};
-		}
-		else {
-			$msg .= $message->[$i];
-		}
-	}
-	if (defined($_[2])) {
-		my $c = 1;
-		for my $i (0 .. $#{$_[2]}) {
-			$msg =~ s/__ARG$c\__/$_[2]->[$i]/g;
-			$c++;
-		}
-	}
-	return $msg;
-}
-
-#*****************************************************************************************************
 # Subroutine			: setCronCMD
 # Objective				: Prepare cron command for available jobs
 # Added By				: Yogesh Kumar
@@ -5537,7 +5060,6 @@ sub getStringConstant {
 sub setCronCMD {
 	my $jobType = $_[0];
 	$jobType = $Configuration::availableJobsSchema{$jobType}{'type'} if (exists $Configuration::availableJobsSchema{$jobType});
-	my $jt = $jobType;
 	$jobType = 'backup' if ($jobType eq 'express_backup'); # TODO: IMPORTANT to review this statement again.
 	my $runas = 0;
 	my %status = ();
@@ -5546,7 +5068,8 @@ sub setCronCMD {
 	if (getCrontab($jobType, $_[1], '{settings}{frequency}') eq 'immediate') {
 
 		# to intimate response to dashboard for start immediately.
-		$jt = 'localbackup' if ($jt eq 'express_backup');
+		my $jt = $jobType;
+		$jt = 'localbackup' if ($jobType eq 'express_backup');
 
 		# my $isBackupRunning = 1;
 		# $isBackupRunning = isJobRunning($jt,$Configuration::dashbtask);
@@ -5556,9 +5079,9 @@ sub setCronCMD {
 			# return %status;
 		# }
 
-		if ($jt eq 'backup'){
+		if($jt eq 'backup'){
 			my $isArchiveRunning = 1;
-			$isArchiveRunning = isJobRunning('archive');
+			$isArchiveRunning = Helpers::isJobRunning('archive');
 			if ($isArchiveRunning) {
 				$status{"status"} = Configuration::FAILURE;
 				$status{"errmsg"} = $LS{'archive_in_progress_try_again'} ;
@@ -5567,7 +5090,7 @@ sub setCronCMD {
 		}
 
 		if (exists $Configuration::availableJobsSchema{$jt}) {
-			my $fileset = getJobsPath($jt, 'file');
+			my $fileset = Helpers::getJobsPath($jt, 'file');
 			unless (-f $fileset and !-z $fileset) {
 				$status{"status"} = Configuration::FAILURE;
 				$status{"errmsg"} = "$_[1]: is empty";
@@ -5627,12 +5150,7 @@ sub setCronCMD {
 		$status{'status'} = Configuration::SUCCESS;
 	}
 	elsif ($jobType eq $Configuration::dashbtask) {
-		if ($Configuration::appType eq 'IDrive') {
-			setCrontab($jobType, $_[1], 'cmd', getScript('dashboard'));
-		}
-		else {
-			setCrontab($jobType, $_[1], 'cmd', getScript('cron'));
-		}
+		setCrontab($jobType, $_[1], 'cmd', getScript('dashboard'));
 		$status{'status'} = Configuration::SUCCESS;
 	}
 	return %status;
@@ -5699,24 +5217,20 @@ sub getParameterValueFromStatusFileFinal
 #********************************************************************************************************/
 sub getSystemCpuCores{
     my $cmd = "uname";
-	$cmd = updateLocaleCmd($cmd);
 	chomp(my $OS = `$cmd`);
 	$OS = lc $OS;
 	my $retVal = 2;
 	my ($cmdCpuCores,$totalCores);
 	if ($OS eq "freebsd"){
-	  my $totalCoresCmd = updateLocaleCmd("sysctl -a | grep 'hw.ncpu' | cut -d ':' -f2");
-	  $totalCores = `$totalCoresCmd`;
+	  $totalCores = `sysctl -a | grep 'hw.ncpu' | cut -d ':' -f2`;
 	  chomp($totalCores);
 	  $totalCores = int($totalCores);
 	  $retVal = ($totalCores == 1 ? 2 : ($totalCores == 2 ? 4 : $totalCores));
     }
 	elsif ($OS eq "linux"){
-	  my $cpuProcessorCountCmd = updateLocaleCmd("cat /proc/cpuinfo | grep processor | wc -l");
-	  my $cpuProcessorCount = `$cpuProcessorCountCmd`;
+	  my $cpuProcessorCount = `cat /proc/cpuinfo | grep processor | wc -l`;
 	  chomp($cpuProcessorCount);
-	  my $cmdCpuCoresCmd = updateLocaleCmd("grep 'cpu cores' /proc/cpuinfo | tail -1 | cut -d ':' -f2");
-	  $cmdCpuCores = `$cmdCpuCoresCmd`;
+	  $cmdCpuCores = `grep 'cpu cores' /proc/cpuinfo | tail -1 | cut -d ':' -f2`;
 	  chomp($cmdCpuCores);
 
 	  $cmdCpuCores = ($cmdCpuCores ne "" ? int($cmdCpuCores) : 1);
@@ -5738,7 +5252,6 @@ sub getLoadAverage {
 	my $cmd = "uname";
 	my $load_avg;
 	my ( @one_min_avg );
-	$cmd = updateLocaleCmd($cmd);
 	chomp(my $OS = `$cmd`);
 	$OS = lc $OS;
 	if ($OS ne "freebsd"){
@@ -5749,7 +5262,6 @@ sub getLoadAverage {
 		return (sprintf '%.2f', $one_min_avg[1]);
 	}else{
 		my $load_avg_data = 'uptime | awk \'{print $(NF-2)" "$(NF-1)" "$(NF-0)}\' | tr "," " "\'\'';
-		$load_avg_data = updateLocaleCmd($load_avg_data);
 		$load_avg = `$load_avg_data`;
 		chomp($load_avg);
 		my ( @one_min_avg ) = split /\s/, $load_avg;
@@ -5763,15 +5275,8 @@ sub getLoadAverage {
 #Added By               : Senthil Pandian.
 #*********************************************************************************************************/
 sub getDeviceHash {
+	my @devices = fetchAllDevices();
 	my %resultHash;
-	my @result = fetchAllDevices();
-	#Added to consider the bucket type 'D' only
-	my @devices;
-	foreach (@result){
-		next if(!defined($_->{'bucket_type'}) or $_->{'bucket_type'} !~ /D/);
-		push @devices, $_;
-	}
-
 	foreach my $value (@devices){
 		my $key = $value->{'uid'};
 		Chomp(\$key);
@@ -6084,11 +5589,9 @@ sub getParameterValueFromStatusFile
 #****************************************************************************************************/
 sub getConsideredFilesCountFromLog {
 	my $logFile 	= $_[0];
-	my $logContentCmd = updateLocaleCmd("tail -n10 '$logFile'");
-	my @logContent  = `$logContentCmd`;
+	my @logContent  = `tail -n10 '$logFile'`;
+	my $considered	= "--";
 	my $isSummary	= 0;
-	my ($considered,$success) = ("--") x 2;
-
 	foreach (@logContent) {
 		my $line = $_;
 		if (!$isSummary and $line =~ m/Summary:/) {
@@ -6097,14 +5600,10 @@ sub getConsideredFilesCountFromLog {
 		elsif ($isSummary and $line =~ m/considered/){
 			$considered = (split(":", $line))[1];
 			Chomp(\$considered);
-		}
-		elsif ($isSummary and $line =~ m/(backed|restored)/){
-			$success = (split(":", $line))[1];
-			Chomp(\$success);
 			last;
 		}
 	}
-	return ($considered,$success);
+	return $considered;
 }
 
 #*****************************************************************************************************
@@ -6209,17 +5708,13 @@ sub getLastOneWeekLogs {
 			my $modifiedTime = getFileModifiedTime($file);
 			my $duration     = getDuration($_,$modifiedTime);
 			$duration     	 = ($duration =~ /^\d+$/)?$duration:"--";
-			my ($filescount,$success) = getConsideredFilesCountFromLog($file);
+			my $filescount 	 = getConsideredFilesCountFromLog($file);
 			$filescount    	 = ($filescount =~ /^\d+$/)?$filescount:"--";
-			$success    	 = ($success =~ /^\d+$/)?$success:"--";
-
 			$logStat{$_} = {
-				'filescount' => $filescount,
-				'duration'	 => $duration,
-				'status'   	 => $logFilenames{$_},
-				'datetime' 	 => strftime("%m/%d/%Y %H:%M:%S", localtime($_)),
-				'bkpfiles'   => $success,
-				'size'       => "--",
+				'filescount' 	=> $filescount,
+				'duration'		=> $duration,
+				'status'   		=> $logFilenames{$_},
+				'datetime' 		=> strftime("%d/%m/%Y %H:%M:%S", localtime($_))
 			};
 		}
 		elsif ($logsFound) {
@@ -6236,25 +5731,26 @@ sub getLastOneWeekLogs {
 #****************************************************************************************************/
 sub getLocalDataWithType{
 	my %list;
-	foreach my $item (@{$_[0]}){
-		chomp($item);
-		if ( -l $item # File is a symbolic link #
+	foreach my $ori_item (@{$_[0]}){
+		chomp($ori_item);
+		my $item = Taryck::extendBackupItem($ori_item);
+		if( -l $item # File is a symbolic link #
 			or -p $item # File is a named pipe #
 			or -S $item # File is a socket #
 			or -b $item # File is a block special file #
 			or -c $item )# File is a character special file #
 		{
-			display(["Skipped [$item]. ", "Reason",'not_a_regular_file']);
+			display(["Skipped [$ori_item]. ", "Reason",'not_a_regular_file']);
 			$skippedItem = 1;
 			next;
 		} elsif (-d $item) {
-			$item .= (substr($item,-1) ne '/')?'/':'';
-			$list{$item}{'type'} = 'd';
+			$ori_item .= (substr($ori_item,-1) ne '/')?'/':'';
+			$list{$ori_item}{'type'} = 'd';
 		}
 		elsif (-f $item) {
 			$list{$item}{'type'} = 'f';
 		} else {
-			display(["Skipped [$item]. ", "Reason",'file_folder_not_found']);
+			display(["Skipped [$ori_item]. ", "Reason",'file_folder_not_found']);
 			$skippedItem = 1;
 		}
 	}
@@ -6271,16 +5767,16 @@ sub getRemoteDataWithType{
 	my $jobRunningDir  = getUsersInternalDirPath('restore');
 	my $isDedup  	   = getUserConfiguration('DEDUP');
 	my $restoreFromLoc = getUserConfiguration('RESTOREFROM');
-	$restoreFromLoc = '/'.$restoreFromLoc  if ($isDedup eq 'off' and $restoreFromLoc !~ m/^\//);
+	$restoreFromLoc = '/'.$restoreFromLoc  if($isDedup eq 'off' and $restoreFromLoc !~ m/^\//);
 	#print "restoreFromLoc:$restoreFromLoc\n";
 	my $tempFilePath = $jobRunningDir."/".$Configuration::tempBackupsetFile;
-	if (!open(ITEMLISTNEW, ">", $tempFilePath)){
+	if(!open(ITEMLISTNEW, ">", $tempFilePath)){
 		#$errMsg = $Locale::strings{'failed_to_open_file'}.": $tempFilePath, Reason: $!";
 		return 0;
 	}
 
 	my $finalRestoreFromLoc= '';
-	$finalRestoreFromLoc = $restoreFromLoc	if ($isDedup eq 'off' and $restoreFromLoc ne '/');
+	$finalRestoreFromLoc = $restoreFromLoc	if($isDedup eq 'off' and $restoreFromLoc ne '/');
 
 	my @arryToCheck = ();
 	foreach(@{$_[0]}) {
@@ -6300,21 +5796,12 @@ sub getRemoteDataWithType{
 	my @responseData = runEVS('item',1);
 	unlink($tempFilePath);
 
-	if (-s $evsErrorFile > 0) {
-		my $err = getFileContents($evsErrorFile);
-		if($err =~ /unauthorized user|user information not found/i) {
-			saveServerAddress(fetchServerAddress());
-			retreat('operation_could_not_be_completed_please_try_again');
-		} else {
-			my $errStr = checkExitError($evsErrorFile,'restore');
-			if($errStr and $errStr =~ /1-/){
-				$errStr =~ s/1-//;
-				retreat($errStr);
-			}
-		}
+	if(-s $evsErrorFile > 0) {
+		my $errStr = checkExitError($evsErrorFile,'restore');
+		retreat($errStr);
 	}
 	unlink($evsErrorFile);
-	if ($isDedup eq 'on'){
+	if($isDedup eq 'on'){
 		foreach my $tmpLine (@responseData) {
 			my @fields = $tmpLine;
 			if (ref($fields[0]) ne "HASH") {
@@ -6323,16 +5810,15 @@ sub getRemoteDataWithType{
 			my $itemName = $fields[0]{'fname'};
 			replaceXMLcharacters(\$itemName);
 			#$itemName =~ s/^[\/]+/\//g;
-			if ($fields[0]{'status'} =~ /directory exists/) {
+			if($fields[0]{'status'} =~ /directory exists/) {
 				$list{$itemName}{'type'} = 'd';
 			}
-			elsif ($fields[0]{'status'} =~ /file exists/){
+			elsif($fields[0]{'status'} =~ /file exists/){
 				$list{$itemName}{'type'} = 'f';
 			}
 			else {
 				my $restoreFromBuck = (split("#",$restoreFromLoc))[1];
 				$itemName =~ s/^\/(.*?)\//\/$restoreFromBuck\//;
-				replaceXMLcharacters(\$itemName);
 				display(["Skipped [$itemName]. ", "Reason",'file_folder_not_found']);
 				$skippedItem = 1;
 			}
@@ -6345,19 +5831,17 @@ sub getRemoteDataWithType{
 			}
 			my $itemName = $fields[0]{'fname'};
 			replaceXMLcharacters(\$itemName);
-			if ($finalRestoreFromLoc ne '/'){
-				$finalRestoreFromLoc =~ s/(["'*+\$^.])/\\$1/g;
+			if($finalRestoreFromLoc ne '/'){
 				$itemName =~ s/$finalRestoreFromLoc//;
 			}
-			if ($fields[0]{'status'} =~ /directory exists/) {
+			if($fields[0]{'status'} =~ /directory exists/) {
 				$list{$itemName}{'type'} = 'd';
 			}
-			elsif ($fields[0]{'status'} =~ /file exists/){
+			elsif($fields[0]{'status'} =~ /file exists/){
 				$list{$itemName}{'type'} = 'f';
 			}
 			else {
 				$itemName = $fields[0]{'fname'};
-				replaceXMLcharacters(\$itemName);
 				display(["Skipped [$itemName]. ", "Reason",'file_folder_not_found']);
 				$skippedItem = 1;
 			}
@@ -6376,7 +5860,7 @@ sub getUniquePresentData
 	my @itemArray = uniqueData(@{$_[0]});
 	my $fileType = $_[1];
 	my %list;
-	if ($fileType eq 'restore'){
+	if($fileType eq 'restore'){
 		%list = getRemoteDataWithType(\@itemArray);
 	} else {
 		%list = getLocalDataWithType(\@itemArray);
@@ -6385,106 +5869,46 @@ sub getUniquePresentData
 }
 
 #*****************************************************************************************************
-# Subroutine    : getJobSetLogSummary
-# Objective     : Prepares job set summary for operation logs
-# Added By      : Sabin Cheruvattil
-# Modified By   : Yogesh Kumar, Senthil Pandian
+# Subroutine		: getJobSetLogSummary
+# Objective			: Prepares job set summary for operation logs
+# Added By 			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getJobSetLogSummary {
 	my $jobtype = $_[0];
 	return '' unless($jobtype);
 
-	my $jsf = getJobsPath($jobtype, 'file');
-	#return '' unless (-f "$jsf.json"  and !-z "$jsf.json");
-	unless (-f "$jsf.json"  and !-z "$jsf.json") {
-		my $backupsizefile = getCatfile(getJobsPath($jobtype, 'path'), $Configuration::backupsizefile);
-		if (-f $backupsizefile and !-z $backupsizefile) {
-			system("mv '$backupsizefile' '$jsf.json'");
-		}
-	}
+	my $jsf = Helpers::getJobsPath($jobtype, 'file');
+	return '' if(!-f $jsf || -s $jsf == 0);
 
 	my ($fsum, $dsum, $usum, $summary) = ('', '', '', '');
-	if (-f "$jsf.json"  and !-z "$jsf.json") {
-		my %jsc = %{JSON::from_json(getFileContents("$jsf.json"))};
-		foreach my $filename (keys %jsc) {
-			next if ($filename eq '');
+	if (open(my $jsc, '<', "$jsf.info")) {
+		while(my $filename = <$jsc>) {
+			chomp($filename);
 
-			# IMPORTANT: DO NOT REMOVE: if ($filetype eq 'f' || (lc($jobtype) =~ /backup/ && -f $filename)) {
-			if ($jsc{$filename}{'type'} eq 'f') {
+			my $filetype = <$jsc>;
+			chomp($filetype);
+			
+			next if($filename eq '');
+
+			# IMPORTANT: DO NOT REMOVE: if($filetype eq 'f' || (lc($jobtype) =~ /backup/ && -f $filename)) {
+			if($filetype eq 'f') {
 				$fsum .= qq($filename\n);
-			}
-			elsif ($jsc{$filename}{'type'} eq 'd') {
+			# IMPORTANT: DO NOT REMOVE: } elsif($filetype eq 'd' || (lc($jobtype) =~ /backup/ && -d $filename)) {
+			} elsif($filetype eq 'd') {
 				$dsum .= qq($filename\n);
-			}
-			else {
+			} else {
 				$usum .= qq($filename\n);
 			}
 		}
-	} elsif (-f "$jsf.info"  and !-z "$jsf.info") {
-		if (! open(FILE, "< $jsf.info")) {
-			traceLog("Could not open file $jsf.info, Reason:$! $lineFeed", __FILE__, __LINE__);
-			return '';
-		}
-		#read backup/restore set file content
-		my @jsc = ();
-		@jsc = <FILE>;
-		close FILE;
-		chomp(@jsc);
-
-		for (my $i=0; $i<$#jsc; $i=$i+2) {
-			next if ($jsc[$i] eq '');
-
-			if ($jsc[$i+1] eq 'f') {
-				$fsum .= $jsc[$i]."\n";
-			}
-			elsif ($jsc[$i+1] eq 'd') {
-				$dsum .= $jsc[$i]."\n";
-			}
-			else {
-				$usum .= $jsc[$i]."\n";
-			}
-		}
-	} else {
-		return '';
+		
+		$summary .= (($fsum ne '')? "Files\n" . $fsum : '');
+		$summary .= (($dsum ne '')? "Directories\n" . $dsum : '');
+		$summary .= (($usum ne '')? "Unknown\n" . $usum : '');
+		return $summary;
 	}
-
-	$summary .= (($fsum ne '')? "Files\n" . $fsum : '');
-	$summary .= (($dsum ne '')? "Directories\n" . $dsum : '');
-	$summary .= (($usum ne '')? "Unknown\n" . $usum : '');
-	return $summary;
-}
-
-#*****************************************************************************************************
-# Subroutine			: getMinMaxVersion
-# Objective				: This subroutine is to get min/max version for the current package version.
-# Added By				: Senthil Pandian
-#****************************************************************************************************/
-sub getMinMaxVersion {
-	my @current = split('\.', $_[0]);
-	my %list;
-	my %minMaxVersionSchema = %{$Configuration::minMaxVersionSchema{$Configuration::appType}};
-    foreach my $order (sort {$a cmp $b} keys %minMaxVersionSchema) {
-		my @min = split('\.', $minMaxVersionSchema{$order}{'min'});
-		my @max = split('\.', $minMaxVersionSchema{$order}{'max'});
-		my $found = 0;
-		for my $i (0 .. scalar(@current)) {
-			if (defined($current[$i]) && defined($min[$i]) && defined($min[$i]) ) {
-				if ($current[$i] >= $min[$i] && $current[$i] <= $max[$i]) {
-					$found = 1;
-					next;
-				}
-				$found = 0;
-			}
-		}
-
-		if ($found) {
-			$list{"min"} = $minMaxVersionSchema{$order}{'min'};
-			$list{"max"} = $minMaxVersionSchema{$order}{'max'};
-			last;
-		}
-	}
-
-	return \%list;
+	
+	traceLog("failed to open file $jsf.info $!");
+	return '';
 }
 
 #------------------------------------------------- H -------------------------------------------------#
@@ -6497,17 +5921,10 @@ sub getMinMaxVersion {
 #****************************************************************************************************/
 sub hasEVSBinary {
 	my $dir = shift;
-	my @evsBinaries;
-	if ($Configuration::appType eq 'IDrive') {
-		@evsBinaries = (
-			$Configuration::evsBinaryName,
-			$Configuration::evsDedupBinaryName
-		);
-	} else {
-		@evsBinaries = (
-			$Configuration::evsBinaryName
-		);
-	}
+	my @evsBinaries = (
+		$Configuration::evsBinaryName,
+		$Configuration::evsDedupBinaryName
+	);
 	my $duplicate = 1;
 
 	unless(defined($dir)) {
@@ -6515,13 +5932,13 @@ sub hasEVSBinary {
 		$duplicate = 0;
 	}
 	for (@evsBinaries) {
-		my $evs = getCatfile($dir, $_);
+		my $evs = $dir."/".$_;
 		my ($status, $msg) = verifyEVSBinary($evs);
 		return 0 if (!$status);
 		if ($duplicate) {
 			copy($evs, getServicePath());
-			chmod(0755, getCatfile(getServicePath(), $_));
-			chmod(0755, $evs);
+			chmod($Configuration::filePermission, getServicePath()."/".$_);
+			chmod($Configuration::filePermission, $evs);
 		}
 	}
 	return 1;
@@ -6557,15 +5974,12 @@ sub hasStaticPerlBinary {
 		$duplicate = 0;
 	}
 	my $sp = getCatfile($dir, $Configuration::staticPerlBinaryName);
-	$sp =~ s/__KVER__/$Configuration::kver/g;
+	$sp=~ s/__KVER__/$Configuration::kver/g;
 	my ($status, $msg) = verifyStaticPerlBinary($sp);
 	return 0 unless ($status);
 	if ($duplicate) {
-		if (-f getCatfile(getServicePath(), $Configuration::staticPerlBinaryName)) {
-			removeItems(getCatfile(getServicePath(), $Configuration::staticPerlBinaryName));
-		}
 		copy($sp, getServicePath());
-		chmod(0755, getCatfile(getServicePath(), $Configuration::staticPerlBinaryName));
+		chmod(0555, getCatfile(getServicePath(), $Configuration::staticPerlBinaryName));
 	}
 	return 1;
 }
@@ -6576,10 +5990,8 @@ sub hasStaticPerlBinary {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub hasCRONFallBackAdded {
-	if(-e '/etc/crontab') {
-		my $fc = getFileContents('/etc/crontab');
-		return 1 if (index($fc, $Configuration::cronLinkPath) != -1);
-	}
+	my $fc 		= getFileContents('/etc/crontab');
+	return 1 if (index($fc, $Configuration::cronLinkPath) != -1);
 	return 0;
 }
 
@@ -6619,7 +6031,6 @@ sub initiateMigrate{
 				my $sudoprompt = 'please_provide_' . (isUbuntu() || isGentoo()? 'sudoers' : 'root') . '_pwd_for_migrate_process';
 
 				my $sudosucmd = getSudoSuCRONPerlCMD('migrateuserdata', $sudoprompt);
-				$sudosucmd = updateLocaleCmd($sudosucmd);
 				if (system($sudosucmd) != 0){
 					$Configuration::displayHeader = 0;
 					retreat(['migrate_reject_try_again',"\n"]);
@@ -6628,17 +6039,15 @@ sub initiateMigrate{
 				chmod($Configuration::filePermission, $migrateSuccessFile);
 				loadServicePath();
 
-				if ($Configuration::appType eq 'IDrive') {
-					unless (hasStaticPerlBinary()) {
-						loadMachineHardwareName();
-						if (defined $machineHardwareName){
-							display(['downloading_static_perl_binary', '... ']);
-							downloadStaticPerlBinary() or retreat('unable_to_download_static_perl_binary');
-							display('static_perl_binary_downloaded_successfully');
-						}
+				unless (hasStaticPerlBinary()) {
+					loadMachineHardwareName();
+					if (defined $machineHardwareName){
+						display(['downloading_static_perl_binary', '... ']);
+						downloadStaticPerlBinary() or retreat('unable_to_download_static_perl_binary');
+						display('static_perl_binary_downloaded_sucessfully');
 					}
-					checkAndStartDashboard();
 				}
+				checkAndStartDashboard();
 				doSilentLogout();
 			}else{
 				display(['migrate_reject_try_again',"\n"]);
@@ -6662,21 +6071,11 @@ sub initiateMigrate{
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub isInternetAvailable {
-	my $pingResCmd = updateLocaleCmd("ping -c2 8.8.8.8 2>/dev/null");
-	my $pingRes = `$pingResCmd`;
+	my $pingRes = `ping -c2 8.8.8.8 1>/dev/null 2>/dev/null`;
 	return 0 if ($pingRes =~ /connect\: Network is unreachable/);
 	return 0 if ($pingRes !~ /0\% packet loss/);
 
 	return 1;
-}
-
-# TODO new scripts headers
-#
-sub isLatest {
-	my $uvf = getCatfile(getAppPath(), $Configuration::updateVersionInfo);
-	return '1' if (-f $uvf and !-z $uvf);
-
-	return '0';
 }
 
 #*****************************************************************************************************
@@ -6685,7 +6084,7 @@ sub isLatest {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub isFileLocked {
-	my ($f, $block, $noclean) = ($_[0], $_[1], ($_[2] || 0));
+	my ($f, $block) = ($_[0], $_[1]);
 	return 0 unless (-f $f);
 	open(my $fh, ">>", $f) or return 1;
 
@@ -6695,7 +6094,7 @@ sub isFileLocked {
 		return 1;
 	}
 	close($fh);
-	unlink($f) unless($noclean);
+	unlink($f);
 	return 0;
 }
 
@@ -6727,12 +6126,11 @@ sub isUpdateAvailable {
 
 	my $updateInfoFile = getUpdateVersionInfoFile();
 	return 1 if (-f $updateInfoFile and !-z $updateInfoFile);
-
-	my $check4updateScript = getECatfile($appPath, 'check_for_update.pl');
-	$check4updateScript = updateLocaleCmd("$Configuration::perlBin $check4updateScript checkUpdate");
+	
+	my $check4updateScript = "$Configuration::perlBin '$appPath/check_for_update.pl' checkUpdate";
 	my $updateAvailStats = `$check4updateScript 1>/dev/null 2>/dev/null &`;
 	return 1 if (-f $updateInfoFile and !-z $updateInfoFile);
-
+	
 	return 0;
 }
 
@@ -6742,8 +6140,7 @@ sub isUpdateAvailable {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub isUbuntu {
-	my $versionCmd = updateLocaleCmd('cat /proc/version');
-	return 1 if (-e '/proc/version' && `$versionCmd` =~ /ubuntu/);
+	return 1 if (-e '/proc/version' && `cat /proc/version` =~ /ubuntu/);
 	return 0;
 }
 
@@ -6753,8 +6150,7 @@ sub isUbuntu {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub isGentoo {
-	my $versionCmd = updateLocaleCmd('cat /proc/version');
-	return 1 if (-e '/proc/version' && `$versionCmd` =~ /gentoo/);
+	return 1 if (-e '/proc/version' && `cat /proc/version` =~ /gentoo/);
 	return 0;
 }
 
@@ -6797,7 +6193,6 @@ sub isUserDashboardRunning {
 #****************************************************************************************************/
 sub inAppPath {
 	my ($file) = @_;
-	$appPath = (fileparse($appPath))[1] if(-f $appPath);
 	if (-f getCatfile($appPath, $file)) {
 		return 1;
 	}
@@ -6812,7 +6207,7 @@ sub inAppPath {
 # Modified By			: Anil Kumar [27/04/2018]
 #****************************************************************************************************/
 sub isLoggedin {
-	if (!defined($username) || $username eq '') {
+	if(!defined($username) || $username eq '') {
 		$username = '';
 		return 0;
 	}
@@ -6960,10 +6355,32 @@ sub isJobRunning
 	}
 
 	my $pidPath = $jobRunningDir."/".$Configuration::pidFile;
-	if (isFileLocked($pidPath)) {
+	if (Helpers::isFileLocked($pidPath)) {
 		return 1;
 	}
 	return 0;
+
+
+	# my $logPidFilePath = $jobRunningDir."/".$Configuration::logPidFile;
+	# #print "\n JOB RUNNING DIR:: $logPidFilePath \n";
+	# my $logFile;
+	# if (-e $logPidFilePath){
+		# open FILE, "<", $logPidFilePath or (traceLog($Locale::strings{'failed_to_open_file'}.":$logPidFilePath. Reason:$!") and die);
+		# chomp($logFile = <FILE>);
+		# close FILE;
+	# }
+
+	# return 0 unless($logFile);
+
+	# my @list = split ( /(_)/, $logFile );
+	# my $jobTypeRunning =  $list[-1];
+	# if ($jobTypeRunning eq "Scheduled") {
+		# return 1;
+	# }
+
+	# return 1 if (defined($_[1]));
+
+	# return 0;
 
 }
 
@@ -6988,7 +6405,7 @@ sub killPIDs {
 				splice(@{$_[0]}, $index, 1);
 			}
 			elsif ($terminate) {
-				system(updateLocaleCmd("kill $_[0]->[$index] 1>/dev/null 2>/dev/null"));
+				system("kill $_[0]->[$index] 1>/dev/null 2>/dev/null");
 				if ($@) {
 					traceLog("unable to kill pid $_[0]->[$index]");
 					traceLog("Error: $@");
@@ -7032,7 +6449,6 @@ sub launchIDriveCRON {
 
 	# run cron manually in root mode
 	my $croncmd = qq($Configuration::perlBin '$Configuration::cronLinkPath' 1>/dev/null 2>/dev/null &);
-	$croncmd = updateLocaleCmd($croncmd);
 	system($croncmd);
 	sleep(3);
 
@@ -7055,83 +6471,69 @@ sub ltrim {
 # Subroutine			: linkBucket
 # Objective				: Choose a bucket from the list to backup/restore files
 # Added By				: Yogesh Kumar
-# Modified By			: Anil Kumar [27/04/2018], Senthil Pandian
+# Modified By			: Anil Kumar [27/04/2018]
 #****************************************************************************************************/
 sub linkBucket {
+	my @columnNames = (['S.No.', 'Device Name', 'Device ID', 'OS', 'Date & Time', 'IP Address'], [8, 24, 24, 15, 22, 16]);
+	my $tableHeader = getTableHeader(@columnNames);
+	display($tableHeader,0);
+	my $tableData = "";
 	my $devices = $_[1];
-	my $slno = '';
-	unless (defined($_[3])) {
-		my @columnNames = (['S.No.', 'Device Name', 'Device ID', 'OS', 'Date & Time', 'IP Address'], [8, 24, 24, 15, 22, 16]);
-		my $tableHeader = getTableHeader(@columnNames);
-		display($tableHeader,0);
-		my $tableData = "";
-		my $columnIndex = 1;
-		my $screenCols = (split(' ', $Configuration::screenSize))[-1];
+	my $columnIndex = 1;
+	my $screenCols = (split(' ', $Configuration::screenSize))[-1];
 
-		my @columnHeaderInfo = ('s_no', 'nick_name', 'device_id','os', 'bucket_ctime', 'ip');
+	my @columnHeaderInfo = ('s_no', 'nick_name', 'device_id','os', 'bucket_ctime', 'ip');
 
-		my $serialNumber = 1;
-		for my $device (@{$devices}) {
-			for (my $i=0; $i < scalar(@columnHeaderInfo); $i++) {
-				if ($columnHeaderInfo[$i] eq 's_no') {
-					$tableData .= $serialNumber;
-					$tableData .= (' ') x ($columnNames[1]->[$i] - length($serialNumber));
-				}
-				else {
-					my $displayData = $device->{$columnHeaderInfo[$i]};
-
-					if (($columnNames[1]->[$i] - length($displayData)) > 0){
-						$tableData .= $displayData;
-						$tableData .= (' ') x ($columnNames[1]->[$i] - length($displayData)) if ($columnHeaderInfo[$i] eq 'nick_name'||'os');
-					}
-					else {
-						$tableData .= trimDeviceInfo($displayData,$columnNames[1]->[$i]) if ($columnHeaderInfo[$i] eq 'nick_name'||'os');
-						$tableData .= (' ') x 3;
-					}
-					$tableData .= (' ') x ($columnNames[1]->[$i] - length($displayData)) if ($columnHeaderInfo[$i] eq 's_no');
-				}
-			}
-			$serialNumber = $serialNumber + 1;
-			$tableData .= "\n";
-		}
-
-		display($tableData, 1);
-		if ($_[0] eq 'backup') {
-			display(['enter_the_serial_no_to_select_your' , ucfirst($_[0]), 'location_press_enter_to_go_back_to_main_menu'], 0);
-			$slno = getUserMenuChoiceBuckSel(scalar(@{$devices}));
-		}
-		else {
-			display(['enter_the_serial_no_to_select_your' , 'Restore from location.'], 1);
-			$slno = getUserMenuChoice(scalar(@{$devices}));
-		}
-
-		if ($slno eq '') {
-			unless (defined($_[2])) {
-				return 0;
+	my $serialNumber = 1;
+	for my $device (@{$devices}) {
+		for (my $i=0; $i < scalar(@columnHeaderInfo); $i++) {
+			if ($columnHeaderInfo[$i] eq 's_no') {
+				$tableData .= $serialNumber;
+				$tableData .= (' ') x ($columnNames[1]->[$i] - length($serialNumber));
 			}
 			else {
-				display('');
-				return $_[2]->($devices);
+				my $displayData = $device->{$columnHeaderInfo[$i]};
+
+				if (($columnNames[1]->[$i] - length($displayData)) > 0){
+					$tableData .= $displayData;
+					$tableData .= (' ') x ($columnNames[1]->[$i] - length($displayData)) if ($columnHeaderInfo[$i] eq 'nick_name'||'os');
+				}
+				else {
+					$tableData .= trimDeviceInfo($displayData,$columnNames[1]->[$i]) if ($columnHeaderInfo[$i] eq 'nick_name'||'os');
+					$tableData .= (' ') x 3;
+				}
+				$tableData .= (' ') x ($columnNames[1]->[$i] - length($displayData)) if ($columnHeaderInfo[$i] eq 's_no');
 			}
 		}
+		$serialNumber = $serialNumber + 1;
+		$tableData .= "\n";
+	}
+
+	display($tableData,1);
+	my $slno;
+	if ($_[0] eq "backup") {
+		display(['enter_the_serial_no_to_select_your' , ucfirst($_[0]), 'location_press_enter_to_go_back_to_main_menu'], 0);
+		$slno = getUserMenuChoiceBuckSel(scalar(@{$devices}));
 	}
 	else {
-		$slno = 1;
+		display(['enter_the_serial_no_to_select_your' ,"Restore from location."], 0);
+		$slno = getUserMenuChoice(scalar(@{$devices}));
+	}
+
+	if ($slno eq '') {
+		unless (defined($_[2])) {
+			return 0;
+		}
+		else {
+			display('');
+			return $_[2]->($devices);
+		}
+
 	}
 
 	if ($_[0] eq 'backup') {
-		my $restorePC = 'n';
-		if (not defined($_[3]) and ($devices->[$slno -1]{'uid'} =~ /^$Configuration::deviceUIDPrefix/)) {
-			Helpers::display(["\n", 'setup_new_device_for_backup', "\"$devices->[$slno -1]{'nick_name'}\" ", 'your_settings_will_be_synced_after_successful_account_configuration', 'do_you_want_to_continue_or_skip_yn']);
-			$restorePC = lc(Helpers::getAndValidate(['enter_your_choice'], 'YN_choice', 1));
-		}
-
-		my $deviceName = $Configuration::hostname;
-		$deviceName =~ s/[^a-zA-Z0-9_-]//g;
-
-		display('setting_up_your_backup_location', 1);
 		createUTF8File('LINKBUCKET',
-			$deviceName,
+			$devices->[$slno -1]{'nick_name'},
 			$devices->[$slno -1]{'device_id'},
 			getMachineUID()) or retreat('failed_to_create_utf8_file');
 		my @result = runEVS('item');
@@ -7141,22 +6543,19 @@ sub linkBucket {
 			return 0;
 		}
 		elsif ($result[0]->{'STATUS'} eq Configuration::SUCCESS) {
-			setUserConfiguration('SERVERROOT', $result[0]->{'server_root'});
-			setUserConfiguration('BACKUPLOCATION',
-								($Configuration::deviceIDPrefix . $result[0]->{'device_id'} . $Configuration::deviceIDSuffix .
-									"#" . $result[0]->{'nick_name'}));
-			display([ "\n", 'your_backup_to_device_name_is', (" \"" . $result[0]->{'nick_name'} . "\"")]);
-			if (loadNotifications()) {
-				setNotification('register_dashboard');
-				unless (defined($_[4])) {
-					my $ncv = ($devices->[$slno -1]{'uid'} . '-' . $devices->[$slno -1]{'device_id'} . '-' . $devices->[$slno -1]{'loc'});
-					$ncv .= "-$restorePC";
-					setNotification('update_device_info', $ncv);
-				}
-				saveNotifications();
-			}
 
-			return (($restorePC eq 'n') ? 1 : 2);
+		$devices->[$slno -1]{'server_root'} = $result[0]->{'server_root'};
+		$devices->[$slno -1]{'device_id'}   = $result[0]->{'device_id'};
+		$devices->[$slno -1]{'nick_name'}   = $result[0]->{'nick_name'};
+
+		#server root added by anil
+			setUserConfiguration('SERVERROOT', $devices->[$slno -1]{'server_root'});
+			setUserConfiguration('BACKUPLOCATION',
+								($Configuration::deviceIDPrefix . $devices->[$slno -1]{'device_id'} . $Configuration::deviceIDSuffix .
+									"#" . $devices->[$slno -1]{'nick_name'}));
+			display([ "\n", 'your_backup_to_device_name_is', (" \"" . $devices->[$slno -1]{'nick_name'} . "\"")]);
+			loadNotifications() and setNotification('register_dashboard') and saveNotifications();
+			return 1;
 		}
 	}
 	elsif ($_[0] eq 'restore') {
@@ -7187,8 +6586,7 @@ sub loadEVSBinary {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub loadMachineHardwareName {
-	my $mhnCmd = updateLocaleCmd('uname -m');
-	my $mhn = `$mhnCmd`;
+	my $mhn = `uname -m`;
 	if ($? > 0) {
 		traceLog("Error in getting the machine name: ".$?);
 		return 0;
@@ -7198,7 +6596,7 @@ sub loadMachineHardwareName {
 	if ($mhn =~ /i386|i686/) {
 		$machineHardwareName = '32';
 	}
-	elsif ($mhn =~ /x86_64|ia64|amd|amd64|aarch64/) {
+	elsif ($mhn =~ /x86_64|ia64|amd|amd64/) {
 		$machineHardwareName = '64';
 	}
 	elsif ($mhn =~ /arm/) {
@@ -7224,7 +6622,7 @@ sub loadServerAddress {
 		if (open(my $fileHandle, '<', $gsa)) {
 			my $sa = <$fileHandle>;
 			close($fileHandle);
-			Chomp(\$sa);
+			chomp($sa);
 			if ($sa ne '') {
 				$serverAddress = $sa;
 				return 1;
@@ -7289,7 +6687,6 @@ sub loadServicePath {
 	if (inAppPath($Configuration::serviceLocationFile)) {
 		if (open(my $sp, '<',
 				("$appPath/" . $Configuration::serviceLocationFile))) {
-			chmod 0777, $sp;
 			my $s = <$sp> || '';
 			close($sp);
 			chomp($s);
@@ -7307,7 +6704,7 @@ sub loadServicePath {
 # Subroutine			: loadUsername
 # Objective				: Assign logged in user name to $username
 # Added By				: Yogesh Kumar
-# Modified By			: Sabin Cheruvattil, Senthil Pandian
+# Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub loadUsername {
 	my $cf = getUserFile();
@@ -7318,8 +6715,7 @@ sub loadUsername {
 			Chomp(\$userdata);
 			my %datahash = ($userdata =~ m/^\{/)? %{JSON::from_json($userdata)} : {$Configuration::mcUser => $userdata};
 			$username = (($datahash{$Configuration::mcUser}{'userid'})? $datahash{$Configuration::mcUser}{'userid'} : '');
-			#my $isLoggedin = (($datahash{$Configuration::mcUser}{'isLoggedin'})? $datahash{$Configuration::mcUser}{'isLoggedin'} : 0);
-			#return 0 if ($username eq '' || !$isLoggedin); #Commented for Harish_2.21_07_2
+			return 0 if ($username eq '');
 			return 1;
 		}
 	}
@@ -7343,37 +6739,26 @@ sub loadUserConfiguration {
 		}
 		checkAndUpdateServerRoot(); # Added to check and update server root if it is empty
 		proxyBackwardCompatability();
-		if (defined($_[0])) {
+		if (defined($_[0])){
 			$errCode = validateUserConfigurations($_[0]);
-		}
-		else {
+		} else {
 			$errCode = validateUserConfigurations();
 		}
-	}
-	else {
-		$errCode = 104;
+	} else {
+		$errCode = 101;
 	}
 
 	foreach my $confkey (keys %Configuration::userConfigurationSchema) {
 		unless($userConfiguration{$confkey}) {
-			if ($Configuration::userConfigurationSchema{$confkey}{'default'} =~ /^__/) {
-				my @kNames = $Configuration::userConfigurationSchema{$confkey}{'default'} =~ /__[A-Za-z0-9]+__/g;
-				for(@kNames) {
-					$_ =~ s/__//g;
-					my $func = \&{$_};
-					$userConfiguration{$confkey}{'VALUE'} = &$func();
-				}
-			}
-			else {
-				$userConfiguration{$confkey}  = {'VALUE' => $Configuration::userConfigurationSchema{$confkey}{'default'}};
-			}
+			$userConfiguration{$confkey} = {'VALUE' => $Configuration::userConfigurationSchema{$confkey}{'default'}};
+			#$modifiedUserConfig{$confkey} = {'VALUE' => $Configuration::userConfigurationSchema{$confkey}{'default'}};
 			$Configuration::isUserConfigModified = 1;
 			if (-f $ucf and !-z $ucf) {
 				$errCode =1 ;
+				#traceLog("Added missed key:".$confkey);
 			}
 		}
 	}
-	$userConfiguration{'DEDUP'}{'VALUE'} = 'off' if($Configuration::appType eq 'IBackup');
 
 	return $errCode;
 }
@@ -7382,96 +6767,22 @@ sub loadUserConfiguration {
 # Subroutine			: loadNotifications
 # Objective				: load user activities on certain modules like start/stop backup/restore, etc...
 # Added By				: Yogesh Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub loadNotifications {
-	return 0 if($Configuration::appType eq 'IBackup');
-	%modifiedNotifications = ();
-
 	my $nf = getNotificationFile();
-	if (-f $nf) {
-		if (-z $nf) {
-			%notifications = ();
-			return 1;
-		}
+	createNotification() unless (-e $nf and !-z $nf);
 
+	if (-e $nf) {
 		if (open(my $n, '<', $nf)) {
 			my $nc = <$n>;
 			close($n);
-			if (defined($nc) and $nc ne '') {
+			if ($nc ne '') {
 				%notifications = %{JSON::from_json($nc)};
 			}
 			return 1;
 		}
 	}
-	else {
-		open(my $fh, '>', $nf);
-		close($fh);
-		%notifications = ();
-		return 1;
-	}
-
-	return 0;
-}
-
-#*****************************************************************************************************
-# Subroutine			: loadNS
-# Objective				: load user activities on certain modules like start/stop backup/restore, etc...
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub loadNS {
-	return if ($Configuration::appType eq 'IBackup');
-	%ns = ();
-
-	my $nsf = getNSFile();
-	my $nf = getNotificationFile();
-
-	unless (-f $nsf) {
-		open(my $fh, '>', $nsf);
-		close($fh);
-	}
-
-	if (open(my $nsfh, '+<', $nsf)) {
-		unless (flock($nsfh, LOCK_EX)) {
-			traceLog("Cannot lock file $nsf $!\n");
-			close($nsfh);
-			return 0;
-		}
-		my $nc = <$nsfh>;
-		seek $nsfh, 0, 0;
-		truncate $nsfh, 0;
-
-		if ($nc and $nc ne '') {
-			%ns = %{JSON::from_json($nc)};
-		}
-
-		if (open(my $fh, '+<', $nf)) {
-			unless (flock($fh, LOCK_EX)) {
-				traceLog("Cannot lock file $nf $!\n");
-				close($fh);
-				return 0;
-			}
-			my $nc = <$fh>;
-			seek $fh, 0, 0;
-			truncate $fh, 0;
-			close($fh);
-
-			if ($nc and $nc ne '') {
-				my %n = %{JSON::from_json($nc)};
-				foreach my $key (keys %n) {
-					$ns{'nsq'}{$key} = $n{$key};
-				}
-			}
-		}
-		else {
-			close($nsfh);
-			return 0;
-		}
-
-		print $nsfh JSON::to_json(\%ns) if (%ns);
-		close($nsfh);
-		return 1;
-	}
+	%notifications = ();
 	return 0;
 }
 
@@ -7514,8 +6825,8 @@ sub loadFullExclude {
 	#read full path exclude file and prepare a hash for it
 	if (-f $excludeFullPath and !-z $excludeFullPath) {
 		if (!open(EXFH, $excludeFullPath)) {
-			$Configuration::errStr = getStringConstant('failed_to_open_file')." : $excludeFullPath. Reason:$!\n";
-			display($Configuration::errStr);
+			$Configuration::errStr = $Locale::strings{'failed_to_open_file'}." : $excludeFullPath. Reason:$!\n";
+			print $Configuration::errStr;
 			traceLog($Configuration::errStr, __FILE__, __LINE__);
 			return;
 		}
@@ -7562,8 +6873,8 @@ sub loadPartialExclude {
 	#read partial path exclude file and prepare a partial match pattern
 	if (-f $excludePartialPath and !-z $excludePartialPath) {
 		if (!open(EPF, $excludePartialPath)) {
-			$Configuration::errStr = getStringConstant('failed_to_open_file')." : $excludePartialPath. Reason:$!\n";
-			display($Configuration::errStr);
+			$Configuration::errStr = $Locale::strings{'failed_to_open_file'}." : $excludePartialPath. Reason:$!\n";
+			print $Configuration::errStr;
 			traceLog($Configuration::errStr, __FILE__, __LINE__);
 			return;
 		}
@@ -7604,8 +6915,8 @@ sub loadRegexExclude {
 	#read regex path exclude file and find a regex match pattern
 	if (-e $regexExcludePath and -s $regexExcludePath > 0) {
 		if (!open(RPF, $regexExcludePath)) {
-			$Configuration::errStr = getStringConstant('failed_to_open_file')." : $regexExcludePath. Reason:$!\n";
-			display($Configuration::errStr);
+			$Configuration::errStr = $Locale::strings{'failed_to_open_file'}." : $regexExcludePath. Reason:$!\n";
+			print $Configuration::errStr;
 			traceLog($Configuration::errStr, __FILE__, __LINE__);
 			return;
 		}
@@ -7656,7 +6967,7 @@ sub migrateUserFile
 	my $ServiceLocation = getServicePath();
 	my $fc = '';
 
-	if (-f $filename){
+	if (-e $filename){
 		$fc = getFileContents($filename);
 		Chomp(\$fc);
 	}
@@ -7673,7 +6984,7 @@ sub migrateUserFile
 		$loginData{$migrateMcUser}{'isLoggedin'} = 1;
 	}
 	migrateUserDirectories($migrateMcUser,$fc);
-	createDir(getCachedDir(),1) unless(-d getCachedDir());
+
 	my $ServiceLocationOld = $ServiceLocation;
 	$ServiceLocation =~ s/$Configuration::oldServicePathName$/$Configuration::servicePathName/;
 
@@ -7681,16 +6992,15 @@ sub migrateUserFile
 	unlink $filename;
 
 	fileWrite($idriveFilename, JSON::to_json(\%loginData));
-	chmod $Configuration::filePermission, $idriveFilename if(-f $idriveFilename);
-	createDir($ServiceLocation,1) unless(-d $ServiceLocation);
-	system(updateLocaleCmd("cp -rpf \'$ServiceLocationOld/\'* \'$ServiceLocation\'"));
+	chmod $Configuration::filePermission, $idriveFilename;
+
+	system("cp -rpf \'$ServiceLocationOld/\'* \'$ServiceLocation\'");
 
 	removeItems($ServiceLocationOld) if ($? == 0);
 	fileWrite($userServiceLocationFile,$ServiceLocation);
 
 	loadUsername();
-	my $mcUserCFCmd = updateLocaleCmd('whoami');
-	$Configuration::mcUser = `$mcUserCFCmd`;
+	$Configuration::mcUser = `whoami`;
 	chomp($Configuration::mcUser);
 	setServicePath($ServiceLocation);
 }
@@ -7702,7 +7012,6 @@ sub migrateUserFile
 #****************************************************************************************************/
 sub migrateUserDirectories
 {
-	return 1 unless (-d "$servicePath/$Configuration::userProfilePath");
     opendir(DIR, "$servicePath/$Configuration::userProfilePath") or die $!;
 	my $mcUser = "";
 	my $fileName = "";
@@ -7723,6 +7032,7 @@ sub migrateUserDirectories
 			$fileStat = stat($migrateLockFile);
 		}
 		migrateUserPath($mcUser,$userDir,$fileStat);
+
     }
 
     closedir(DIR);
@@ -7738,7 +7048,6 @@ sub migrateUserPath{
 	my $idriveUser = $_[1];
 	my $fileStat = $_[2];
 	my $groupUser = getpwuid($fileStat->gid);
-	   $groupUser = (defined($groupUser))?$groupUser:'root';
 	my $linuxUserDir = "$servicePath/$Configuration::userProfilePath/$mcUser";
 	my $idriveUserOldDir = "$servicePath/$Configuration::userProfilePath/$idriveUser";
 	my $idriveUserDir = "$linuxUserDir/$idriveUser";
@@ -7747,11 +7056,11 @@ sub migrateUserPath{
 
 	createDir($linuxUserDir) if (!-e $linuxUserDir);
 
-	system(updateLocaleCmd('cp -rpf '.getECatfile($servicePath, $Configuration::userProfilePath, $idriveUser).' '. getECatfile($linuxUserDir, '/')));
+	system('cp -rpf '.getECatfile($servicePath, $Configuration::userProfilePath, $idriveUser).' '. getECatfile($linuxUserDir, '/'));
 	removeItems("$servicePath/$Configuration::userProfilePath/$idriveUser") if ($? == 0);
 
 	if ($idriveUserOldDir."_tmp" eq $linuxUserDir){
-		system(updateLocaleCmd('mv '.getECatfile($linuxUserDir).' '.getECatfile($idriveUserOldDir)));
+		system('mv '.getECatfile($linuxUserDir).' '.getECatfile($idriveUserOldDir));
 	}
 
 	setUsername($idriveUser);
@@ -7776,8 +7085,8 @@ sub migrateUserPath{
 
     createLogJsonForOldUser();
 	migrateUserNewServiceLocation("$updatedServiceLocation/$Configuration::userProfilePath/$mcUser",$idriveUserDir);
-	system(updateLocaleCmd("chown -R  $mcUser:$groupUser ".getECatfile($updatedServiceLocation,$Configuration::userProfilePath,$mcUser,$idriveUser)." 2>/dev/null"));
-	system(updateLocaleCmd("chmod -R 0755 ".getECatfile($updatedServiceLocation,$Configuration::userProfilePath,$mcUser,$idriveUser,'/')." 2>/dev/null"));
+	system("chown -R  $mcUser:$groupUser ".getECatfile($updatedServiceLocation,$Configuration::userProfilePath,$mcUser,$idriveUser)." 2>/dev/null");
+	system("chmod -R 0755 ".getECatfile($updatedServiceLocation,$Configuration::userProfilePath,$mcUser,$idriveUser,'/')." 2>/dev/null");
 }
 
 #*****************************************************************************************************
@@ -7825,10 +7134,10 @@ sub migrateUserJobDirectories
 	my $localBackupSetPath = $idriveUserDir."/".$Configuration::userProfilePaths{'localbackup'}."/".$Configuration::backupsetFile;
 
 	#move local backup job to new location
-	createDir("$idriveUserDir/$Configuration::userProfilePaths{'localbackup'}",1)	if (!-e "$idriveUserDir/$Configuration::userProfilePaths{'localbackup'}");
+	createDir("$idriveUserDir/$Configuration::userProfilePaths{'localbackup'}")	if (!-e "$idriveUserDir/$Configuration::userProfilePaths{'localbackup'}");
 
 	if (-e "$idriveUserDir/LocalBackup/Manual/"){
-		system(updateLocaleCmd('cp -rpf '. getECatfile($idriveUserDir, 'LocalBackup', 'Manual', '/') . '* ' . getECatfile($idriveUserDir, $Configuration::userProfilePaths{'localbackup'}) . " $errorSkip"));
+		system('cp -rpf '. getECatfile($idriveUserDir, 'LocalBackup', 'Manual', '/') . '* ' . getECatfile($idriveUserDir, $Configuration::userProfilePaths{'localbackup'}) . " $errorSkip");
 		removeItems("$idriveUserDir/LocalBackup/Manual/") if ($? == 0);
 	}
 
@@ -7839,50 +7148,50 @@ sub migrateUserJobDirectories
 	removeItems("$idriveUserDir/LocalBackup/") if ($? == 0);
 
 	#move scheulde backup job to new location
-	system(updateLocaleCmd('mv '.getECatfile($idriveUserDir,'Backup','Scheduled','/').' '. getECatfile($idriveUserDir,$Configuration::userProfilePaths{'backup'})." $errorSkip"));
+	system('mv '.getECatfile($idriveUserDir,'Backup','Scheduled','/').' '. getECatfile($idriveUserDir,$Configuration::userProfilePaths{'backup'})." $errorSkip");
 
 	if (-e $backupSetPath and !-z $backupSetPath) {
 		updateJobsFileset($backupSetPath,'backup');
 	}
 
 	#move manual backup logs to new location
-	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'backup'},1)	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'backup'});
+	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'backup'})	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'backup'});
 
-	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'backup'}."/LOGS",1)	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'backup'}."/LOGS");
+	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'backup'}."/LOGS")	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'backup'}."/LOGS");
 
 	if (-e $idriveUserDir."/".$Configuration::userProfilePaths{'backup'}."/LOGS"){
-		system(updateLocaleCmd('cp -rpf '.getECatfile($idriveUserDir,'Backup','Manual','LOGS','/').'* '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'backup'},'LOGS','/')." $errorSkip"));
+		system('cp -rpf '.getECatfile($idriveUserDir,'Backup','Manual','LOGS','/').'* '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'backup'},'LOGS','/')." $errorSkip");
 	}
 	removeItems("$idriveUserDir/Backup/Manual/");
 
 	#move scheulde restore job to new location
 	if (-e "$idriveUserDir/Restore/Scheduled/"){
-		system(updateLocaleCmd('mv '.getECatfile($idriveUserDir,'Restore','Scheduled','/').' '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'restore'})." $errorSkip"));
+		system('mv '.getECatfile($idriveUserDir,'Restore','Scheduled','/').' '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'restore'})." $errorSkip");
 	}
 
 	#move manual restore logs to new location
-	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'restore'},1)	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'restore'});
+	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'restore'})	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'restore'});
 
-	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'restore'}."/LOGS",1)	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'restore'}."/LOGS");
+	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'restore'}."/LOGS")	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'restore'}."/LOGS");
 
 	if (-e $idriveUserDir."/".$Configuration::userProfilePaths{'restore'}."/LOGS"){
-		system(updateLocaleCmd('cp -rpf '.getECatfile($idriveUserDir,'Restore','Manual','LOGS','/').'* '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'restore'},'LOGS','/')." $errorSkip"));
+		system('cp -rpf '.getECatfile($idriveUserDir,'Restore','Manual','LOGS','/').'* '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'restore'},'LOGS','/')." $errorSkip");
 	}
 
 	removeItems("$idriveUserDir/Restore/Manual/");
 
 	#move scheulde Archive job to new location
 	if (-e "$idriveUserDir/Archive/Scheduled/"){
-		system(updateLocaleCmd('mv '.getECatfile($idriveUserDir,'Archive','Scheduled','/').' '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'archive'})." $errorSkip"));
+		system('mv '.getECatfile($idriveUserDir,'Archive','Scheduled','/').' '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'archive'})." $errorSkip");
 	}
 
 	#move manual Archive logs to new location
-	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'archive'},1)	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'archive'});
+	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'archive'})	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'archive'});
 
-	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'archive'}."/LOGS",1)	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'archive'}."/LOGS");
+	createDir($idriveUserDir."/".$Configuration::userProfilePaths{'archive'}."/LOGS")	if (!-e $idriveUserDir."/".$Configuration::userProfilePaths{'archive'}."/LOGS");
 
 	if (-e "$idriveUserDir/Archive/Manual/LOGS/"){
-		system(updateLocaleCmd('cp -rpf '.getECatfile($idriveUserDir,'Archive','Manual','LOGS','/').'* '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'archive'},'LOGS','/')." $errorSkip"));
+		system('cp -rpf '.getECatfile($idriveUserDir,'Archive','Manual','LOGS','/').'* '.getECatfile($idriveUserDir,$Configuration::userProfilePaths{'archive'},'LOGS','/')." $errorSkip");
 	}
 
 	chmod $Configuration::filePermission, "$idriveUserDir/$Configuration::traceLogFile" if (-e "$idriveUserDir/$Configuration::traceLogFile");
@@ -7940,8 +7249,7 @@ sub migrateCronEntry{
 				$jobName = 'default_backupset';
 			}
 			elsif (index($fields[$i], 'archive_cleanup.pl') != -1){
-				my $perlPathCmd = updateLocaleCmd('which perl');
-				my $perlPath = `$perlPathCmd`;
+				my $perlPath = `which perl`;
 				chomp($perlPath);
 				if ($perlPath eq ''){
 					$perlPath = '/usr/local/bin/perl';
@@ -7973,13 +7281,13 @@ sub migrateCronEntry{
 			my $dow = lc $timeDetail[4];
 
 			setCrontab($jobType, $jobName, {'settings' => {'status' => 'enabled'}});
-			if ($timeDetail[1] eq "*"){
+			if($timeDetail[1] eq "*"){
 				setCrontab($jobType, $jobName, 'h', '*');
 			} else {
 				setCrontab($jobType, $jobName, 'h', sprintf("%02d", $timeDetail[1]));
 			}
 
-			if ($timeDetail[0] eq "*"){
+			if($timeDetail[0] eq "*"){
 				setCrontab($jobType, $jobName, 'm', '*');
 			} else {
 				setCrontab($jobType, $jobName, 'm', sprintf("%02d", $timeDetail[0]));
@@ -8088,7 +7396,7 @@ sub migrateUserNewServiceLocation{
 
 	createDir($newServiceLocation, 1);
 	chmod $Configuration::filePermission, $newServiceLocation;
-	system(updateLocaleCmd('mv '.getECatfile($idriveUserDir).' '.getECatfile($newServiceLocation)." $errorSkip"));
+	system('mv '.getECatfile($idriveUserDir).' '.getECatfile($newServiceLocation)." $errorSkip");
 	chmod $Configuration::filePermission, "$newServiceLocation/$Configuration::traceLogFile" if (-e "$newServiceLocation/$Configuration::traceLogFile");
 }
 
@@ -8129,15 +7437,13 @@ sub openEditor {
 		$editorHelpMsg = 'jed';
 	}
 
-	my $editorNameCmd = updateLocaleCmd("which $editorName 2>/dev/null");
-	unless(`$editorNameCmd`) {
+	unless(`which $editorName 2>/dev/null`) {
 		display(["\n", 'unable_to_find_editor']);
 		display(['please_provide_name_of_editor_in_machine', ': '], 0);
 		my $custeditor = getUserChoice();
 
 		retreat(['unable_to_proceed', ' ', 'please_make_sure_you_have_editor']) unless($custeditor);
-		my $custeditorCmd = updateLocaleCmd("which $custeditor 2>/dev/null");
-		retreat(['unable_to_proceed', ' ', 'unable_to_find_entered_editor']) unless(`$custeditorCmd`);
+		retreat(['unable_to_proceed', ' ', 'unable_to_find_entered_editor']) unless(`which $custeditor 2>/dev/null`);
 
 		$editorName = $custeditor;
 		$editorHelpMsg = $editorName;
@@ -8153,7 +7459,7 @@ sub openEditor {
 	retreat(["\n", 'file_not_found', ":$fileLocation\n"]) if ($action eq 'view' and !-f "$fileLocation");
 
 	my $initialts = ((-f $fileLocation)? stat($fileLocation)->mtime : 0);
-	$operationStatus = system(updateLocaleCmd("$editorName '$fileLocation'"));
+	$operationStatus = system("$editorName '$fileLocation'");
 	my $editedts = ((-f $fileLocation)? stat($fileLocation)->mtime : 0);
 
 	return display(["\n", 'could_not_complete_operation', " Reason: $!\n"], 1) if ($operationStatus != 0);
@@ -8168,7 +7474,7 @@ sub openEditor {
 		}
 		my $content = '';
 		$content = join("\n", @newItemArray) if (scalar(@newItemArray));
-		fileWrite($fileLocation, $content);
+		Helpers::fileWrite($fileLocation,$content);
 		display('') if ($skippedItem);
 	}
 	if ($initialts != $editedts or $skippedItem){
@@ -8215,7 +7521,6 @@ sub prettyPrint {
 # Subroutine			: processShellCopy
 # Objective				: This is to process shell script preparation and copying to launch path
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub processShellCopy {
 	my $opconf = $_[0];
@@ -8230,8 +7535,6 @@ sub processShellCopy {
 		my $fc 			= getFileContents($shellpath);
 		Chomp(\$fc);
 		$fc		=~ s/__LAUNCHPATH__/$Configuration::cronLinkPath/g;
-		my $app = lc($Configuration::appType);
-		$fc		=~ s/__APP__/$app/g;
 		fileWrite($opconf->{'shellcp'}{$cpkey}, $fc);
 		chmod($Configuration::execPermission, $opconf->{'shellcp'}{$cpkey}) unless((split('\.', basename($opconf->{'shellcp'}{$cpkey})))[1]);
 	}
@@ -8248,8 +7551,7 @@ sub processCRONSetupCommands {
 	return unless(@{$opconf->{'setupcmd'}});
 
 	for my $i (0 .. $#{$opconf->{'setupcmd'}}) {
-		my $opconfSetupCmd = updateLocaleCmd($opconf->{'setupcmd'}[$i]);
-		`$opconfSetupCmd 1>/dev/null 2>/dev/null`;
+		`$opconf->{'setupcmd'}[$i] 1>/dev/null 2>/dev/null`;
 	}
 
 	sleep(5);
@@ -8266,8 +7568,7 @@ sub processCRONShellLinks {
 	return unless(%{$opconf->{'shellln'}});
 
 	foreach my $lndest (keys %{$opconf->{'shellln'}}) {
-		my $opconfshelllnCmd = updateLocaleCmd("ln -s $opconf->{'shellln'}{$lndest}");
-		`$opconfshelllnCmd $lndest 1>/dev/null 2>/dev/null`;
+		`ln -s $opconf->{'shellln'}{$lndest} $lndest 1>/dev/null 2>/dev/null`;
 	}
 }
 
@@ -8275,7 +7576,6 @@ sub processCRONShellLinks {
 # Subroutine			: processCRONConfAppends
 # Objective				: This is to process append contents to conf
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub processCRONConfAppends {
 	my $opconf 		= $_[0];
@@ -8291,11 +7591,8 @@ sub processCRONConfAppends {
 		my $fc 			= getFileContents($appendto);
 		Chomp(\$fc);
 		my $appendcont	= getFileContents($appendfrom);
-		if($appendcont ne ''){
-			Chomp(\$appendcont);
-			my $app = lc($Configuration::appType);
-			$appendcont	=~ s/__APP__/$app/g;
-		}
+		Chomp(\$appendcont);
+
 		if (index($fc, $appendcont) == -1) {
 			$fc 		= qq($fc\n$appendcont);
 			fileWrite($appendto, $fc);
@@ -8358,10 +7655,8 @@ sub parseEVSCmdOutput {
 			chomp($_[0]);
 		}
 
-		my $status = Configuration::FAILURE;
-		$status = Configuration::SUCCESS if($_[0] =~ /bytes  received/);
 		push @parsedEVSCmdOutput, {
-			'STATUS' => $status,
+			'STATUS' => Configuration::FAILURE,
 			'MSG'    => $_[0]
 		};
 	}
@@ -8369,36 +7664,6 @@ sub parseEVSCmdOutput {
 	return @parsedEVSCmdOutput;
 }
 
-#*****************************************************************************************************
-# Subroutine			: parseXMLContent
-# Objective				: Parse XML content and return the array
-# Added By				: Senthil Pandian
-# Usage					: parseXMLContent(XMLcontent, element)
-#****************************************************************************************************/
-sub parseXMLContent {
-	#my %parsedEVSCmdOutput;
-	my @parsedEVSCmdOutput;
-	if (defined($_[0]) and defined($_[1])) {
-		$_[0] =~ s/""/" "/g;
-		my $endTag = '\/>';
-		$endTag = "><\/$_[1]>" if (defined($_[2]));
-
-		my @x = grep {/\w+/} grep {/$_[1]/} split(/(?:\<)/, $_[0]);
-		foreach my $line (@x){
-			$line =~ /($_[1])/sg;
-			my @keyValuePair = $line =~ /(.+?)="(.+?)"/sg;
-			my %data;
-			for (0 .. ((scalar(@keyValuePair)/2) - 1)) {
-				$keyValuePair[($_ * 2)] =~ s/^\s+|\s+$//g;
-				$keyValuePair[(($_ * 2) + 1)] =~ s/^\s$//g;
-				$data{$keyValuePair[($_ * 2)]} = $keyValuePair[(($_ * 2) + 1)];
-			}
-			push @parsedEVSCmdOutput, \%data;
-		}
-	}
-	#print Dumper(\@parsedEVSCmdOutput);
-	return @parsedEVSCmdOutput;
-}
 #****************************************************************************************************
 # Subroutine Name         : parseXMLOutput.
 # Objective               : Parse evs command output and load the elements and values to an hash.
@@ -8488,7 +7753,7 @@ sub proxyBackwardCompatability {
 sub putParameterValueInStatusFile
 {
 	my $statusFilePath  = $Configuration::jobRunningDir."/".$Configuration::statusFile;
-	open STAT_FILE, ">", $statusFilePath or (traceLog('failed_to_open_file'," : $statusFilePath. Reason :$!") and die);
+	open STAT_FILE, ">", $statusFilePath or (traceLog($Locale::strings{'failed_to_open_file'}." : $statusFilePath. Reason :$!") and die);
 	#foreach my $keys(keys $Configuration::statusHash) {
 	foreach my $keys(keys %Configuration::statusHash) {
 		print STAT_FILE "$keys = $Configuration::statusHash{$keys}\n";
@@ -8496,71 +7761,6 @@ sub putParameterValueInStatusFile
 	close STAT_FILE;
 	chmod $Configuration::filePermission, $statusFilePath;
 	undef @Configuration::linesStatusFile;
-}
-
-#*****************************************************************************************************
-# Subroutine			: parseMachineUID
-# Objective				: Parse uid from network configuration
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub parseMachineUID {
-	my $cmd;
-	my $keyChar = '';
-	my $prepend = '';
-	$prepend = $Configuration::deviceUIDPrefix unless (defined($_[0]) and ($_[0] == 0));
-	my $ifConfigPathCmd = updateLocaleCmd("which ifconfig 2>/dev/null");
-	my $ifConfigPath = `$ifConfigPathCmd`;
-	chomp($ifConfigPath);
-	if ($ifConfigPath ne '') {
-		$cmd = 'ifconfig -a';
-		$keyChar = 'HWaddr |ether ';
-	}
-	elsif (-f '/sbin/ifconfig') {
-		$cmd = '/sbin/ifconfig -a';
-		$keyChar = 'HWaddr | ether ';
-	}
-	elsif (-f '/sbin/ip') {
-		$cmd = '/sbin/ip addr';
-		$keyChar = 'ether ';
-	}
-	elsif (-d '/sys/class/net') {
-		$cmd = 'cat /sys/class/net/*/address';
-	}
-
-	my ($a, $kc, $macAddr, $b) = ('', '', '', '');
-	if (defined($cmd)) {
-		$cmd = updateLocaleCmd($cmd);
-		my $result = `$cmd`;
-		if ($result =~ /hardware/i) {
-			my @r = split(/hardware/, $result);
-			if ($r[1]) {
-				$result = $r[1];
-				$keyChar = '';
-			}
-		}
-		$result =~ s/00:00:00:00:00:00/loop/g;
-	
-		($a, $kc, $macAddr, $b) = split(/($keyChar)((?:[0-9A-Fa-f:]{2}[:-]){5}[0-9A-Fa-f:]{2})/, $result);
-	}
-
-	unless ($macAddr) {
-		my $unameCmd = updateLocaleCmd("which uname 2>/dev/null");
-		my $uname = `$unameCmd`;
-		chomp($uname);
-		my $result;
-		if ($uname ne '') {
-			$cmd = 'uname -rm';
-			$result = `$cmd`;
-			chomp($result);
-		}
-		else {
-			$result = time();
-		}
-		$macAddr = ($result . $Configuration::hostname);
-	}
-
-	$macAddr =~ s/|:|-|\.|_| //g if ($macAddr);
-	return ("$prepend" . $macAddr);
 }
 #------------------------------------------------- Q -------------------------------------------------#
 
@@ -8573,10 +7773,9 @@ sub parseMachineUID {
 sub readInfoFile {
 	my $pattern = $_[0];
 	my $count   = 0;
-	my $infoFile = getCatfile($Configuration::jobRunningDir, 'info_file');
+	my $infoFile = Helpers::getCatfile($Configuration::jobRunningDir, 'info_file');
 	if (-e $infoFile and !-z $infoFile){
 		my $fileCountCmd = "cat '$infoFile' | grep -m1 \"^$pattern\"";
-		$fileCountCmd = updateLocaleCmd($fileCountCmd);
 		$count  = `$fileCountCmd`;
 		if ($count =~ /$pattern/){
 			$count =~ s/$pattern//;
@@ -8731,14 +7930,12 @@ sub request {
 		$curl .= ('?\'' . buildQuery($args->{'queryString'}) . '\'');
 	}
 
-	my $tmpErrorFile  = (-e getServicePath())?getServicePath()."/".time.$Configuration::errorFile:"/tmp/".time.$Configuration::errorFile;
+	my $tmpErrorFile  = (-e getServicePath())?getServicePath()."/".$Configuration::errorFile:"/tmp/".$Configuration::errorFile;
 	unlink($tmpErrorFile) if (-e $tmpErrorFile);
 	my $hostNotFound = 1;
 CONNECT:
 	my ($response, $page, %responseheaders);
 
-	$curl = updateLocaleCmd($curl);
-	#traceLog("curl:$curl");
 	$response = `$curl 2>'$tmpErrorFile'`;
 	if (($? > 0) and -f $tmpErrorFile and !-z $tmpErrorFile and
 		getFileContents($tmpErrorFile) =~ 'unknown message digest algorithm') {
@@ -8752,24 +7949,24 @@ CONNECT:
 		eval "use Net::SSLeay qw(get_https post_https sslcat make_headers make_form)";
 		#use Net::SSLeay qw(get_https post_https sslcat make_headers make_form);
 		my $proxuser = getUserConfiguration('PROXYUSERNAME');
-		my $proxpwd = getUserConfiguration('PROXYPASSWORD') ne ''? decryptString(getUserConfiguration('PROXYPASSWORD')) : '';
-		Net::SSLeay::set_proxy(getUserConfiguration('PROXYIP'), getUserConfiguration('PROXYPORT'), $proxuser, $proxpwd) if (getUserConfiguration('PROXY') ne '');
+		my $proxpwd = getUserConfiguration('PROXYPASSWORD') ne ''? Helpers::decryptString(getUserConfiguration('PROXYPASSWORD')) : '';
+		Net::SSLeay::set_proxy(getUserConfiguration('PROXYIP'), getUserConfiguration('PROXYPORT'), $proxuser, $proxpwd) if(getUserConfiguration('PROXY') ne '');
 		$args->{'host'} =~ s/https:\/\///;
 		my ($host, $path) = split(/\//, $args->{'host'},2);
 		#traceLog("host:$host");
 		#traceLog("path:$path");
 		#traceLog($args->{'encDATA'});
 		#my $data = (defined($args->{'encDATA'}))?$args->{'encDATA'}:$args->{'data'};
-		if ($args->{'method'} eq 'POST'){
+		if($args->{'method'} eq 'POST'){
 			($response, $page, %responseheaders) =
 			post_https($host, $args->{'port'} || 443, "/$path",
 									'', (make_form(%{$args->{'data'}})));
 		} else {
-			if (defined($args->{'queryString'})) {
+			if(defined($args->{'queryString'})) {
 				$path .= "?".$args->{'queryString'};
-			} elsif (defined($args->{'encDATA'})) {
+			} elsif(defined($args->{'encDATA'})) {
 				$path .= "?".$args->{'encDATA'};
-			} elsif (defined($args->{'data'})) {
+			} elsif(defined($args->{'data'})) {
 				$path .= buildQuery($args->{'data'});
 			}
 			($response, $page, %responseheaders) =
@@ -8788,7 +7985,7 @@ CONNECT:
 
 	Chomp(\$response);
 	#traceLog("CURL-RESPONSE: $response");
-	if (($? > 0 and ($?%256) > 0) or (!$response and -e $tmpErrorFile and -s $tmpErrorFile)) {
+	if (($? > 0 and ($?%256) > 0) or (-e $tmpErrorFile and -s $tmpErrorFile)) {
 		unless ($Configuration::callerEnv eq 'BACKGROUND') {
 			if (-e $tmpErrorFile and -s $tmpErrorFile){
 				if (!open(FH, "<", $tmpErrorFile)) {
@@ -8805,18 +8002,17 @@ CONNECT:
 			#retreat(["\n", 'please_check_internet_con_and_try']) if ($response eq '' && !isInternetAvailable());
 			return {STATUS => Configuration::FAILURE, DATA => 'please_check_internet_con_and_try'} if ($response eq '' && !isInternetAvailable());
 
-			# if (($response =~ /Could not resolve proxy|Failed to connect to .* port [0-9]+: Connection refused|Failed connect to .* Connection refused|Connection timed out|response code said error|407 Proxy Authentication Required|No route to host|Could not resolve host/)) {
-			if($response =~ /$Configuration::proxyNetworkError/i) {
-				# return {STATUS => Configuration::FAILURE, DATA => 'kindly_verify_ur_proxy'}; #Commented by Senthil:14-Mar-2019
-				if(!defined($_[2])){
-					display(["\n", 'kindly_verify_ur_proxy']);
-					unlink($tmpErrorFile) if (-e $tmpErrorFile);
-					unless(askProxyDetails()) {
-						unlink($dataFile);
-						return {STATUS => Configuration::FAILURE, DATA => 'failed due to proxy'};
-					}
-					return request($_[0], "NoRetry");
-				}
+			if (($response =~ /Could not resolve proxy|Failed to connect to .* port [0-9]+: Connection refused|Failed connect to .* Connection refused|Connection timed out|response code said error|407|No route to host|Could not resolve host/)) {
+
+				#retreat(["\n", 'kindly_verify_ur_proxy']) if (defined($_[2]));
+				return {STATUS => Configuration::FAILURE, DATA => 'kindly_verify_ur_proxy'};
+
+				display(["\n", 'kindly_verify_ur_proxy']);
+				#askProxyDetails() or retreat('failed due to proxy');
+				askProxyDetails() or return {STATUS => Configuration::FAILURE, DATA => 'failed due to proxy'};
+				return request($_[0], "NoRetry");
+
+				# saveUserConfiguration() or retreat('failed to save user configuration');
 			}
 			elsif ($response =~ /SSH-2.0-OpenSSH_6.8p1-hpn14v6|Protocol mismatch/) {
 				#retreat($response);
@@ -8829,31 +8025,9 @@ CONNECT:
 		unlink($dataFile);
 		return {STATUS => Configuration::FAILURE, DATA => ''};
 	}
-	elsif ($response eq '' && getUserConfiguration('PROXYIP') and !defined($_[2])) {
-		unless ($Configuration::callerEnv eq 'BACKGROUND') {
-			display(["\n", 'kindly_verify_ur_proxy']);
-			unless(askProxyDetails()) {
-				unlink($tmpErrorFile) if (-e $tmpErrorFile);
-				unlink($dataFile);
-				return {STATUS => Configuration::FAILURE, DATA => 'failed due to proxy'};
-			}
-			return request($_[0], "NoRetry");
-		} else {
-			unlink($tmpErrorFile) if (-e $tmpErrorFile);
-			unlink($dataFile);
-			return {STATUS => Configuration::FAILURE, DATA => 'kindly_verify_ur_proxy'};
-		}
-	}
-
 	unlink($tmpErrorFile) if (-e $tmpErrorFile);
 	unlink($dataFile);
-
-	if (defined($_[1])) {
-		setUsername($args->{'data'}{'username'});#Added for Harish_2.22_05_3
-		saveUserConfiguration(); #Added to save proxy detail: Senthil
-	}
-
-	return {STATUS => Configuration::SUCCESS, DATA => JSON::from_json($response)} if ($args->{'json'} and $response ne '');
+	return {STATUS => Configuration::SUCCESS, DATA => JSON::from_json($response)} if ($args->{'json'});
 
 	return {STATUS => Configuration::SUCCESS, DATA => $response};
 }
@@ -8878,7 +8052,7 @@ sub removeIDriveCRON {
 			foreach my $idriveUser (keys %{$crontab{$mcUser}}){
 				if ($crontab{$mcUser}{$idriveUser}{'dashboard'}{'dashboard'}{'cmd'}){
 					my $dashboardCmd = $crontab{$mcUser}{$idriveUser}{'dashboard'}{'dashboard'}{'cmd'};
-					if ($dashboardCmd ne '' && $dashboardCmd =~ /dashboard.pl|cron.pl/) {
+					if ($dashboardCmd ne '' && $dashboardCmd =~ /dashboard.pl/) {
 						my $scriptPath = dirname($dashboardCmd) . '/';
 						if ($scriptPath eq $currentDir || !-e $scriptPath) {
 							delete $crontab{$mcUser}{$idriveUser};
@@ -8902,7 +8076,6 @@ sub removeIDriveCRON {
 			if ($cronLinkRemoved) {
 				my $cmd = "ln -s '" . $existingScriptDir . $Configuration::idriveScripts{'cron'} . "' '$Configuration::cronLinkPath'";
 				chmod($Configuration::execPermission, $Configuration::cronLinkPath);
-				$cmd = updateLocaleCmd($cmd);
 				system($cmd);
 			}
 
@@ -8924,8 +8097,7 @@ sub removeIDriveCRON {
 		# execute stop commands
 		if (@{$opconf->{'stopcmd'}}) {
 			for my $i (0 .. $#{$opconf->{'stopcmd'}}) {
-				my $opConfStopCmd = updateLocaleCmd($opconf->{'stopcmd'}[$i]);
-				`$opConfStopCmd 1>/dev/null 2>/dev/null`;
+				`$opconf->{'stopcmd'}[$i] 1>/dev/null 2>/dev/null`;
 			}
 		}
 
@@ -8971,7 +8143,7 @@ sub removeIDriveCRON {
 		my $fc		= getFileContents('/etc/crontab');
 		my @fch		= split("\n", $fc);
 		for my $ind (0 .. $#fch) {
-			splice(@fch, $ind, 1) if (index($fch[$ind], $Configuration::cronLinkPath) != -1);
+			splice(@fch, $ind, 1) if (index($fch[$ind], $Configuration::cronLinkPath) != -1)
 		}
 
 		$fc = join("\n", @fch);
@@ -8995,8 +8167,8 @@ sub removeBKPSetSizeCache {
 	my $backupsizelock = getBackupsetSizeLockFile($_[0]);
 	return 0 if (isFileLocked($backupsizelock));
 
-	my $bsf = getJobsPath($_[0], 'file');
-	unlink("$bsf.json") if (-f "$bsf.json");
+	my $backupsizefile = getCatfile(getUsersInternalDirPath($_[0]), $Configuration::backupsizefile);
+	unlink($backupsizefile) if (-f $backupsizefile);
 
 	return 1;
 }
@@ -9007,9 +8179,8 @@ sub removeBKPSetSizeCache {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub reCalculateStorageSize {
-	my $calculateStorageSize = "'$appPath/".$Configuration::idriveScripts{'utility'} . '\' GETQUOTA';
-	my $calculateStorageSizeCmd = updateLocaleCmd("$Configuration::perlBin $calculateStorageSize");
-	my $runCmd = `$calculateStorageSizeCmd 2>/dev/null&`; #2>/dev/null
+	my $calculateStorageSize = "$appPath/".$Configuration::idriveScripts{'utility'}." GETQUOTA";
+	my $runCmd = `$Configuration::perlBin $calculateStorageSize 2>/dev/null&`; #2>/dev/null
 	return 0;
 
 	# my $csf = getCachedStorageFile();
@@ -9048,24 +8219,21 @@ sub runEVS {
 	$tempUtf8File    = $_[3]    if (defined($_[3]));
 	$extras         .= ";$_[4]" if (defined($_[4]));
 
-RETRY:
 	my ($idevscmdout,$idevcmd) = ('')x 2;
 	my $evsPath = getEVSBinaryFile();
 	if (-e $evsPath) {
 		$idevcmd = ("'$evsPath' --utf8-cmd='$tempUtf8File'");
 		if ($runInBackground) {
-			my $idevSysCmd = updateLocaleCmd("$idevcmd $extras");
-			$idevscmdout = system("($idevSysCmd) 1>/dev/null 2>/dev/null $runInBackground");
+			$idevscmdout = system("($idevcmd $extras) 1>/dev/null 2>/dev/null $runInBackground");
 		}
 		else {
-			$idevcmd = updateLocaleCmd($idevcmd);
 			$idevscmdout = `$idevcmd 2>&1`;
 		}
 
 		my @errArr;
 		#if (($? > 0) and !$isErrorFile and $idevscmdout !~ /no version information available/) {
 		# Modified by Senthil for Harish_2.17_55_2
-		if (!$isErrorFile and $idevscmdout ne '' and $idevscmdout !~ /no version information available/) {
+		if (!$isErrorFile and $idevscmdout !~ /no version information available/) {
 			my $msg = 'execution_failed';
 			if (($idevscmdout =~ /\@ERROR: PROTOCOL VERSION MISMATCH on module ibackup/ or
 						$idevscmdout =~ /Failed to validate. Try again/) and
@@ -9081,18 +8249,9 @@ RETRY:
 				elsif ($idevscmdout =~ /private encryption key must be between 4 and 256 characters in length/) {
 					$msg = 'private_encryption_key_must_be_between_4_and_256_characters_in_length';
 				}
-				elsif($idevscmdout =~ /$Configuration::proxyNetworkError/i) {
-				# elsif ($idevscmdout =~ /(failed to connect|Connection refused|407 Proxy Authentication Required|Could not resolve proxy|Could not resolve host|No route to host)/i) {
+				elsif ($idevscmdout =~ /(failed to connect|Connection refused|407|Could not resolve proxy|Could not resolve host|No route to host)/i) {
 					$msg = 'kindly_verify_ur_proxy';
-				}
-				elsif ($idevscmdout =~ /Invalid username or Password/) {
-					$msg = getStringConstant('invalid_username_or_password').getStringConstant('logout_&_login_&_try_again');
-				}
-				elsif ($idevscmdout =~ /unauthorized user|user information not found/i) {
-					saveServerAddress(fetchServerAddress());
-					goto RETRY;
-				}
-				else {
+				} else {
 					traceLog($idevscmdout);
 					$msg = checkErrorAndLogout($idevscmdout,1);
 				}
@@ -9153,7 +8312,6 @@ sub runningJobHandler {
 			display([qq(\n$LS{'terminating_your_title'} $jobMode $jobType $LS{'job'}. $LS{'please_wait_title'}...)]);
 			my $jobTerminationScript = getScript('job_termination', 1);
 			my $jobTermCmd = "$Configuration::perlBin $jobTerminationScript ".lc($jobType)." $username";
-			$jobTermCmd = updateLocaleCmd($jobTermCmd);
 			my $res = system($jobTermCmd);
 			if ($res != 0) {
 				traceLog(qq($LS{'error_in_terminating'} $jobMode $jobType $LS{'job'}.));
@@ -9191,26 +8349,24 @@ sub readFinalStatus
 {
 	my %statusFinalHash = 	(	"FILES_COUNT_INDEX" => 0,
 						"SYNC_COUNT_FILES_INDEX" => 0,
-						"FAILEDFILES_LISTIDX" => 0,
+						"FAILED_COUNT_FILES_INDEX" => 0,
 						"ERROR_COUNT_FILES" => 0,
 						"COUNT_FILES_INDEX" => 0,
 						"DENIED_COUNT_FILES" => 0,
 						"MISSED_FILES_COUNT" => 0,
 						"EXIT_FLAG_INDEX" => 0,
-						"TOTAL_TRANSFERRED_SIZE" => 0,
 					);
 	my $statusFilePath  = $Configuration::jobRunningDir."/".$Configuration::statusFile;
 	for(my $i=1; $i<= $Configuration::totalEngineBackup; $i++){
 		if (-e $statusFilePath."_$i" and -f $statusFilePath."_$i" and -s $statusFilePath."_$i" ) {
 			readStatusFile($i);
-			$statusFinalHash{'FILES_COUNT_INDEX'} += $Configuration::statusHash{'FILES_COUNT_INDEX'} if(defined($Configuration::statusHash{'FILES_COUNT_INDEX'}));
+			$statusFinalHash{'FILES_COUNT_INDEX'} += $Configuration::statusHash{'FILES_COUNT_INDEX'};
 			$statusFinalHash{'SYNC_COUNT_FILES_INDEX'} += $Configuration::statusHash{'SYNC_COUNT_FILES_INDEX'};
-			$statusFinalHash{'FAILEDFILES_LISTIDX'} += $Configuration::statusHash{'FAILEDFILES_LISTIDX'};
+			$statusFinalHash{'FAILED_COUNT_FILES_INDEX'} += $Configuration::statusHash{'FAILED_COUNT_FILES_INDEX'};
 			$statusFinalHash{'ERROR_COUNT_FILES'} += $Configuration::statusHash{'ERROR_COUNT_FILES'};
 			$statusFinalHash{'DENIED_COUNT_FILES'} += $Configuration::statusHash{'DENIED_COUNT_FILES'};
 			$statusFinalHash{'MISSED_FILES_COUNT'} += $Configuration::statusHash{'MISSED_FILES_COUNT'};
 			$statusFinalHash{'COUNT_FILES_INDEX'} += $Configuration::statusHash{'COUNT_FILES_INDEX'};
-			$statusFinalHash{'TOTAL_TRANSFERRED_SIZE'} += $Configuration::statusHash{'TOTAL_TRANSFERRED_SIZE'};
 
 			if (!$statusFinalHash{'EXIT_FLAG_INDEX'} or !defined $Configuration::statusHash{'EXIT_FLAG_INDEX'}){
 				$statusFinalHash{'EXIT_FLAG_INDEX'} = $Configuration::statusHash{'EXIT_FLAG_INDEX'};
@@ -9295,7 +8451,6 @@ sub restartIDriveCRON {
 	if (%{$opconf} && $opconf->{'restartcmd'} ne '') {
 		unlink($Configuration::cronlockFile);
 		my $restartcmd = getSudoSuCMD("$opconf->{'restartcmd'} 1>/dev/null 2>/dev/null", $sudoprompt, 1);
-		$restartcmd = updateLocaleCmd($restartcmd);
 		my $res = system($restartcmd);
 		sleep(5) unless($res > 0);
 	} else {
@@ -9362,7 +8517,7 @@ sub readCrontab {
 	my $crontabFilePath = "/etc/crontab";
 	if (-l $crontabFilePath){
 		my $crontabFilePath_bak = $crontabFilePath."_bak";
-		my $res = system(updateLocaleCmd("mv $crontabFilePath $crontabFilePath_bak 2>/dev/null"));
+		my $res = system("mv $crontabFilePath $crontabFilePath_bak 2>/dev/null");
 		if ($res ne "0") {
 			traceLog("Unable to move crontab link file");
 		}
@@ -9394,19 +8549,16 @@ sub removeItems {
 	my @list = ();
 
 	if (reftype(\$path) eq 'SCALAR') {
-		chomp($path);
 		push(@list, $path);
 	}
 	else {
 		for my $i (0 .. $#{$path}) {
-			next unless(defined($path->[$i]));
-			chomp($path->[$i]);
 			push(@list, $path->[$i]);
 		}
 	}
 
 	foreach my $pathVal (@list) {
-		my $val = $pathVal || '';
+		my $val = $pathVal;
 
 		next if (($val eq "/") or ($val eq "")or ($val eq "*"));
 		$val = getItemFullPath($val);
@@ -9427,7 +8579,7 @@ sub removeItems {
 			$cmd .= " -rf '$val'$lastItem";
 		}
 		elsif (-f $val) {
-			$cmd .= " -f '$val'";
+			$cmd .= " '$val'";
 		}
 		else {
 			# could be a link or may not exist
@@ -9436,7 +8588,6 @@ sub removeItems {
 		if ($cmd ne 'rm') {
 			my $traceLog = "/tmp/idriveTraceLog.txt";
 			writeToTrace($traceLog, $callerInfo.$val.$lastItem."\n");
-			$cmd = updateLocaleCmd($cmd);
 			system($cmd);
 		}
 	}
@@ -9465,10 +8616,10 @@ sub removeUsersCronEntry {
 # Modified By		: Sabin Cheruvattil
 #*****************************************************************************************************/
 sub removeIDriveUserFromUsersList {
-	my $userfile = getCatfile(getServicePath(), $Configuration::cachedIdriveFile);
+	my $userfile = Helpers::getCatfile(getServicePath(), $Configuration::cachedIdriveFile);
 	return unless(-f $userfile);
 
-	my $usrtxt = getFileContents($userfile);
+	my $usrtxt = Helpers::getFileContents($userfile);
 	if ($usrtxt =~ m/^\{/) {
 		$usrtxt = JSON::from_json($usrtxt);
 		if ($usrtxt->{$Configuration::mcUser}){
@@ -9483,22 +8634,17 @@ sub removeIDriveUserFromUsersList {
 # Added By				  : Senthil Pandian
 #*****************************************************************************************************/
 sub requestViaUtility {
-	my $paramFilePath = getCatfile(getServicePath(), $Configuration::utilityRequestFile);
-	$paramFilePath = getCatfile(getUserProfilePath(), $Configuration::utilityRequestFile) if (-d getUserProfilePath());
-	if ($Configuration::appType eq 'IDrive' and hasStaticPerlBinary()){
+	my $paramFilePath = Helpers::getCatfile(getServicePath(), $Configuration::utilityRequestFile);
+	$paramFilePath = Helpers::getCatfile(getUserProfilePath(), $Configuration::utilityRequestFile) if(-d getUserProfilePath());
+	if(-e getIDrivePerlBin()){
 		fileWrite($paramFilePath,JSON::to_json($_[0]));
-		my $tmpErrorFile  = (-e getServicePath())?getServicePath()."/".time.$Configuration::errorFile:"/tmp/".time.$Configuration::errorFile;
-		my $cmd = (getIDrivePerlBin() . ' ' .getScript('utility', 1). ' SERVERREQUEST '."'$paramFilePath' '$tmpErrorFile' 2>/dev/null");
-		$cmd = updateLocaleCmd($cmd);
-		# my $perlOutput = `$cmd`;
-		system($cmd);
-		my $perlOutput = getFileContents($tmpErrorFile);
-		unlink($paramFilePath);
-		unlink($tmpErrorFile);
-		if ($perlOutput eq '') {
+		my $cmd = (getIDrivePerlBin() . ' ' .getScript('utility', 1) . ' SERVERREQUEST '." '".$paramFilePath."' 2>/dev/null");
+		my $perlOutput = `$cmd`;
+		if($perlOutput eq ''){
 			traceLog('failed_to_run_script',getScript('utility', 1),". Reason:".$?);
-			retreat(['failed_to_connect', '. ', 'please_try_again']);
+			retreat(['failed_to_connect',". Please try again."]);
 		}
+		unlink($paramFilePath);
 		return \%{JSON::from_json($perlOutput)};
 	} else {
 		my $res = request($_[0]);
@@ -9511,12 +8657,9 @@ sub requestViaUtility {
 # Subroutine			: saveLog
 # Objective				: Save log files to cloud
 # Added By				: Yogesh Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub saveLog {
-	return if ($Configuration::appType eq 'IBackup');
-	my $cmd = updateLocaleCmd(getIDrivePerlBin() . ' ' .getScript('utility', 1) . ' UPLOADLOG ' . qq('$_[0]')  . " 2> /dev/null &");
-	system($cmd);
+	system(getIDrivePerlBin() . ' ' .getScript('utility', 1) . ' UPLOADLOG ' . qq('$_[0]')  . " 2> /dev/null &");
 }
 
 #*****************************************************************************************************
@@ -9525,8 +8668,7 @@ sub saveLog {
 # Added By				: Senthil Pandian
 #****************************************************************************************************/
 sub saveMigratedLog {
-	my $cmd = updateLocaleCmd( 'perl ' .getScript('utility', 1) .' UPLOADMIGRATEDLOG ' . " 2> /dev/null &");
-	system($cmd);
+	system(getIDrivePerlBin() . ' ' .getScript('utility', 1) . ' UPLOADMIGRATEDLOG ' . " 2> /dev/null &");
 }
 
 #*****************************************************************************************************
@@ -9540,65 +8682,84 @@ sub checkEmailNotify {
 	my ($jobType, $jobName) = ($_[0],$_[1]);
 	$jobType = "backup";
 	my $emailStatus = getCrontab($jobType, $jobName, '{settings}{emails}{status}') ;
-	return "DISABLED" if ($emailStatus eq 'disabled') ;
-	return ($emailStatus, getCrontab($jobType, $jobName, '{settings}{emails}{ids}')) ;
+#TBE
+	my $email = "" ;
+	if ( defined $emailStatus ) {
+		return "DISABLED" if ($emailStatus eq 'disabled') ;
+		$email = getCrontab($jobType, $jobName, '{settings}{emails}{ids}');
+	} else {
+		$email = Helpers::getUserConfiguration('EMAILADDRESS');
+		if ($email eq "") {
+			$emailStatus = "DISABLED";
+		} else {
+			$emailStatus = "ENABLED";
+		}
+	}
+	return ($emailStatus,$email) ;
 }
 
 #*****************************************************************************************************
-# Subroutine			: sendMail
-# Objective				: sends a mail to the user in case of successful/canceled/ failed scheduled backup/restore.
-# Added By				: Dhritikana
-# Modified By			: Vijay Vinoth, Yogesh Kumar
-#****************************************************************************************************/
+# Subroutine Name         : sendMail
+# Objective               : sends a mail to the user in case of successful/canceled/ failed scheduled backup/restore.
+# Added By                : Dhritikana
+# Modified By			  : Vijay Vinoth
+#********************************************************************************************************************
 sub sendMail {
-	if (lc($_[0]->{'serviceType'}) eq 'manual') {
+	my $taskType = $_[0];
+	my $jobType  = $_[1];
+	if (lc($taskType) eq "manual") {
 		return;
 	}
 
-	my $jobName = '';
-	if ($_[0]->{'jobType'} eq 'Express Backup') {
-		$jobName = 'local_backupset';
+	my $jobName = "";
+	if ($jobType eq "backup") {
+		$jobName = "default_backupset";
 	}
-	else {
-		$jobName = 'default_backupset';
+	elsif ($jobType eq "Express Backup") {
+		$jobName = "local_backupset";
+	} else {
+		$jobName = "default_backupset";
 	}
-
-	my @emailSettings = &checkEmailNotify($_[1]->{'jobType'}, $jobName );
-
-	if ($emailSettings[0] eq 'DISABLED') {
-		return 1;
-	}
-
-	if (($emailSettings[0] eq 'notify_failure') and ($_[0]->{'jobStatus'} eq 'success')) {
-		return 0;
+	my @responseData = &checkEmailNotify($jobType, $jobName );
+	my $notifyEmailStatus = $responseData[0];
+	if ($notifyEmailStatus eq "DISABLED") {
+		return;
 	}
 
-	my $configEmailAddress = $emailSettings[1] if (defined $emailSettings[1]);
+	my $configEmailAddress = $responseData[1] if (defined $responseData[1]);
+	my $jobStatus = (split '\_', $Configuration::outputFilePath)[-2];
+	$jobStatus = lc $jobStatus;
+
+	if ($notifyEmailStatus eq 'notify_failure'){
+		return if (index($jobStatus, 'success') != -1);
+	}
 
 	my $finalAddrList = getFinalMailAddrList($configEmailAddress);
-	if ($finalAddrList eq 'NULL') {
+	if ($finalAddrList eq "NULL") {
 		return;
 	}
-
-	my $uname = getUsername();
-	my $pData = &getPdata($uname);
+	my $userName      = getUsername();
+	my $pData = &getPdata("$userName");
 	if ($pData eq ''){
-		traceLog(['failed_to_send_mail', 'password_missing']);
+		traceLog($LS{'failed_to_send_mail'}.$LS{'password_missing'}, __FILE__, __LINE__);
 		return;
 	}
 
+	my $sender = "support\@".$Configuration::servicePathName.".com";
 	my $content = "";
+	my $subjectLine = $_[2];
+	my $operationData = $_[3];
+	my $backupRestoreFileLink = $_[4];
 
 	$content = "Dear $Configuration::appType User, \n\n";
-	$content .= "Ref: Username - $uname \n";
+	$content .= "Ref: Username - $userName \n";
 
-	if (exists ($_[0]->{'errorMsg'}) and ($_[0]->{'errorMsg'} eq 'NOBACKUPDATA')) {
+	if (defined($operationData) and $operationData eq 'NOBACKUPDATA'){
 		$content .= $LS{'unable_to_perform_backup_operation'};
 	}
-	elsif (exists ($_[0]->{'errorMsg'}) and ($_[0]->{'errorMsg'} eq 'NORESTOREDATA')) {
+	elsif (defined($operationData) and $operationData eq 'NORESTOREDATA'){
 		$content .= $LS{'unable_to_perform_restore_operation'};
-	}
-	else {
+	} else {
 		$content .= $Configuration::mailContentHead;
 		$content .= $Configuration::mailContent;
 	}
@@ -9608,16 +8769,15 @@ sub sendMail {
 	$content .= "Version: $Configuration::version\n";
 	$content .= "Release date: $Configuration::releasedate" ;
 
-	my $response = request({
-			host => $Configuration::notifyPath,
-			method => 'POST',
-			data => {
-				username => $uname, password => $pData,
-				to_email => $finalAddrList, subject => $_[0]->{'subject'},
-				content => $content
-			}
-		});
-	return 1;
+	#URL DATA ENCODING#
+	foreach ($userName,$pData,$finalAddrList,$subjectLine,$content) {
+		$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
+	}
+
+	my $data = 'username='.$userName.'&password='.$pData.'&to_email='.$finalAddrList.'&subject='.$subjectLine.'&content='.$content;
+	my $curlCmd = formSendMailCurlcmd($data);
+
+	my $sendMailMsg = `$curlCmd`;
 }
 
 #*****************************************************************************************************
@@ -9628,19 +8788,19 @@ sub sendMail {
 sub setRestoreFromLocPrompt {
 	my $prevStatus  = 'enabled';
 	my $statusQuest = 'disable';
-	if (getUserConfiguration('RESTORELOCATIONPROMPT') ne '' || defined($_[0])) {
-		if (!getUserConfiguration('RESTORELOCATIONPROMPT') && !defined($_[0])) {
+	if (Helpers::getUserConfiguration('RESTORELOCATIONPROMPT') ne '' || defined($_[0])) {
+		if (!Helpers::getUserConfiguration('RESTORELOCATIONPROMPT') && !defined($_[0])) {
 			$prevStatus  = 'disabled';
 			$statusQuest = 'enable';
 		}
-		display(["\n",'restore_loc_prompt_'.$prevStatus," ", 'do_you_want_to_'.$statusQuest], 1);
-		my $choice = getAndValidate(['enter_your_choice'], "YN_choice", 1);
+		Helpers::display(["\n",'restore_loc_prompt_'.$prevStatus," ", 'do_you_want_to_'.$statusQuest], 1);
+		my $choice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
 		$choice = lc($choice);
 		return 1 if ($choice eq "n");
 	}
 
-	setUserConfiguration('RESTORELOCATIONPROMPT', ($prevStatus eq 'disabled')? 1 : 0);
-	display(['restore_loc_prompt_' . (($prevStatus eq 'disabled')? 'enabled' : 'disabled')]);
+	Helpers::setUserConfiguration('RESTORELOCATIONPROMPT', ($prevStatus eq 'disabled')? 1 : 0);
+	Helpers::display(['restore_loc_prompt_' . (($prevStatus eq 'disabled')? 'enabled' : 'disabled')]);
 	return 1;
 }
 
@@ -9680,7 +8840,7 @@ sub setUploadMultipleChunks {
 	my $promptSelected;
 	my $chunksenabled = 1;
 	if (getUserConfiguration('ENGINECOUNT') ne '') {
-		$chunksenabled = (getUserConfiguration('ENGINECOUNT') == $Configuration::minEngineCount)? 0 : 1;
+		$chunksenabled = (getUserConfiguration('ENGINECOUNT') == 2)? 0 : 1;
 		display(["\n", "upload_multiple_chunks_$chunksenabled", " ", 'do_you_want_to_' . ($chunksenabled? 'disable' : 'enable')]);
 		my $choice = getAndValidate(['enter_your_choice'], "YN_choice", 1);
 		return 1 if (lc($choice) eq "n");
@@ -9710,6 +8870,7 @@ sub setUsername {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub setTotalStorage {
+	$totalStorage_Raw_TBE = $_[0];
 	$totalStorage = getHumanReadableSizes($_[0]);
 	return 1;
 }
@@ -9720,7 +8881,18 @@ sub setTotalStorage {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub setStorageUsed {
+	$storageUsed_Raw_TBE = $_[0];
 	$storageUsed = getHumanReadableSizes($_[0]);
+	return 1;
+}
+
+#*****************************************************************************************************
+# Subroutine			: setFreeStorage
+# Objective				: Required
+# Added By				: TBE
+#****************************************************************************************************/
+sub setFreeStorage {
+# Dummy function : calculated value
 	return 1;
 }
 
@@ -9777,7 +8949,7 @@ sub setUserConfiguration {
 				}
 			}
 
-			if ($userConfiguration{$keystring}{'VALUE'} ne $data->[$i]{$key}) {
+			unless ($userConfiguration{$keystring}{'VALUE'} eq $data->[$i]{$key}) {
 				$userConfiguration{$keystring}{'VALUE'} = $data->[$i]{$key};
 				$modifiedUserConfig{$keystring}{'VALUE'} = $data->[$i]{$key};
 				$isNothingFound = 0 if ($isNothingFound);
@@ -9886,7 +9058,7 @@ sub saveUserConfiguration {
 	return 1 unless ($Configuration::isUserConfigModified);
 	loadUserConfiguration();
 	foreach (keys %modifiedUserConfig) {
-		next if ($_ !~ m/PROXY|EMAILADDRESS|BACKUPLOCATION/ && $modifiedUserConfig{$_}{'VALUE'} eq '');
+		next if ($_ !~ m/PROXY/ && $modifiedUserConfig{$_}{'VALUE'} eq '');
 		$userConfiguration{$_}{'VALUE'} = $modifiedUserConfig{$_}{'VALUE'};
 	}
 
@@ -9898,14 +9070,8 @@ sub saveUserConfiguration {
 		return 0 if (validateUserConfigurations() != 1);
 	}
 	if (open(my $fh, '>', $ucf)) {
-		unless (flock($fh, LOCK_EX)) {
-			traceLog("Cannot lock file $ucf $!\n");
-			close($fh);
-			return 0;
-		}
 		print $fh encryptString(JSON::to_json(\%userConfiguration));
 		close($fh);
-
 		unless (defined($_[0]) and $_[0] == 0) {
 			loadNotifications() and setNotification('get_user_settings') and saveNotifications();
 		}
@@ -9965,18 +9131,19 @@ sub setRestoreFromLocation {
 	my $removeDeviceID = (split('#', $rfl))[-1];
 	display(["\n",'your_restore_from_device_is_set_to',(" \"" . $removeDeviceID . "\". "),'do_u_want_to_edit'],1);
 	my $choice = getAndValidate(['enter_your_choice'], "YN_choice", 1);
-	if (lc($choice) eq "y") {
+	if ($choice eq "y") {
+
 		if (getUserConfiguration('DEDUP') eq 'on') {
 			display(["\n",'loading_your_account_details_please_wait',"\n"],1);
 
 			my @devices = fetchAllDevices();
 			if ($devices[0]{'STATUS'} eq Configuration::FAILURE) {
 				if ($devices[0]{'MSG'} =~ 'No devices found') {
-					retreat('your_account_not_configured_properly');
+					retreat('failed');
 				}
 			}
 			elsif ($devices[0]{'STATUS'} eq Configuration::SUCCESS) {
-				linkBucket('restore', \@devices) or retreat('please_try_again');
+				linkBucket('restore', \@devices) or retreat("Please try again.");
 				return 1;
 			}
 		}
@@ -10035,54 +9202,39 @@ sub setRestoreFromLocation {
 # Subroutine			: setBackupToLocation
 # Objective				: Set backup to location for the current user
 # Added By				: Yogesh Kumar
-# Modified By			: Anil Kumar[26/04/2018], Senthil Pandian
+# Modified By			: Anil Kumar[26/04/2018]
 #****************************************************************************************************/
 sub setBackupToLocation {
 	if (getUserConfiguration('DEDUP') eq 'on') {
 
-		Helpers::display('identifying_your_backup_location_please_wait');
-		my @result = fetchAllDevices();
-		#Added to consider the bucket type 'D' only
-		my @devices;
-		foreach (@result){
-			next if(!defined($_->{'bucket_type'}) or $_->{'bucket_type'} !~ /D/);
-			push @devices, $_;
-		}
-
-		unless(scalar(@devices)>0) {
-			Helpers::display('no_backup_location_found_please_create_new_one');
-			return createBucket();			
-		}
+		my @devices = fetchAllDevices();
 
 		if ($devices[0]{'STATUS'} eq Configuration::FAILURE) {
 			if ($devices[0]{'MSG'} =~ 'No devices found') {
-				Helpers::display('no_backup_location_found_please_create_new_one');
 				return createBucket();
-			}
-			else {
-				display($devices[0]{'MSG'}, 1);
+			} else{
+				display($devices[0]{'MSG'},1);
 			}
 		}
 		elsif ($devices[0]{'STATUS'} eq Configuration::SUCCESS) {
-			unless (findMyDevice(\@devices, 'editMode')) {
-				my $status = askToCreateOrSelectADevice(\@devices);
-				retreat('failed_to_set_backup_location') unless($status);
-				return $status;
-			}
+			findMyDevice(\@devices) or askToCreateOrSelectADevice(\@devices) or retreat('failed');
+
 			return 1;
 		}
 	}
 	elsif (getUserConfiguration('DEDUP') eq 'off') {
+		#my $backupLoc = validateBackupLoction();
 		my $backupLoc = getAndValidate(["\n", 'enter_your_ndedup_backup_location_optional',": "], "backup_location", 1);
-
-		display('setting_up_your_backup_location', 1);
 		if ($backupLoc eq '') {
 			$backupLoc = $Configuration::hostname;
 			$backupLoc =~ s/[^a-zA-Z0-9_-]//g;
-			$backupLoc = "/".$backupLoc;
 		}
-		else {
-			$backupLoc =~ s/^\/+$|^\s+\/+$//g; ## Removing if only "/"(s) to avoid root
+
+		display('setting_up_your_backup_location',1);
+		unless ($backupLoc) {
+			$backupLoc = $Configuration::hostname;
+			$backupLoc =~ s/[^a-zA-Z0-9_-]//g;
+			$backupLoc = "/".$backupLoc;
 		}
 		createUTF8File('CREATEDIR', $backupLoc) or
 			retreat('failed_to_create_utf8_file');
@@ -10104,26 +9256,20 @@ sub setBackupToLocation {
 # Subroutine			: setNotification
 # Objective				: set notification value to notifications
 # Added By				: Yogesh Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub setNotification {
-	return if($Configuration::appType eq 'IBackup');
-
 	if (not exists $notifications{$_[0]} and exists $Configuration::notificationsSchema{$_[0]}) {
-		$notifications{$_[0]}        = $Configuration::notificationsSchema{$_[0]};
-		$modifiedNotifications{$_[0]}= $Configuration::notificationsSchema{$_[0]};
+		$notifications{$_[0]} = $Configuration::notificationsSchema{$_[0]};
 	}
 
 	if (exists $notifications{$_[0]}) {
 		if (defined($_[1])) {
-			$notifications{$_[0]}         = $_[1];
-			$modifiedNotifications{$_[0]} = $_[1];
+			$notifications{$_[0]} = $_[1];
 		}
 		else {
 			my $randomChars = '';
 			$randomChars .= sprintf("%x", rand 16) for 1..9;
-			$notifications{$_[0]}         = $randomChars;
-			$modifiedNotifications{$_[0]} = $randomChars;
+			$notifications{$_[0]} = $randomChars;
 		}
 		return 1;
 	}
@@ -10134,60 +9280,15 @@ sub setNotification {
 # Subroutine			: saveNotifications
 # Objective				: save notification values to a file
 # Added By				: Yogesh Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub saveNotifications {
-	return if ($Configuration::appType eq 'IBackup');
-
 	my $nf = getNotificationFile();
 
-	if (open(my $fh, '+<', $nf)) {
-		unless (flock($fh, LOCK_EX)) {
-			traceLog("Cannot lock file $nf $!\n");
-			close($fh);
-			return 0;
-		}
-		my $nc = <$fh>;
-		seek $fh, 0, 0;
-		truncate $fh, 0;
-		if ($nc and $nc ne '') {
-			%notifications = %{JSON::from_json($nc)};
-		}
-		else {
-			%notifications = ();
-		}
-
-		foreach(keys %modifiedNotifications) {
-			if (exists $Configuration::notificationsSchema{$_}) {
-				$notifications{$_} = $modifiedNotifications{$_};
-			}
-		}
-
+	if (open(my $fh, '>', $nf)) {
 		print $fh JSON::to_json(\%notifications);
 		close($fh);
 		return 1;
 	}
-
-	return 0;
-}
-
-#*****************************************************************************************************
-# Subroutine			: saveNS
-# Objective				: save ns values to a file
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub saveNS {
-	return if ($Configuration::appType eq 'IBackup');
-	my $fh = shift;
-
-	my $nsf = getNSFile();
-
-	seek $fh, 0, 0;
-	truncate $fh, 0;
-
-	print $fh JSON::to_json(\%ns) if (%ns);
-	return 1;
-
 	return 0;
 }
 
@@ -10231,14 +9332,7 @@ sub setCrontab {
 #****************************************************************************************************/
 sub saveCrontab {
 	my $nf = getCrontabFile();
-	if (open(my $fh, '+<', $nf)) {
-		unless (flock($fh, LOCK_EX)) {
-			traceLog("Cannot lock file $nf $!\n");
-			close($fh);
-			return 0;
-		}
-		seek $fh, 0, 0;
-		truncate $fh, 0;
+	if (open(my $fh, '>', $nf)) {
 		print $fh encryptString(JSON::to_json(\%crontab));
 		close($fh);
 		chmod($Configuration::filePermission, $nf);
@@ -10255,6 +9349,7 @@ sub saveCrontab {
 # Modified By 			: Senthil Pandian
 #****************************************************************************************************/
 sub selectLogsBetween {
+	return Taryck::selectLogsBetween(@_);
 	my %logStat = ();
 	my %logFilenames = ();
 
@@ -10263,7 +9358,7 @@ sub selectLogsBetween {
 	}
 
 	#Added for Dashboard
-	if (!defined($_[0]) and defined($_[3])) {
+	if (!defined($_[0]) and defined($_[3])){
 		my $jobDir = (fileparse($_[3]))[0];
 		if ($jobDir =~ m/\/LOGS\//){
 			$jobDir =~ s/LOGS\///;
@@ -10320,7 +9415,7 @@ sub selectLogsBetween {
 			else {
 				$logFiles{$_} = {
 					'status' => $logFilenames{$_},
-					'datetime' => strftime("%m/%d/%Y %H:%M:%S", localtime($_))
+					'datetime' => strftime("%d/%m/%Y %H:%M:%S", localtime($_))
 				};
 			}
 		}
@@ -10339,7 +9434,7 @@ sub selectLogsBetween {
 # Modified By			: Yogesh Kumar, Senthil Pandian
 #****************************************************************************************************/
 sub stopDashboardService {
-	my ($mcUser, $scpath) = @_;
+	my ($mcUser, $scpath) = ($_[0], $_[1]);
 
 	# if any of the value is not defined, return
 	return 0 unless (defined($mcUser) && defined($scpath));
@@ -10355,12 +9450,12 @@ sub stopDashboardService {
 	my $dashboardPID = getCatfile($svfc, $Configuration::userProfilePath, $mcUser, $Configuration::dashboardpid);
 	return 0 unless (-f $dashboardPID and !-z $dashboardPID);
 
-	fileWrite($dashboardPID, '-1');
+	my $dashpid = getFileContents($dashboardPID);
+	Chomp(\$dashpid);
+	system("kill $dashpid 2>/dev/null");
 
-	while(isFileLocked($dashboardPID)) {
-		sleep(1);
-	}
-	return 1;
+	#sleep(1);
+	Helpers::sleepForMilliSec(250); # Sleep for 250 milliseconds
 }
 
 #*****************************************************************************************************
@@ -10372,7 +9467,7 @@ sub skipChildIfParentDirExists{
 	my %list = %{$_[0]};
 	foreach my $item (sort(keys %list)) {
 		foreach my $newItem (sort(keys %list)){
-			if ($list{$newItem}{'type'} eq 'f' ){
+			if($list{$newItem}{'type'} eq 'f' ){
 				next;
 			}
 			my $tempNewItem = quotemeta($newItem);
@@ -10408,18 +9503,9 @@ sub sendFailureNotice{
 #****************************************************************************************************/
 sub sleepForMilliSec {
 	my $sleepTime = $_[0];
-	$sleepTime = 1 if ($sleepTime < 1);
+	$sleepTime = 1 if($sleepTime < 1);
 	$sleepTime = ($sleepTime/1000);
 	select(undef, undef, undef, $sleepTime);
-}
-
-#*****************************************************************************************************
-# Subroutine			: saveAlertStatus
-# Objective				: Save alert status code
-# Added By				: Yogesh Kumar
-#****************************************************************************************************/
-sub saveAlertStatus {
-	fileWrite(getCatfile(getUserProfilePath(), $Configuration::alertStatusFile), ($_[0] || ''));
 }
 
 #------------------------------------------------- T -------------------------------------------------#
@@ -10471,7 +9557,6 @@ sub trimData {
 # Modified By     : Yogesh Kumar, Vijay Vinoth, Senthil Pandian
 #****************************************************************************************************/
 sub traceLog {
-	return 0 unless(-d getServicePath());
 	my $message = ($_[0])? $_[0] : '';
 	my $msg = "";
 	if (reftype(\$message) eq 'SCALAR') {
@@ -10504,17 +9589,12 @@ sub traceLog {
 
 	if (-e $traceLog && -s $traceLog >= $Configuration::maxLogSize) {
 		my $tempTrace = qq('$traceLog) . qq(_) . localtime() . qq(');
-		my $mvTraceLogcmd = updateLocaleCmd("mv '$traceLog' $tempTrace");
-		`$mvTraceLogcmd`;
+		`mv '$traceLog' $tempTrace`;
 	}
 
 	if (!-e $traceLog) {
 		writeToTrace($traceLog, qq($Configuration::appType ) . ucfirst($LS{'username'}) . qq(: ) .
-				(getUsername() or ucfirst($LS{'no_logged_in_user'})) . qq( \n), 1);
-		writeToTrace($traceLog, "Linux user     : $Configuration::mcUser\n", 1);
-		loadMachineHardwareName();
-		my $osd = getOSBuild();
-		writeToTrace($traceLog, "OS details     : $osd->{'os'}, $osd->{'build'}, $machineHardwareName\n\n", 1);
+					(getUsername() or ucfirst($LS{'no_logged_in_user'})) . qq( \n));
 		chmod $Configuration::filePermission, $traceLog;
 	}
 
@@ -10540,7 +9620,7 @@ sub terminateStatusRetrievalScript
 {
 	my $psOption		 = getPSoption();
 	my $statusScriptName = $Configuration::idriveScripts{'status_retrieval_script'};
-	my $statusScriptCmd  = updateLocaleCmd("ps $psOption | grep $statusScriptName | grep -v grep");
+	my $statusScriptCmd  = "ps $psOption | grep $statusScriptName | grep -v grep";
 
 	my $statusScriptRunning = `$statusScriptCmd`;
 	if ($statusScriptRunning ne "") {
@@ -10579,15 +9659,12 @@ sub unzip {
 	}
 
 	unless (defined($exDir)) {
-		$exDir = getCatfile($servicePath, $Configuration::downloadsPath);
+		$exDir = "$servicePath/$Configuration::downloadsPath";
 		createDir($exDir) or (display(["$exDir ", 'does_not_exists']) and return 0);
 	}
 
 	#print "Unziping the package... \n";
-	$exDir    = getECatfile($exDir);
-	$filename = getECatfile($filename);
-	my $unzipCmd = updateLocaleCmd("unzip -o $filename -d $exDir");
-	my $output = `$unzipCmd`;
+	my $output = `unzip -o '$filename' -d '$exDir'`;
 
 	if ($? > 0) {
 			traceLog($?);
@@ -10648,7 +9725,7 @@ sub updateUserDetail {
 			'device_name' => $device_name,
 			'device_id'   => $uniqueID,
 			'enabled'     => $enabled,
-			'os'          => $encodedOS,
+			'os' 		  => $encodedOS,
 			'version'     => $currentVersion
 		}
 	);
@@ -10761,13 +9838,13 @@ sub uploadMigratedLog {
 sub updateServerAddr {
 	my $idevsErrorFile  = $Configuration::jobRunningDir.'/'.$Configuration::evsErrorFile;
 	if (-e $idevsErrorFile and -s $idevsErrorFile > 0) {
-		my $errorPatternServerAddr = "unauthorized user|user information not found";
-		open EVSERROR, "<", $idevsErrorFile or traceLog("Failed to open $idevsErrorFile. Reason $!");
+		my $errorPatternServerAddr = "unauthorized user";
+		open EVSERROR, "<", $idevsErrorFile or traceLog("\n Failed to open error.txt\n", __FILE__, __LINE__);
 		my $errorContent = <EVSERROR>;
 		close EVSERROR;
 
 		if ($errorContent =~ m/$errorPatternServerAddr/){
-			$serverAddress = getServerAddress();
+			my $serverAddress = getServerAddress();
 			if ($serverAddress == ''){
 				#exit_cleanup($Configuration::errStr);
 				return 0;
@@ -10782,14 +9859,15 @@ sub updateServerAddr {
 # Subroutine Name         :	updateRetryCount
 # Objective               :	updates retry count based on recent backup files.
 # Added By                : Avinash
-# Modified By             : Dhritikana, Yogesh Kumar
+# Modified By             : Dhritikana
 #********************************************************************************************************/
-sub updateRetryCount() {
+sub updateRetryCount()
+{
 	my $curFailedCount = 0;
 	my $currentTime = time();
 	my $statusFilePath  = $Configuration::jobRunningDir."/".$Configuration::statusFile;
 
-	for (my $i=1; $i<= $Configuration::totalEngineBackup; $i++) {
+	for(my $i=1; $i<= $Configuration::totalEngineBackup; $i++){
 		if (-e $statusFilePath."_".$i  and  -s $statusFilePath."_".$i>0){
 			$curFailedCount = $curFailedCount+getParameterValueFromStatusFile('ERROR_COUNT_FILES',$i);
 			undef @Configuration::linesStatusFile;
@@ -10814,14 +9892,12 @@ sub updateRetryCount() {
 #*******************************************************************************************************
 # Subroutine Name         :	updateCronForOldAndNewUsers
 # Objective               :	Update cron details accordingly for old and new users at the time of account switching.
-# Added By                : Anil kumar
-# Modified By             : Yogesh Kumar, Senthil Pandian
+# Added By                : Anil kumar, Yogesh Kumar, Senthil Pandian
 #********************************************************************************************************/
 sub updateCronForOldAndNewUsers {
 	# update previous user status to logged out
 	setUsername($_[0]);
-	loadUserConfiguration();
-	my $errorMsg = 'operation_cancelled_by_user';
+
 	if (isLoggedin()) {
 		loadCrontab();
 		#createCrontab('otherInfo', {'settings' => {'status' => 'INACTIVE'}});
@@ -10829,21 +9905,13 @@ sub updateCronForOldAndNewUsers {
 		setCrontab('otherInfo', 'settings', {'status' => 'INACTIVE'}, ' ');
 		saveCrontab();
 
-		my $cmd = sprintf("%s %s 1 0 %s", $Configuration::perlBin, getScript('logout', 1), $errorMsg);
-		$cmd = updateLocaleCmd($cmd);
+		my $cmd = sprintf("%s %s 1 0", $Configuration::perlBin, getScript('logout', 1));
 		`$cmd`;
-		display(["\"$_[0]\"", ' ', 'is_logged_out_successfully']);
-	}
-	else {
-		my $cmd = sprintf("%s %s 'allOp' - 0 'allType' %s", $Configuration::perlBin, getScript('job_termination', 1),$Configuration::mcUser);
-		$cmd = updateLocaleCmd($cmd);
-		my $res = `$cmd $errorMsg 1>/dev/null 2>/dev/null`;
+		Helpers::display(["\"$_[0]\"", ' ', 'is_logged_out_successfully']);
 	}
 
-	unloadUserConfigurations(); #Added for Harish_2.22_05_3
 	#set back the user name to new user
 	setUsername($_[1]);
-	loadUserConfiguration();
 
 	return 0;
 }
@@ -10910,93 +9978,39 @@ sub updateExcludeFileset {
 
 #*****************************************************************************************************
 # Subroutine			: updateJobsFileset
-# Objective				: update *.json file, which contains more details of a file(ex: file/folder/undefined)
+# Objective				: update *.info file, which contains more details of a file(ex: file/folder/undefined)
 # Added By				: Yogesh Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub updateJobsFileset {
-	return 0 unless (-f $_[0]);
-	unless (-f "$_[0].json") {
-		if (open(my $filesetContentInfo, '>', "$_[0].json")) {
-			close($filesetContentInfo);
-		}
-		else {
-			traceLog("Cannot open file $_[0].json $!\n");
-		}
-	}
-
-	if (open(my $filesetContentInfo, '+<', ("$_[0].json")) and open(my $filesetContent, '+<', $_[0])) {
-		unless (flock($filesetContentInfo, LOCK_EX)) {
-			traceLog("Cannot lock file $_[0].json $!\n");
-			close($filesetContentInfo);
-			return 0;
-		}
-		seek $filesetContentInfo, 0, 0;
-		truncate $filesetContentInfo, 0;
-
+	if (open(my $filesetContentInfo, '>', ("$_[0].info")) and open(my $filesetContent, '<', $_[0])) {
 		my @newItemArray = ();
-		my %fci = ();
-		if (defined($_[1]) and ($_[1] eq 'backup' || $_[1] eq 'localbackup')) {
-			while(my $filename = <$filesetContent>) {
-				chomp($filename);
-				if (-f $filename) {
-					push @newItemArray, $filename;
-					$fci{$filename} = {
-						'size' => -1,
-						'ts'   => '',
-						'filecount' => 'NA',
-						'type' => 'f'
-					}
-				}
-				elsif (-d $filename) {
-					$filename .= (substr($filename,-1) ne '/')?'/':'';
-					push @newItemArray, $filename;
-					$fci{$filename} = {
-						'size' => -1,
-						'ts'   => '',
-						'filecount' => 'NA',
-						'type' => 'd'
-					}
-				}
-				else {
-					next;
-					#print $filesetContentInfo "$filename\n";
-					#print $filesetContentInfo "u\n";
-				}
+		while(my $ori_filename = <$filesetContent>) {
+			chomp($ori_filename);
+			my $filename = Taryck::extendBackupItem($ori_filename);
+			if (-f $filename) {
+				print $filesetContentInfo "$ori_filename\n";
+				print $filesetContentInfo "f\n";
+				push @newItemArray, $filename;
+			}
+			elsif (-d $filename) {
+				$ori_filename .= (substr($ori_filename,-1) ne '/')?'/':'';
+				print $filesetContentInfo "$ori_filename\n";
+				print $filesetContentInfo "d\n";
+				push @newItemArray, $ori_filename;
+			}
+			else {
+				display(["Skipped [$ori_filename]. ", "Reason",'file_folder_not_found']);
+				next;
+				#print $filesetContentInfo "$filename\n";
+				#print $filesetContentInfo "u\n";
 			}
 		}
-		else {
-			while(my $filename = <$filesetContent>) {
-				chomp($filename);
-				if (substr($filename,-1) ne '/') {
-					push @newItemArray, $filename;
-					$fci{$filename} = {
-						'type' => 'f'
-					}
-				}
-				else {
-					push @newItemArray, $filename;
-					$fci{$filename} = {
-						'type' => 'd'
-					}
-				}
-			}
-		}
-		print $filesetContentInfo JSON::to_json(\%fci);
-
-		my $content = '';
-		$content = join("\n", @newItemArray) if (scalar(@newItemArray));
-
-		seek $filesetContent, 0, 0;
-		truncate $filesetContent, 0;
-		print $filesetContent $content;
-
 		close($filesetContentInfo);
 		close($filesetContent);
+		my $content = '';
+		$content = join("\n", @newItemArray) if (scalar(@newItemArray));
+		fileWrite($_[0],$content);
 		loadNotifications() and setNotification("get_$_[1]set_content") and saveNotifications();
-	}
-	else {
-		traceLog("Cannot open file $_[0].json $!\n");
 	}
 }
 
@@ -11008,65 +10022,6 @@ sub updateJobsFileset {
 sub unloadUserConfigurations {
 	%userConfiguration = ();
 	%modifiedUserConfig = ();
-}
-
-#*****************************************************************************************************
-# Subroutine			: updateLocaleCmd
-# Objective				: This subroutine to update locale configuration.
-#						  Mainly used for display from diffent languages to English
-# Added By				: Vijay Vinoth
-#****************************************************************************************************/
-sub updateLocaleCmd {
-	my $cmd = $_[0];
-	$cmd = "LC_ALL=C ".$cmd		if($isEngEnabled == 0);
-	return $cmd;
-}
-
-# TODO:
-#*****************************************************************************************************
-# Subroutine			: updateBackupsetFileSize
-# Objective				: Calculate backup set size of the files
-# Added By				: Sabin Cheruvattil
-# Modified By			: Yogesh Kumar
-#****************************************************************************************************/
-sub updateBackupsetFileSize {
-	my $fc = 0;
-	my $backupsetdata;
-	my %backupsetsizes= ();
-	my $filename = '';
-
-	my $bsf = getCatfile(Helpers::getJobsPath($_[0]), $Configuration::backupsetFile);
-	if (-f $bsf and -s $bsf > 0) {
-		$backupsetdata = getFileContents($bsf, 'array');
-	}
-	else {
-		return 0;
-	}
-
-	loadUserConfiguration();
-	loadFullExclude();
-	loadPartialExclude();
-	loadRegexExclude();
-	my $showhidden = getUserConfiguration('SHOWHIDDEN');
-
-	for my $i (0 .. $#{$backupsetdata}) {
-		$filename = @{$backupsetdata}[$i];
-		chomp($filename);
-		next if ($filename eq '');
-
-		if (!-e $filename) {
-			$backupsetsizes{$filename} = {'size' => 0, 'filecount' => 'NA', 'type' => 'u'};
-		}
-		elsif (-f $filename) {
-			$backupsetsizes{$filename} = {'size' => getFileSize($filename, \$fc), 'filecount' => (isThisExcludedItemSet($filename . '/', $showhidden)? 'EX' : 'NA'), 'type' => 'f'};
-		}
-		else {
-			$backupsetsizes{$filename} = {'size' => -1, 'filecount' => 'NA', 'type' => 'd'};
-		}
-	}
-	fileWrite("$bsf.json", JSON::to_json(\%backupsetsizes));
-
-	return 1;
 }
 
 #------------------------------------------------- V -------------------------------------------------#
@@ -11108,15 +10063,12 @@ sub validateBackupRestoreSetFile {
 
 #*****************************************************************************************************
 # Subroutine			: validateChoiceOptions
-# Objective				: This subroutine validates choice options y/n or p/e
+# Objective				: This subroutine validates choice options y/n
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub validateChoiceOptions {
-	my $choice = $_[0];
-	my $yes    = $_[1]; #y or p
-	my $no     = $_[2]; #n or e
-	if (lc($choice) eq $yes || lc($choice) eq $no) {
+	my $choice = shift;
+	if (lc($choice) eq 'y' || lc($choice) eq 'n') {
 		return 1;
 	}
 	return 0;
@@ -11166,16 +10118,14 @@ sub validateUserConfigurations {
 		unless (exists $userConfiguration{$key}) {
 			traceLog($key." is missing." );
 			my $errCode = $Configuration::userConfigurationSchema{$key}{'required'};
-			$errCode = 102 if (!isLoggedin() and $errCode == 100);
-			$errCode = 103 if (!isLoggedin() and $errCode == 101);
+			$errCode = 102 if (!Helpers::isLoggedin() and $errCode == 100);
 			return $errCode;
 		}
-		if ($Configuration::appType eq 'IDrive' and $Configuration::userConfigurationSchema{$key}{'required'} and
+		if ($Configuration::userConfigurationSchema{$key}{'required'} and
 			($userConfiguration{$key}{'VALUE'} eq '')) {
 			traceLog($key." value is missing." );
 			my $errCode = $Configuration::userConfigurationSchema{$key}{'required'};
-			$errCode = 102 if (!isLoggedin() and $errCode == 100);
-			$errCode = 103 if (!isLoggedin() and $errCode == 101);
+			$errCode = 102 if (!Helpers::isLoggedin() and $errCode == 100);
 			return $errCode;
 		}
 		if (($Configuration::userConfigurationSchema{$key}{'type'} eq 'dir') and
@@ -11184,29 +10134,23 @@ sub validateUserConfigurations {
 			return 101;
 		}
 		if (($Configuration::userConfigurationSchema{$key}{'type'} eq 'regex') and
-			exists ($Configuration::userConfigurationSchema{$key}{'regex'}) and ($userConfiguration{$key}{'VALUE'} ne '')) {
-			if ($userConfiguration{$key}{'VALUE'} !~ m/$Configuration::userConfigurationSchema{$key}{'regex'}/) {
+			exists ($Configuration::userConfigurationSchema{$key}{'regex'}) and ($userConfiguration{$key}{'VALUE'} ne '')){
+			if ($userConfiguration{$key}{'VALUE'} !~ m/$Configuration::userConfigurationSchema{$key}{'regex'}/){
 				traceLog("Invalid $key value: ".$userConfiguration{$key}{'VALUE'});
 				$userConfiguration{$key}{'VALUE'} = $Configuration::userConfigurationSchema{$key}{'default'};
 				#return $Configuration::userConfigurationSchema{$key}{'required'};
 			}
 		}
 
-		if ((not defined($userConfiguration{$key}{'VALUE'})) or
-				(($Configuration::userConfigurationSchema{$key}{'default'} ne '') and
-					($userConfiguration{$key}{'VALUE'} eq ''))) {
-
-			if ($Configuration::userConfigurationSchema{$key}{'default'} =~ /^__/) {
-				my @kNames = $Configuration::userConfigurationSchema{$key}{'default'} =~ /__[A-Za-z0-9]+__/g;
-				for(@kNames) {
-					$_ =~ s/__//g;
-					my $func = \&{$_};
-					$userConfiguration{$key}{'VALUE'} = &$func();
-				}
-			}
-			else {
-				$userConfiguration{$key}{'VALUE'} = $Configuration::userConfigurationSchema{$key}{'default'};
-			}
+		if (!defined($userConfiguration{$key}{'VALUE'})){
+			$userConfiguration{$key}{'VALUE'} = $Configuration::userConfigurationSchema{$key}{'default'};
+			#$modifiedUserConfig{$key}{'VALUE'} = $Configuration::userConfigurationSchema{$key}{'default'};
+			$Configuration::isUserConfigModified = 1;
+		}
+		elsif (($Configuration::userConfigurationSchema{$key}{'default'} ne '') and
+			($userConfiguration{$key}{'VALUE'} eq '')) {
+			$userConfiguration{$key}{'VALUE'} = $Configuration::userConfigurationSchema{$key}{'default'};
+			#$modifiedUserConfig{$key}{'VALUE'} = $Configuration::userConfigurationSchema{$key}{'default'};
 			$Configuration::isUserConfigModified = 1;
 		}
 	}
@@ -11227,18 +10171,16 @@ sub validateUserConfigurations {
 #****************************************************************************************************/
 sub verifyEVSBinary {
 	my $evs = $_[0];
-	unless (-f $evs) {
+	unless (-f "$evs") {
 		my $test = $LS{'unable_to_find'} . $evs;
 		return (0, $test);
 	}
 
-	chmod(0777, $evs);
-	unless(-x $evs) {
-		#return (0, $LS{'does_not_have_execute_permission'} .$evs);
-		retreat($LS{'evs_binary'}."'$evs' ".$LS{'does_not_have_execute_permission'}."\n".$LS{'please_provide_permission_try'});
+	chmod(0777, "$evs");
+	unless(-x "$evs") {
+		return (0, $LS{'does_not_have_execute_permission'} .$evs);
 	}
 	$evs = getECatfile($evs);
-	$evs = updateLocaleCmd($evs);
 	my $output = `$evs -h 2>/dev/null`;
 
 	if ($? > 0) {
@@ -11254,20 +10196,17 @@ sub verifyEVSBinary {
 #****************************************************************************************************/
 sub verifyStaticPerlBinary {
 	my $sp = $_[0];
-	unless (-f $sp) {
+	unless (-f "$sp") {
 		my $test = $LS{'unable_to_find'} . $sp;
 		return (0, $test);
 	}
 
-	chmod(0755, $sp);
-	unless(-x $sp) {
-		#return (0, $sp.$LS{'does_not_have_execute_permission'});
-		retreat($LS{'perl_binary'}."'$sp' ".$LS{'does_not_have_execute_permission'}."\n".$LS{'please_provide_permission_try'});
+	chmod(0555, "$sp");
+	unless(-x "$sp") {
+		return (0, $LS{'does_not_have_execute_permission'} . $sp);
 	}
 
-	$sp = getECatfile($sp);
-	$sp = updateLocaleCmd($sp);
-	my $output = `$sp -v 2>/dev/null`;
+	my $output = `'$sp' -v 2>/dev/null`;
 
 	if ($? > 0) {
 		return (0, 'static_perl_execution_error:' . $?);
@@ -11324,16 +10263,16 @@ sub validatePortNumber {
 # Subroutine			: validatePassword
 # Objective				: This subroutine helps to validate password
 # Added By				: Anil Kumar
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub validatePassword {
-	if ((length($_[0]) < 3) || (length($_[0]) > 20)) {
-		display(['password_should_be_at_least_3_20_characters',"\n"],1) ;
+	if ((length($_[0]) < 6) || (length($_[0]) > 20)) {
+		display(['password_should_be_at_least_6_20_characters',"\n"],1) ;
 		return 0;
 	}
-	elsif ($_[0] =~ /^(?=.{3,20}$)(?!.*\s+.*)(?!.*[\:\\]+.*)/) {
+	elsif ($_[0] =~ /^(?=.{6,20}$)(?!.*\s+.*)(?!.*[\:\\]+.*)/){
 		return 1 ;
 	}
+
 }
 
 #*****************************************************************************************************
@@ -11362,8 +10301,7 @@ sub validateVersionNumber {
 #****************************************************************************************************/
 sub validateDetails {
 	my $fieldType = $_[0];
-	my $value 	  = $_[1];
-	my $maxLimit  = $_[2];
+	my $value = $_[1];
 
 	# TODO: review emptying values.
 	if ($Configuration::callerEnv eq 'BACKGROUND') {
@@ -11397,13 +10335,7 @@ sub validateDetails {
 	}
 	elsif ($fieldType eq "YN_choice") {
 		return $_[1] = 'y' if ($Configuration::callerEnv eq 'BACKGROUND');
-		unless(validateChoiceOptions($value,'y','n')){
-			display(['invalid_choice',"\n"],1);
-			return 0;
-		}
-	}
-	elsif ($fieldType eq "PE_choice") { #PE Previous/Exit
-		unless(validateChoiceOptions($value,'p','e')){
+		unless(validateChoiceOptions($value)){
 			display(['invalid_choice',"\n"],1);
 			return 0;
 		}
@@ -11430,7 +10362,7 @@ sub validateDetails {
 		}
 	}
 	elsif ($fieldType eq "failed_percent") {
-		return 0 unless(validatePercentage($value,0,10));
+		return 0 unless(validatePercentage($value,1,10));
 	}
 	elsif ($fieldType eq "missed_percent") {
 		return 0 unless(validatePercentage($value,0,10));
@@ -11439,13 +10371,13 @@ sub validateDetails {
 		return 0 unless(validateBackupLoction($value));
 	}
 	elsif ($fieldType eq '24hours_validator') {
-		if (($value !~ /^\d+$/) || (($value =~ /\d/) && ($value < 0 || $value >= 24))) {
+		if (($value !~ /\d/) || (($value =~ /\d/) && ($value < 0 || $value >= 24))) {
 			display(['invalid_choice',"\n"], 1);
 			return 0;
 		}
 	}
 	elsif ($fieldType eq 'minutes_validator') {
-		if (($value !~ /^\d+$/) || (($value =~ /\d/) && ($value < 0 || $value > 59))) {
+		if (($value !~ /\d/) || (($value =~ /\d/) && ($value < 0 || $value > 59))) {
 			display(['invalid_choice',"\n"], 1);
 			return 0;
 		}
@@ -11471,59 +10403,7 @@ sub validateDetails {
 		}
 	}
 	elsif ($fieldType eq "non_empty") {		# no need to check the condition, but added for a safer purpose
-		if ($value eq '') {
-			Helpers::display(['cannot_be_empty', '.', ' ', 'please_try_again', "\n"],1);
-			return 0;
-		}
-	}
-	elsif($fieldType eq "choice") {
-		if (defined($maxLimit)) {
-			if (!Helpers::validateMenuChoice($value, 1, $maxLimit)) {
-				Helpers::display(['invalid_choice', ' ', 'please_try_again']);
-			} else {
-				return 1;
-			}
-		}
-		else {
-			Helpers::display(['invalid_choice', ' ', 'please_try_again']);
-		}
-		return 0;
-	}
-	elsif($fieldType eq "Q_choice") {
-		if ($value eq 'q' or $value eq 'Q') {
-			return 1;
-		}
-		elsif (defined($maxLimit)) {
-			if (!Helpers::validateMenuChoice($value, 1, $maxLimit)) {
-				Helpers::display(['invalid_choice', ' ', 'please_try_again']);
-			} else {
-				return 1;
-			}
-		} else {
-			Helpers::display(['invalid_choice', ' ', 'please_try_again']);
-		}
-		return 0;
-	}
-	elsif($fieldType eq "help_menu" or $fieldType eq "help_search_menu") {
-		if ($value eq 'p' or $value eq 'P') {
-			return 1;
-		}
-		elsif ($value eq 'e' or $value eq 'E') {
-			exit;
-		}
-		elsif ($fieldType eq "help_search_menu" and ($value eq 'm' or $value eq 'M')) {
-			return 1;
-		}
-		elsif (defined($maxLimit)) {
-			if (!Helpers::validateMenuChoice($value, 1, $maxLimit)) {
-				Helpers::display(['invalid_choice', ' ', 'please_try_again']);
-			} else {
-				return 1;
-			}
-		} else {
-			Helpers::display(['invalid_choice', ' ', 'please_try_again']);
-		}
-		return 0;
+		return 0 if $value eq '';
 	}
 	else{
 		display("invalid_field_type_to_validate");
@@ -11549,6 +10429,9 @@ sub validateBackupLoction {
 	my $bucketName = $_[0];
 	my $dedup = getUserConfiguration('DEDUP');
 	if ($bucketName eq '') {
+		$bucketName = $Configuration::hostname;
+		$bucketName =~ s/[^a-zA-Z0-9_-]//g;
+		display(['considering_default_backup_location',"\"$bucketName\""], 1);
 		return 1;
 	}elsif (length($bucketName) > 65) {
 		display(['invalid_backup_location', "\"$bucketName\". ", 'backup_location_should_be_one_to_sixty_five_characters'], 1);
@@ -11569,7 +10452,6 @@ sub validateBackupLoction {
 # Subroutine			: validateServiceDir
 # Objective				: This subroutine is used to validate the service directory
 # Added By				: Anil Kumar
-# Modified By			: Vijay Vinoth
 #****************************************************************************************************/
 sub validateServiceDir {
 	my $dir = $_[0];
@@ -11638,7 +10520,7 @@ sub validateUserTicket {
 		return 0;
 	}
 	elsif ($ticketNo !~ m/^[a-zA-Z0-9]{5,30}$/) {
-		display(['invalid_ticket_number', '. ', 'ticket_number_only_alphanumeric', '.']);
+		display(['invalid_ticket_number', '. ', 'ticket_number_only_alphanumerics', '.']);
 		return 0;
 	}
 	display('');
@@ -11652,7 +10534,8 @@ sub validateUserTicket {
 #****************************************************************************************************/
 sub validatePvtKey {
 	my $value = $_[0];
-	if (length($value) < 4) {
+	if (length($value) < 4)
+	{
 		display(['encryption_key_must_be_minimum_4_characters', '.',"\n"]) ;
 		return 0;
 	}
@@ -11682,22 +10565,21 @@ sub validateConfPvtKey {
 # Subroutine			: versioncompare
 # Objective				: This subroutine is for basic version compare. returns the result of comparsion
 # Added By				: Sabin Cheruvattil
-# Modified By			: Senthil Pandian
 #****************************************************************************************************/
 sub versioncompare {
 	# version == : 0 | first version > : 1 | second version > : 2
-	my @currentVer   = split('\.', $_[0]);
-	my @availableVer = split('\.', $_[1]);
+	my @vera = split('\.', $_[0]);
+	my @verb = split('\.', $_[1]);
 
-	for my $i (0 .. scalar(@currentVer)) {
-		if (defined($currentVer[$i]) && defined($availableVer[$i])) {
-			return 1 if ($currentVer[$i] > $availableVer[$i]);
-			return 2 if ($currentVer[$i] < $availableVer[$i]);
+	for my $i (0 .. scalar(@vera)) {
+		if (defined($vera[$i]) && defined($verb[$i])) {
+			return 1 if ($vera[$i] > $verb[$i]);
+			return 2 if ($vera[$i] < $verb[$i]);
 		}
 	}
-
-	return 1 if ($#currentVer > $#availableVer);
-	return 2 if ($#availableVer > $#currentVer);
+	
+	return 1 if($#vera > $#verb);
+	return 2 if($#verb > $#vera);
 
 	return 0;
 }
@@ -11714,21 +10596,23 @@ sub verifyEditedFileContent {
 
 	if (-e $filePath and !-z $filePath){
 		if (!open(FILE_HANDLE, $filePath)) {
-			retreat(getStringConstant('failed_to_open_file')." : $filePath. Reason :$!");
+			retreat($Locale::strings{'failed_to_open_file'}." : $filePath. Reason :$!");
 		}
 		@itemArray = <FILE_HANDLE>;
 		close(FILE_HANDLE);
 		display(['verifying_edited_file_content',"\n"]);
-	} elsif (reftype(\$filePath) eq 'REF'){
+	} elsif(reftype(\$filePath) eq 'REF'){
 		@itemArray = @{$_[0]};
 	}
 
-	if (scalar(@itemArray) > 0) {
+	if(scalar(@itemArray) > 0) {
 		foreach my $item (@itemArray){
 			chomp($item);
 			my $orgItem = $item;
-			$item =~ s/[\/]+/\//g; #Replacing multiple "/" with single "/"
-			my $tempItem = $item;
+			my $item_ext = Taryck::extendBackupItem($item);
+#			my $item_ext = $item;
+			$item_ext =~ s/[\/]+/\//g; #Replacing multiple "/" with single "/"
+			my $tempItem = $item_ext;
 			Chomp(\$tempItem);
 
 			if ($tempItem =~ m/^$/) {
@@ -11742,7 +10626,7 @@ sub verifyEditedFileContent {
 				$skippedItem = 1;
 				next;
 			} elsif (substr($tempItem,0,1) ne "/") {
-				$item = '/'.$item;
+				$item_ext = '/'.$item_ext;
 			}
 			push @newItemArray, $item;
 		}
@@ -11753,46 +10637,17 @@ sub verifyEditedFileContent {
 #------------------------------------------------- W -------------------------------------------------#
 
 #*****************************************************************************************************
-# Subroutine			: waitForUpdate
-# Objective				: This subroutine to check whether script update begins or not and it will wait if it begins.
-# Added By				: Senthil Pandian
-# Modified By			: Yogesh Kumar
-#****************************************************************************************************/
-sub waitForUpdate {
-	loadAppPath();
-	return 0 unless(loadServicePath());
-	my $updatePid = getCatfile(getCachedDir(), $Configuration::updatePid);
-	if (-f $updatePid) {
-		while(isFileLocked($updatePid)) {
-			traceLog('updating_scripts_wait');
-			sleepForMilliSec(100); # Sleep for 100 milliseconds
-		}
-		unlink($updatePid) if (-f $updatePid);
-		return 1;
-	}
-	return 0;
-}
-
-#*****************************************************************************************************
 # Subroutine			: writeToTrace
 # Objective				: This subroutine writes to log
 # Added By				: Sabin Cheruvattil
-# Modified By			: Yogesh Kumar
 #****************************************************************************************************/
 sub writeToTrace {
-	if (open my $log_trace_handle, ">>", $_[0]){
-		my $date = strftime "%Y/%m/%d %H:%M:%S", localtime;
+	if (open LOG_TRACE_HANDLE, ">>", $_[0]){
+		my $date        	= strftime "%Y/%m/%d %H:%M:%S", localtime;
 		# do not use getMachineUser() in the following line | in cli, it gives undef
-		my $logContent;
-		unless (defined($_[2]) and $_[2]) {
-			$logContent = qq([$date][) . $Configuration::mcUser . qq(]$_[1]);
-		}
-		else {
-			$logContent = qq($_[1]);
-		}
-
-		print $log_trace_handle $logContent;
-		close($log_trace_handle);
+		my $logContent 		= qq([$date][) . $Configuration::mcUser . qq(]$_[1]);
+		print LOG_TRACE_HANDLE $logContent;
+		close(LOG_TRACE_HANDLE);
 	}
 }
 
@@ -11802,7 +10657,8 @@ sub writeToTrace {
 # Added By                : Senthil Pandian
 # Modified By             : Yogesh Kumar
 #******************************************************************************************
-sub writeOperationSummary {
+sub writeOperationSummary
+{
 	my @now     = localtime;
 	my $endTime = localtime(mktime(@now));
 
@@ -11810,18 +10666,17 @@ sub writeOperationSummary {
 	my $excludeDirPath = getCatfile($Configuration::jobRunningDir, $Configuration::excludeDir);
 	my $infoFile       = getCatfile($Configuration::jobRunningDir, $Configuration::infoFile);
 
-	my ($successFiles,$syncedFiles,$failedFilesCount,$filesConsideredCount,$noPermissionCount,$missingCount,$transferredFileSize) = (0) x 7;
+	my ($successFiles,$syncedFiles,$failedFilesCount,$filesConsideredCount,$noPermissionCount,$missingCount) = (0) x 6;
 
 	if ($Configuration::totalFiles) {
 		$filesConsideredCount = $Configuration::totalFiles;
 		Chomp(\$filesConsideredCount);
 	}
-	my @StatusFileFinalArray = ('COUNT_FILES_INDEX','SYNC_COUNT_FILES_INDEX','ERROR_COUNT_FILES','DENIED_COUNT_FILES','MISSED_FILES_COUNT','TOTAL_TRANSFERRED_SIZE');
-	($successFiles, $syncedFiles, $failedFilesCount, $noPermissionCount, $missingCount, $transferredFileSize) = getParameterValueFromStatusFileFinal(@StatusFileFinalArray);
+	my @StatusFileFinalArray = ('COUNT_FILES_INDEX','SYNC_COUNT_FILES_INDEX','ERROR_COUNT_FILES','DENIED_COUNT_FILES','MISSED_FILES_COUNT');
+	($successFiles, $syncedFiles, $failedFilesCount, $noPermissionCount, $missingCount) = getParameterValueFromStatusFileFinal(@StatusFileFinalArray);
 	chmod $Configuration::filePermission, $Configuration::outputFilePath;
-	my $fs = convertFileSize($transferredFileSize);
 
-	# If $outputFilePath exists then only summary will be written otherwise no summary file will exists.
+	# If $outputFilePath exists then only summery will be written otherwise no summery file will exists.
 	if (-e $Configuration::outputFilePath and -s $Configuration::outputFilePath > 0) {
 		# open output.txt file to write restore summary.
 		if (!open(OUTFILE, ">> $Configuration::outputFilePath")){
@@ -11841,9 +10696,8 @@ sub writeOperationSummary {
 			if ($isIgnorePermissionErrors){
 				my $permissionError 	 = $errorDir."/".$Configuration::permissionErrorFile;
 				$summary .= checkAndUpdatePermissionDeniedList($permissionError);
-				$filesConsideredCount -= $noPermissionCount;
 			} else {
-				#$failedFilesCount += $noPermissionCount; #Commented by Senthil on 11-June-2019
+				$failedFilesCount += $noPermissionCount;
 				$Configuration::noPermissionCount = getPermissionDeniedCount();
 				if ($Configuration::noPermissionCount){
 					$filesConsideredCount += $Configuration::noPermissionCount;
@@ -11861,48 +10715,48 @@ sub writeOperationSummary {
 		# construct summary message.
 		my $mail_summary = undef;
 		$summary      .= "\nSummary: \n";
-		$Configuration::finalSummary = "\nSummary: \n";
+		$Configuration::finalSummery = "\nSummary: \n";
 		#Needs to be removed: Senthil
 		#$filesConsideredCount = 99;
 		#$failedFilesCount  = 5;
 
 		if ($_[0] eq $Configuration::evsOperations{'BackupOp'} || $_[0] eq $Configuration::evsOperations{'LocalBackupOp'}) {
 			# Prepare mail contents
-			$mail_summary .= getStringConstant('files_considered_for_backup') . $filesConsideredCount;
-			$mail_summary .= "\n" . getStringConstant('files_backed_up_now') . $successFiles." [Size: $fs]";
+			$mail_summary .= $Locale::strings{'files_considered_for_backup'} . $filesConsideredCount;
+			$mail_summary .= "\n" . $Locale::strings{'files_backed_up_now'} . $successFiles;
 
 			if ($_[0] eq $Configuration::evsOperations{'BackupOp'}) {
-				$mail_summary .= "\n" . getStringConstant('files_already_present_in_your_account_conditional') . $syncedFiles;
+				$mail_summary .= "\n" . $Locale::strings{'files_already_present_in_your_account_conditional'} . $syncedFiles;
 			} else {
-				$mail_summary .= "\n" . getStringConstant('files_already_present_in_your_account') . $syncedFiles;
+				$mail_summary .= "\n" . $Locale::strings{'files_already_present_in_your_account'} . $syncedFiles;
 			}
 
-			$mail_summary .= "\n" . getStringConstant('files_failed_to_backup') . $failedFilesCount;
-			$mail_summary .= "\n" . getStringConstant('backup_end_time') . "$endTime\n";
-			$mail_summary .= "\n" . getStringConstant('files_in_trash_may_get_restored_notice') . "\n" if ($_[0] eq $Configuration::evsOperations{'BackupOp'});
+			$mail_summary .= "\n" . $Locale::strings{'files_failed_to_backup'} . $failedFilesCount;
+			$mail_summary .= "\n" . $Locale::strings{'backup_end_time'} . "$endTime\n";
+			$mail_summary .= "\n" . $Locale::strings{'files_in_trash_may_get_restored_notice'} . "\n" if ($_[0] eq $Configuration::evsOperations{'BackupOp'});
 
 			# prepare summary content
-			$Configuration::finalSummary .= getStringConstant('files_considered_for_backup') . $filesConsideredCount;
-			$Configuration::finalSummary .= "\n" . getStringConstant('files_backed_up_now') . $successFiles." [Size: $fs]";
+			$Configuration::finalSummery .= $Locale::strings{'files_considered_for_backup'} . $filesConsideredCount;
+			$Configuration::finalSummery .= "\n" . $Locale::strings{'files_backed_up_now'} . $successFiles;
 
 			if ($_[0] eq $Configuration::evsOperations{'BackupOp'}) {
-				$Configuration::finalSummary .= "\n" . getStringConstant('files_already_present_in_your_account_conditional') . $syncedFiles;
+				$Configuration::finalSummery .= "\n" . $Locale::strings{'files_already_present_in_your_account_conditional'} . $syncedFiles;
 			} else {
-				$Configuration::finalSummary .= "\n" . getStringConstant('files_already_present_in_your_account') . $syncedFiles;
+				$Configuration::finalSummery .= "\n" . $Locale::strings{'files_already_present_in_your_account'} . $syncedFiles;
 			}
 
-			$Configuration::finalSummary .= "\n" . getStringConstant('files_failed_to_backup') . $failedFilesCount . "\n";
+			$Configuration::finalSummery .= "\n" . $Locale::strings{'files_failed_to_backup'} . $failedFilesCount . "\n";
 		} else 	{
-			$mail_summary .= getStringConstant('files_considered_for_restore').$filesConsideredCount.
-						"\n".getStringConstant('files_restored_now').$successFiles." [Size: $fs]".
-						"\n".getStringConstant('files_already_present_in_your_restore_location').$syncedFiles.
-						"\n".getStringConstant('files_failed_to_restore').$failedFilesCount.
-						"\n".getStringConstant('restore_end_time')."$endTime\n";
+			$mail_summary .= $Locale::strings{'files_considered_for_restore'}.$filesConsideredCount.
+						"\n".$Locale::strings{'files_restored_now'}.$successFiles.
+						"\n".$Locale::strings{'files_already_present_in_your_restore_location'}.$syncedFiles.
+						"\n".$Locale::strings{'files_failed_to_restore'}.$failedFilesCount.
+						"\n".$Locale::strings{'restore_end_time'}."$endTime\n";
 
-			$Configuration::finalSummary .= getStringConstant('files_considered_for_restore').$filesConsideredCount.
-						"\n".getStringConstant('files_restored_now').$successFiles." [Size: $fs]".
-						"\n".getStringConstant('files_already_present_in_your_restore_location').$syncedFiles.
-						"\n".getStringConstant('files_failed_to_restore').$failedFilesCount."\n";
+			$Configuration::finalSummery .= $Locale::strings{'files_considered_for_restore'}.$filesConsideredCount.
+						"\n".$Locale::strings{'files_restored_now'}.$successFiles.
+						"\n".$Locale::strings{'files_already_present_in_your_restore_location'}.$syncedFiles.
+						"\n".$Locale::strings{'files_failed_to_restore'}.$failedFilesCount."\n";
 		}
 		if ($Configuration::errStr ne "" &&  $Configuration::errStr ne "SUCCESS"){
 			$mail_summary .= "\n\n".$Configuration::errStr."\n";
@@ -11929,7 +10783,6 @@ sub writeOperationSummary {
 					if ($percentToNotifyForMissedFiles && -e $infoFile){
 						$infoFile       = getCatfile($Configuration::jobRunningDir, $Configuration::infoFile);
 						my $missedCountCheckCmd = "cat '$infoFile' | grep \"^MISSINGCOUNT\"";
-						$missedCountCheckCmd = updateLocaleCmd($missedCountCheckCmd);
 						my $missedCount = `$missedCountCheckCmd`;
 						$missedCount =~ s/MISSINGCOUNT//;
 						Chomp(\$missedCount) if ($missedCount);
@@ -11947,10 +10800,9 @@ sub writeOperationSummary {
 		$tempOutputFilePath = (split("_Running_",$tempOutputFilePath))[0] if ($tempOutputFilePath =~ m/_Running_/);
 		my %logStat = (
 			(split('_', basename($tempOutputFilePath)))[0] => {
-				'datetime' => strftime("%m/%d/%Y %H:%M:%S", localtime(mktime(@startTime))),
+				'datetime' => strftime("%d/%m/%Y %H:%M:%S", localtime(mktime(@startTime))),
 				'duration' => (mktime(@now) - mktime(@startTime)),
 				'filescount' => $filesConsideredCount,
-				'bkpfiles' => $successFiles,
 				'status' => $Configuration::opStatus . '_' . ucfirst($_[1])
 			}
 		);
@@ -11998,8 +10850,7 @@ sub writeLogHeader {
 	chmod $Configuration::filePermission, $logOutputFile;
 
 	autoflush OUTFILE;
-	my $hostCmd = updateLocaleCmd('hostname');
-	my $host = `$hostCmd`;
+	my $host = `hostname`;
 	chomp($host);
 
 	autoflush OUTFILE;
@@ -12032,31 +10883,25 @@ sub writeLogHeader {
 	if ($Configuration::jobType eq "Backup" and $dedup eq 'off') {
 		$mailHeadB = "$tempJobType Type: $backupPathType $tempJobType \n";
 	}
-
-	my $location = ($dedup eq 'on' and $backupTo =~ /#/)?(split('#',$backupTo))[1]:$backupTo;
-	if ($dedup eq 'off' and $Configuration::jobType eq "LocalBackup") {
-		my @backupTo = split("/",$location);
-		$location	 = (substr($location,0,1) eq '/')? '/'.$backupTo[1]:'/'.$backupTo[0];
-	}
-
+	my $location = ($backupTo =~ /#/)?(split('#',$backupTo))[1]:$backupTo;
 	$mailHeadB .= "Machine Name: $host \n";
 	$mailHeadB .= "$tempJobType Location: $location \n";
 	$mailHeadB .= $backupMountPath;
 	if ($tempJobType eq "Restore") {
-		my $fromLocation = ($dedup eq 'on' and $restoreHost =~ /#/)?(split('#',$restoreHost))[1]:$restoreHost;
+		my $fromLocation = ($restoreHost =~ /#/)?(split('#',$restoreHost))[1]:$restoreHost;
 		$mailHeadB .= "$tempJobType From Location: $fromLocation \n";
 		$jsc .= 'Restore Set Contents:' . $lineFeed;
-		$jsc .= getJobSetLogSummary(lc($tempJobType));
+		$jsc .= Helpers::getJobSetLogSummary(lc($tempJobType));
 	}
 	#$mailHeadB .= "Backup Failure(%): $percentToNotifyForFailedFiles\n" if ($Configuration::jobType =~ /Backup/);
 	if ($Configuration::jobType =~ /Backup/){
 		$mailHeadB .= "Failed files(%): $percentToNotifyForFailedFiles $lineFeed";
 		$mailHeadB .= "Missing files(%): $percentToNotifyForMissedFiles $lineFeed";
 		$mailHeadB .= "Throttle Value(%): $bwThrottle \n" if ($Configuration::jobType eq "Backup");
-		$mailHeadB .= "Show hidden files/folders: ".(getUserConfiguration('SHOWHIDDEN')? 'enabled' : 'disabled').$lineFeed;
-		$mailHeadB .= "Ignore file/folder level permission errors: ".(getUserConfiguration('IFPE')? 'enabled' : 'disabled').$lineFeed;
+		$mailHeadB .= "Show hidden files/folders: ".(Helpers::getUserConfiguration('SHOWHIDDEN')? 'enabled' : 'disabled').$lineFeed;
+		$mailHeadB .= "Ignore file/folder level permission errors: ".(Helpers::getUserConfiguration('IFPE')? 'enabled' : 'disabled').$lineFeed;
 		$jsc .= ($jt eq 'backup'? 'Backup Set Contents:' : 'Express Backup Set Contents:') . "\n";
-		$jsc .= getJobSetLogSummary($jt);
+		$jsc .= Helpers::getJobSetLogSummary($jt);
 	}
 	my $LogHead = $mailHeadA . "Username: $username \n" . $mailHeadB . $jsc;
 	print OUTFILE $LogHead."\n";
@@ -12068,14 +10913,14 @@ sub writeLogHeader {
 #****************************************************************************************************
 # Subroutine Name         : writeParamToFile.
 # Objective               : This subroutine will write parameters into a file named operations.txt. Later it is used in Operations.pl script.
-# Modified By             : Abhishek Verma, Senthil Pandian
+# Modified By             : Abhishek Verma.
 #*****************************************************************************************************/
 sub writeParamToFile{
 	my $fileName = shift;
 	if (!open(PH,'>',$fileName)){ #PH means Parameter file handler.
-		$Configuration::errStr = getStringConstant('failed_to_open_file').": $fileName, Reason:$!\n";
+		$Configuration::errStr = $Locale::strings{'failed_to_open_file'}.": $fileName, Reason:$!\n";
 		traceLog($Configuration::errStr);
-		display($Configuration::errStr);
+		print $Configuration::errStr;
 		cancelProcess();
 	}
 	print PH @_;
@@ -12096,68 +10941,6 @@ sub writeCrontab {
 	print CRON @_;
 	close(CRON);
 }
-
-#*******************************************************************************************************
-# Subroutine Name         :	waitForEnginesToFinish
-# Objective               :	Check the status of all engines and wait to complete to finish the job
-# Added By                : Vijay Vinoth
-#********************************************************************************************************/
-sub waitForEnginesToFinish {
-	my @BackupForkchilds = @{$_[0]};
-	my $engineLockFile = $_[1];
-	my $res = '';
-	while(@BackupForkchilds > 0) {
-		for (my $i=0; $i<=$#BackupForkchilds; $i++) {
-			$res = waitpid($BackupForkchilds[$i], WNOHANG);
-			splice(@BackupForkchilds, $i, 1)	if ($res == -1 || $res > 0);
-			sleep(1);
-		}
-	}
-
-	while(isAnyEngineRunning($engineLockFile)){
-		sleep(1);
-	}
-
-	return;
-}
-
-#*******************************************************************************************************
-# Subroutine Name         :	waitForChildProcess
-# Objective               :	Check the status of all engines and wait to complete to finish the job
-# Added By                : Senthil Pandian
-#********************************************************************************************************/
-sub waitForChildProcess {
-	my $enginePID			= $_[0];
-	my $totalEngineBackup 	= (Helpers::getUserConfiguration('ENGINECOUNT') ne '')?Helpers::getUserConfiguration('ENGINECOUNT'):$Configuration::maxEngineCount;
-
-	if(defined($enginePID)) {
-		if (-e $enginePID) {
-			my $pid = getFileContents($enginePID);
-			Chomp(\$pid);
-			return unless($pid);
-			while(kill( 0, $pid)) {
-				sleepForMilliSec(100); # Sleep for 100 milliseconds
-			}
-			unlink($enginePID) if (-e $enginePID);
-		}
-	} else {
-		my $pidPath = $Configuration::jobRunningDir."/".$Configuration::pidFile;
-		#print "\n\npidPath:$pidPath\n\n\n";
-		for (my $i=1; $i<=$totalEngineBackup; $i++) {
-			my $procPidFile = $pidPath.'_proc_'.$i;
-			if (-e $procPidFile) {
-				my $pid = getFileContents($procPidFile);
-				Chomp(\$pid);
-				next unless($pid);
-				while(kill( 0, $pid)) {
-					sleepForMilliSec(100); # Sleep for 100 milliseconds
-				}
-				unlink($procPidFile) if (-e $procPidFile);
-			}
-		}
-	}
-}
-
 #------------------------------------------------- X -------------------------------------------------#
 #------------------------------------------------- Y -------------------------------------------------#
 #------------------------------------------------- Z -------------------------------------------------#

@@ -14,6 +14,7 @@ use POSIX ":sys_wait_h";
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
 use Helpers;
+use Strings;
 use Configuration;
 use constant BACKUP_PID_FAIL => 2;
 
@@ -40,7 +41,6 @@ $SIG{PWR}  = \&processTerm;
 $SIG{KILL} = \&processTerm;
 $SIG{USR1} = \&processTerm;
 
-Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 init();
@@ -52,12 +52,11 @@ init();
 # Modified By: Yogesh Kumar
 #*******************************************************************************
 sub init {
-	system(Helpers::updateLocaleCmd("clear")) and Helpers::retreat('failed_to_clear_screen') unless ($cmdNumOfArgs > -1);
+	system("clear") and Helpers::retreat('failed_to_clear_screen') unless ($cmdNumOfArgs > -1);
 	Helpers::loadAppPath();
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
 	if ($cmdNumOfArgs > -1) {
 		if ((${ARGV[0]} eq "SCHEDULED") or (${ARGV[0]} eq "immediate")) {
-			$Configuration::callerEnv = 'BACKGROUND';
 			Helpers::setUsername($ARGV[1]);
 			$jobType = 'scheduled';
 			$silentBackupFlag = 1;
@@ -65,7 +64,6 @@ sub init {
 			Helpers::loadUserConfiguration();
 		}
 		elsif (${ARGV[0]} eq '--silent' or ${ARGV[0]} eq 'dashboard' or ${ARGV[0]} eq 'immediate') {
-			$Configuration::callerEnv = 'BACKGROUND';
 			$silentBackupFlag = 1;
 		}
 	}
@@ -73,7 +71,7 @@ sub init {
 	if ($jobType eq 'manual') {
 		Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
 		my $errorKey = Helpers::loadUserConfiguration();
-		Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);
+		Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
 	}
 
 	unless ($silentBackupFlag) {
@@ -82,7 +80,7 @@ sub init {
 	}
 	my $username      = Helpers::getUsername();
 	my $servicePath   = Helpers::getServicePath();
-	my $jobRunningDir = Helpers::getJobsPath('localbackup');
+	my $jobRunningDir = Helpers::getUsersInternalDirPath('localbackup');
 	$Configuration::jobRunningDir = $jobRunningDir;
 	$Configuration::jobType		  = "LocalBackup";
 	if(!Helpers::loadEVSBinary()){
@@ -93,15 +91,11 @@ sub init {
 	my $dedup  	      = Helpers::getUserConfiguration('DEDUP');
 	my $serverRoot    = Helpers::getUserConfiguration('SERVERROOT');
 	my $backupTo	  = Helpers::getUserConfiguration('BACKUPLOCATION');
-	if($dedup eq 'off') {
-		my @backupTo = split("/",$backupTo);
-		$backupTo	 = (substr($backupTo,0,1) eq '/')? '/'.$backupTo[1]:'/'.$backupTo[0];
-	}
 	if ($dedup eq 'on' and !$serverRoot) {
 		(my $deviceID, $backupTo)  = split("#",$backupTo);
 		Helpers::display(["\n",'verifying_your_account_info',"\n"]);
 		my %evsDeviceHashOutput = Helpers::getDeviceHash();
-		my $uniqueID = Helpers::getMachineUID() or Helpers::retreat('unable_to_find_mac_address');
+		my $uniqueID = Helpers::getMachineUID() or Helpers::retreat('failed');
 		$uniqueID .= "_1";
 		if(exists($evsDeviceHashOutput{$uniqueID})){
 			$serverRoot  = $evsDeviceHashOutput{$uniqueID}{'server_root'};
@@ -111,7 +105,7 @@ sub init {
 
 		if(!$serverRoot){
 			Helpers::display(["\n",'your_account_not_configured_properly',"\n"])  unless ($silentBackupFlag);
-			Helpers::traceLog(Helpers::getStringConstant('your_account_not_configured_properly'));
+			Helpers::traceLog($Locale::strings{'your_account_not_configured_properly'});
 			Helpers::sendFailureNotice($username,'update_localbackup_progress',$jobType);
 			exit 1;
 		}
@@ -128,37 +122,27 @@ sub init {
 	}
 
 	#Renaming the log file if backup process terminated improperly
-	Helpers::checkAndRenameFileWithStatus($jobRunningDir, 'localbackup');
+	Helpers::checkAndRenameFileWithStatus($jobRunningDir);
 
 	removeIntermediateFiles(); # pre cleanup for all intermediate files and folders.
 
 	$backupsetFile     = Helpers::getCatfile($jobRunningDir, $Configuration::backupsetFile);
 	#Helpers::createUpdateBWFile(); #Commented by Senthil: 13-Aug-2018
-	$isEmpty = Helpers::checkPreReq($backupsetFile, lc(Helpers::getStringConstant('localbackup')), $jobType, 'NOBACKUPDATA');
+	$isEmpty = Helpers::checkPreReq($backupsetFile, lc($Locale::strings{'localbackup'}), $jobType, 'NOBACKUPDATA');
 	if($isEmpty and $isScheduledJob == 0 and $silentBackupFlag == 0) {
 		unlink($pidPath);
-		Helpers::retreat(["\n",$Configuration::errStr]);
+		Helpers::retreat(["\n",$Configuration::errStr]) 
 	}
-	# Commented as per Deepak's instruction: Senthil
-	# my $serverAddress = Helpers::getServerAddress();
-	# if ($serverAddress == 0){
-		# exitCleanup($Configuration::errStr);
-	# }
+
+	my $serverAddress = Helpers::getServerAddress();
+	if ($serverAddress == 0){
+		exitCleanup($Configuration::errStr);
+	}
 
 	$mountedPath     = Helpers::getAndSetMountedPath($silentBackupFlag);
-	$isEmpty = 1 if($silentBackupFlag and !$mountedPath);
 	$expressLocalDir = Helpers::getCatfile($mountedPath, ($Configuration::appType . 'Local'));
 	$localUserPath   = Helpers::getCatfile($expressLocalDir, $username);
 	$Configuration::expressLocalDir = $expressLocalDir;
-
-	#Verify dbpath.xml file
-# TODO: Need to enable for local restore
-#	if ($dedup eq 'on') {
-#		my @backupLocationDir = Helpers::getUserBackupDirListFromMountPath($localUserPath);
-#		if(scalar(@backupLocationDir)>0) {
-#			Helpers::checkAndCreateDBpathXMLfile($localUserPath, \@backupLocationDir);
-#		}
-#	}
 
 	#Start creating required file/folder
 	my $excludeDirPath = Helpers::getCatfile($jobRunningDir, $Configuration::excludeDir);
@@ -175,14 +159,12 @@ sub init {
 	Helpers::createBackupTypeFile() or Helpers::retreat('failed_to_set_backup_type');
 	unless ($silentBackupFlag) {
 		if ($dedup eq 'off') {
-			my $bl = Helpers::getUserConfiguration('BACKUPLOCATION');
-			Helpers::display(["\n",'your_current_backup_location_is',"'$bl'."]);
-			Helpers::display(['considered_backup_location_for_express',"'$backupTo'",".\n"]);
+			Helpers::display(["\n",'your_backup_location_is',"'$backupTo'",".\n"]);
 		}elsif($dedup eq 'on'){
 			$backupTo = (split("#",$backupTo))[1];
 			Helpers::display(["\n",'your_backup_location_is',"'$backupTo'",".\n"]);
 		}
-		Helpers::getCursorPos(11,Helpers::getStringConstant('preparing_file_list')) if (!$isEmpty and -e $pidPath);
+		Helpers::getCursorPos(11,$Locale::strings{'preparing_file_list'}) unless ($isEmpty);
 	}
 
 	$Configuration::mailContentHead = Helpers::writeLogHeader($jobType);
@@ -191,7 +173,7 @@ sub init {
 		Helpers::saveNotifications();
 	}
 
-	startBackup() if(!$isEmpty and -e $pidPath);
+	startBackup() unless ($isEmpty);
 	exitCleanup($Configuration::errStr);
 }
 #****************************************************************************************************
@@ -224,7 +206,7 @@ sub startBackup {
 		$displayProgressBarPid = fork();
 
 		if(!defined $displayProgressBarPid) {
-			$Configuration::errStr = Helpers::getStringConstant('unable_to_display_progress_bar');
+			$Configuration::errStr = $Locale::strings{'unable_to_display_progress_bar'};
 			Helpers::traceLog($Configuration::errStr);
 			return 0;
 		}
@@ -259,7 +241,7 @@ sub startBackup {
 
 START:
 	if(!open(FD_READ, "<", $info_file)) {
-		$Configuration::errStr = Helpers::getStringConstant('failed_to_open_file')." info_file in startBackup: $info_file to read, Reason $! \n";
+		$Configuration::errStr = $Locale::strings{'failed_to_open_file'}." info_file in startBackup: $info_file to read, Reason $! \n";
 		Helpers::traceLog($Configuration::errStr);
 		return 0;
 	}
@@ -286,49 +268,51 @@ START:
 			$line = "";
 			last;
 		}
+		else {
+			my $isEngineRunning = Helpers::isEngineRunning($pidPath.'_'.$engineID);
+			if(!$isEngineRunning){
 
-		my $isEngineRunning = Helpers::isEngineRunning($pidPath.'_'.$engineID);
-		if(!$isEngineRunning){
-			while(1){
-				last	if(!-e $pidPath or !Helpers::isAnyEngineRunning($engineLockFile));
+				while(1){
+					last	if(!-e $pidPath or !Helpers::isAnyEngineRunning($engineLockFile));
 
-				$exec_loads = Helpers::getLoadAverage();
-				if($exec_loads > $exec_cores){
-					sleep(10);
-					next;
+					$exec_loads = Helpers::getLoadAverage();
+
+					if($exec_loads > $exec_cores){
+						sleep(20);
+						next;
+					}
+					last;
 				}
-				last;
-			}
 
-			if($retry_failedfiles_index != -1){
-				$retry_failedfiles_index++;
-				if($retry_failedfiles_index > 2000000000){
-					$retry_failedfiles_index = 0;
+				if($retry_failedfiles_index != -1){
+					$retry_failedfiles_index++;
+					if($retry_failedfiles_index > 2000000000){
+						$retry_failedfiles_index = 0;
+					}
 				}
-			}
 
-			my $backupPid = fork();
+				my $backupPid = fork();
 
-			if(!defined $backupPid) {
-				$Configuration::errStr = "Cannot fork() child process :  for EVS \n";
-				return BACKUP_PID_FAIL;
-			}
-			elsif($backupPid == 0) {
-				my $retType = doBackupOperation($line, $silentBackupFlag, $jobType,$engineID,$retry_failedfiles_index);
-				exit(0);
-			}
-			else{
-				push (@BackupForkchilds, $backupPid);
-				if(defined($exec_loads) and ($exec_loads > $exec_cores)){
-					sleep(2);
+				if(!defined $backupPid) {
+					$Configuration::errStr = "Cannot fork() child process :  for EVS \n";
+					return BACKUP_PID_FAIL;
+				}
+				elsif($backupPid == 0) {
+					my $retType = Helpers::doBackupOperation($line, $silentBackupFlag, $jobType,$engineID,$retry_failedfiles_index);
+					exit(0);
 				}
 				else{
-					sleep(1);
+					push (@BackupForkchilds, $backupPid);
+					if(defined($exec_loads) and ($exec_loads > $exec_cores)){
+						sleep(2);
+					}
+					else{
+						sleep(1);
+					}
 				}
+				$line = "";
 			}
-			$line = "";
 		}
-
 		if($Configuration::totalEngineBackup > 1)
 		{
 			$engineID++;
@@ -340,7 +324,7 @@ START:
 
 		Helpers::killPIDs(\@BackupForkchilds,0);
 	}
-	Helpers::waitForEnginesToFinish(\@BackupForkchilds,$engineLockFile);
+	waitForEnginesToFinish();
 	close FD_READ;
 
 	$Configuration::nonExistsCount    = Helpers::readInfoFile('FAILEDCOUNT');
@@ -378,7 +362,7 @@ START:
 
 		#append total file number to info
 		if (!open(INFO, ">>",$info_file)){
-			$Configuration::errStr = Helpers::getStringConstant('failed_to_open_file')." info_file in startBackup : $info_file, Reason $!\n";
+			$Configuration::errStr = $Locale::strings{'failed_to_open_file'}." info_file in startBackup : $info_file, Reason $!\n";
 			return $Configuration::errStr;
 		}
 		print INFO "TOTALFILES $totalFiles\n";
@@ -415,18 +399,11 @@ sub removeIntermediateFiles {
 	my $progressDetailsFilePath = $Configuration::jobRunningDir."/".$Configuration::progressDetailsFilePath."_";
 	my $engineLockFile  = $Configuration::jobRunningDir.'/'.Configuration::ENGINE_LOCKE_FILE;
 	my $summaryFilePath = $Configuration::jobRunningDir.'/'.$Configuration::fileSummaryFile;
-	my $errorFilePath   = $Configuration::jobRunningDir."/".$Configuration::exitErrorFile;
 
-	my $idevsOutputFile	 	= $Configuration::jobRunningDir."/".$Configuration::evsOutputFile;
-	my $idevsErrorFile 	 	= $Configuration::jobRunningDir."/".$Configuration::evsErrorFile;
-	my $backupUTFpath   	= $Configuration::jobRunningDir.'/'.$Configuration::utf8File;
-	my $operationsFilePath  = $Configuration::jobRunningDir."/".$Configuration::operationsfile;
-	my $doBackupOperationErrorFile = $Configuration::jobRunningDir."/doBackuperror.txt_";
-	my $minimalErrorRetry = $Configuration::jobRunningDir."/".$Configuration::minimalErrorRetry;
+	#my $idevsOutputFile = $jobRunningDir."/".$Configuration::evsOutputFile;
+	#my $idevsErrorFile  = $jobRunningDir."/".$Configuration::evsErrorFile;
 
-	Helpers::removeItems([$evsTempDirPath, $relativeFileset.'*', $noRelativeFileset.'*', $filesOnly.'*', $infoFile, $retryInfo, $errorDir, $statusFilePath.'*', $excludeDirPath, $failedFiles.'*', $utf8File.'*', $progressDetailsFilePath.'*', $engineLockFile, $summaryFilePath, $errorFilePath]);
-	Helpers::removeItems([$idevsErrorFile.'*', $idevsOutputFile.'*', $backupUTFpath.'*', $operationsFilePath.'*', $doBackupOperationErrorFile.'*', $minimalErrorRetry]);
-
+	Helpers::removeItems([$evsTempDirPath, $relativeFileset.'*', $noRelativeFileset.'*', $filesOnly.'*', $infoFile, $retryInfo, $errorDir, $statusFilePath, $excludeDirPath, $failedFiles.'*', $utf8File.'*', $progressDetailsFilePath.'*', $engineLockFile, $summaryFilePath]);
 	return 0;
 }
 
@@ -438,25 +415,25 @@ sub removeIntermediateFiles {
 #*****************************************************************************************************/
 sub exitCleanup {
 	my $pidPath 			= $Configuration::jobRunningDir."/".$Configuration::pidFile;
-#	my $idevsOutputFile	 	= $Configuration::jobRunningDir."/".$Configuration::evsOutputFile;
-#	my $idevsErrorFile 	 	= $Configuration::jobRunningDir."/".$Configuration::evsErrorFile;
-#	my $backupUTFpath   	= $Configuration::jobRunningDir.'/'.$Configuration::utf8File;
-#	my $statusFilePath  	= $Configuration::jobRunningDir."/".$Configuration::statusFile;
+	my $idevsOutputFile	 	= $Configuration::jobRunningDir."/".$Configuration::evsOutputFile;
+	my $idevsErrorFile 	 	= $Configuration::jobRunningDir."/".$Configuration::evsErrorFile;
+	my $backupUTFpath   	= $Configuration::jobRunningDir.'/'.$Configuration::utf8File;
+	my $statusFilePath  	= $Configuration::jobRunningDir."/".$Configuration::statusFile;
 	my $retryInfo       	= $Configuration::jobRunningDir."/".$Configuration::retryInfo;
 	#my $incSize 			= $Configuration::jobRunningDir."/".$Configuration::transferredFileSize;
 	my $fileForSize		    = $Configuration::jobRunningDir."/".$Configuration::fileForSize;
 	my $trfSizeAndCountFile = $Configuration::jobRunningDir."/".$Configuration::trfSizeAndCountFile;
 	my $evsTempDirPath  	= $Configuration::jobRunningDir."/".$Configuration::evsTempDir;
 	my $errorDir 		    = $Configuration::jobRunningDir."/".$Configuration::errorDir;
-	#my $operationsFilePath  = $Configuration::jobRunningDir."/".$Configuration::operationsfile;
+	my $operationsFilePath  = $Configuration::jobRunningDir."/".$Configuration::operationsfile;
+	my $fileSummaryFilePath = $Configuration::jobRunningDir."/".$Configuration::fileSummaryFile;
 	my $pwdPath = Helpers::getIDPWDFile();
 	my $engineLockFile = $Configuration::jobRunningDir.'/'.Configuration::ENGINE_LOCKE_FILE;
-	#my $doBackupOperationErrorFile = $Configuration::jobRunningDir."/doBackuperror.txt_";
-	#my $relativeFileset   = $Configuration::jobRunningDir."/".$Configuration::relativeFileset;
-	#my $noRelativeFileset = $Configuration::jobRunningDir."/".$Configuration::noRelativeFileset;
-	#my $filesOnly		  = $Configuration::jobRunningDir."/".$Configuration::filesOnly;
+	my $doBackupOperationErrorFile = $Configuration::jobRunningDir."/doBackuperror.txt_";
+	my $relativeFileset   = $Configuration::jobRunningDir."/".$Configuration::relativeFileset;
+	my $noRelativeFileset = $Configuration::jobRunningDir."/".$Configuration::noRelativeFileset;
+	my $filesOnly		  = $Configuration::jobRunningDir."/".$Configuration::filesOnly;
 	#my $progressDetailsFilePath = $Configuration::jobRunningDir."/".$Configuration::progressDetailsFilePath;
-
 	my ($successFiles, $syncedFiles, $failedFilesCount,$transferredFileSize, $exit_flag) = (0) x 5;
 	if($silentBackupFlag == 0){
 		system('stty', 'echo');
@@ -468,7 +445,7 @@ sub exitCleanup {
 
 		chomp($exit_flag);
 		if($Configuration::errStr eq "" and -e $Configuration::errorFilePath) {
-			open ERR, "<$Configuration::errorFilePath" or Helpers::traceLog('failed_to_open_file',"errorFilePath in exitCleanup: $Configuration::errorFilePath, Reason: $!");
+			open ERR, "<$Configuration::errorFilePath" or Helpers::traceLog($Locale::strings{'failed_to_open_file'}."errorFilePath in exitCleanup: $Configuration::errorFilePath, Reason: $!");
 			$Configuration::errStr .= <ERR>;
 			close(ERR);
 			chomp($Configuration::errStr);
@@ -480,15 +457,22 @@ sub exitCleanup {
 			# In childprocess, if we exit due to some exit scenario, then this exit_flag will be true with error msg
 			my @exit = split("-",$exit_flag,2);
 			Helpers::traceLog(" exit = $exit[0] and $exit[1]");
-			if (!$exit[0] and $Configuration::errStr eq '') {
+			if(!$exit[0]){
 				if ($jobType eq 'scheduled') {
-					$Configuration::errStr = Helpers::getStringConstant('operation_cancelled_due_to_cutoff');
-					if (!-e Helpers::getServicePath()) {
-						$Configuration::errStr = Helpers::getStringConstant('operation_cancelled_by_user');
+					$Configuration::errStr = $Locale::strings{'operation_cancelled_due_to_cutoff'};
+					my $checkJobTerminationMode = $Configuration::jobRunningDir.'/cancel.txt';
+					if (-e $checkJobTerminationMode and (-s $checkJobTerminationMode > 0)){
+							open (FH, "<$checkJobTerminationMode") or die $!;
+							my @errStr = <FH>;
+							chomp(@errStr);
+							$Configuration::errStr = $Configuration::errStr[0] if (defined $Configuration::errStr[0]);
+					} elsif(!-e Helpers::getServicePath()) {
+						$Configuration::errStr = $Locale::strings{'operation_cancelled_by_user'};
 					}
+					unlink($checkJobTerminationMode);
 				}
 				elsif ($jobType eq 'manual') {
-					$Configuration::errStr = Helpers::getStringConstant('operation_cancelled_by_user');
+					$Configuration::errStr = $Locale::strings{'operation_cancelled_by_user'};
 				}
 			}
 			else {
@@ -498,7 +482,7 @@ sub exitCleanup {
 					# instruction in case of password mismatch or encryption verification failed.
 					# In this case we are removing the IDPWD file.So that user can login and recreate these files with valid credential.
 					if ($Configuration::errStr =~ /password mismatch|encryption verification failed/i) {
-						my $tokenMessage = Helpers::getStringConstant('please_login_account_using_login_and_try');
+						my $tokenMessage = $Locale::strings{'please_login_account_using_login_and_try'};
 						#$tokenMessage =~ s/___login___/$Configuration::idriveScripts{'login'}/eg;
 						$Configuration::errStr = $Configuration::errStr.' '.$tokenMessage."\n";
 						unlink($pwdPath);
@@ -508,7 +492,7 @@ sub exitCleanup {
 						}
 					}
 					elsif ($Configuration::errStr =~ /failed to get the device information|Invalid device id/i) {
-						$Configuration::errStr = $Configuration::errStr.' '.Helpers::getStringConstant('invalid_bkp_location_config_again')."\n";
+						$Configuration::errStr = $Configuration::errStr.' '.$Locale::strings{'invalid_bkp_location_config_again'}."\n";
 					} else {
 						$Configuration::errStr = Helpers::checkErrorAndLogout($Configuration::errStr);
 					}
@@ -531,7 +515,7 @@ sub exitCleanup {
 		Helpers::rmtree($evsTempDirPath);
 	}
 	if(-d $errorDir and $errorDir ne '/') {
-		system(Helpers::updateLocaleCmd("rm -rf '$errorDir'"));
+		system("rm -rf '$errorDir'");
 	}
 
 	if (-e $Configuration::outputFilePath and -s $Configuration::outputFilePath > 0) {
@@ -545,10 +529,10 @@ sub exitCleanup {
 		}
 
 		$Configuration::outputFilePath = $finalOutFile;
-		$Configuration::finalSummary .= Helpers::getStringConstant('for_more_details_refer_the_log').qq(\n);
-		#Concat log file path with job summary. To access both at once while displaying the summary and log file location.
-		$Configuration::finalSummary .= "\n".$Configuration::opStatus."\n".$Configuration::errStr;
-		Helpers::fileWrite("$Configuration::jobRunningDir/$Configuration::fileSummaryFile",$Configuration::finalSummary);
+		$Configuration::finalSummery .= $Locale::strings{'for_more_details_refer_the_log'}.qq(\n);
+		#Concat log file path with job summary. To access both at once while displaying the summery and log file location.
+		$Configuration::finalSummery .= "\n".$Configuration::opStatus."\n".$Configuration::errStr;
+		Helpers::fileWrite("$Configuration::jobRunningDir/$Configuration::fileSummaryFile",$Configuration::finalSummery);
 		if ($silentBackupFlag == 0){
 			#It is a generic function used to write content to file.
 			Helpers::displayProgressBar($Configuration::progressDetailsFilePath) unless ($isEmpty);
@@ -558,24 +542,12 @@ sub exitCleanup {
 		Helpers::saveLog($finalOutFile);
 	}
 	unless ($isEmpty) {
-		Helpers::sendMail({
-				'serviceType' => $jobType,
-				'jobType' => 'Express Backup',
-				'subject' => $subjectLine,
-				'jobStatus' => lc($Configuration::opStatus)
-			});
+		Helpers::sendMail($jobType, 'Express Backup', $subjectLine);
 	} else {
-		Helpers::sendMail({
-				'serviceType' => $jobType,
-				'jobType' => 'Express Backup',
-				'subject' => $subjectLine,
-				'jobStatus' => lc($Configuration::opStatus),
-				'errorMsg' => 'NOBACKUPDATA'
-			});
+		Helpers::sendMail($jobType, 'Express Backup', $subjectLine, 'NOBACKUPDATA');
 	}
 
-	Helpers::removeItems($pidPath.'*');
-	removeIntermediateFiles();
+	Helpers::removeItems([$idevsErrorFile.'*', $idevsOutputFile.'*', $statusFilePath.'*', $backupUTFpath.'*', $operationsFilePath.'*',  $doBackupOperationErrorFile.'*', $relativeFileset.'*', $noRelativeFileset.'*', $filesOnly.'*', $pidPath.'*' ]);
 	unlink($engineLockFile);
 
 	# need to update the crontab with default values.
@@ -618,7 +590,6 @@ sub cancelBackupSubRoutine {
 	if($Configuration::pidOperationFlag eq "EVS_process") {
 		my $psOption = Helpers::getPSoption();
 		my $evsCmd   = "ps $psOption | grep \"$Configuration::evsBinaryName\" | grep \'$backupUTFpath\'";
-		$evsCmd = Helpers::updateLocaleCmd($evsCmd);
 		my $evsRunning  = `$evsCmd`;
 		my @evsRunningArr = split("\n", $evsRunning);
 		my $arrayData = ($Helpers::machineInfo =~ /freebsd/i)? 1 : 3;
@@ -627,19 +598,18 @@ sub cancelBackupSubRoutine {
 			next if($_ =~ /$evsCmd|grep/);
 
 			my $pid = (split(/[\s\t]+/, $_))[$arrayData];
-			my $scriptTerm = system(Helpers::updateLocaleCmd("kill -9 $pid"));
-			Helpers::traceLog('failed_to_kil', ' Backup') if(defined($scriptTerm) && $scriptTerm != 0 && $scriptTerm ne '');
+			my $scriptTerm = system("kill -9 $pid");
+			Helpers::traceLog($Locale::strings{'failed_to_kil'} . ' Backup') if(defined($scriptTerm) && $scriptTerm != 0 && $scriptTerm ne '');
 		}
-
+		
 		return;
 	}
-
-	waitpid($Configuration::pidOutputProcess, 0) if($Configuration::pidOutputProcess && $Configuration::pidOperationFlag eq "main");
-	Helpers::waitForChildProcess();
+	
+	waitpid($Configuration::pidOutputProcess, 0) if($Configuration::pidOutputProcess && $Configuration::pidOperationFlag eq "main"); 
 	exit(0) if($Configuration::pidOperationFlag eq "DisplayProgress");
 
 	if($Configuration::pidOperationFlag eq "GenerateFile") {
-		open FD_WRITE, ">>", $info_file or Helpers::display(['failed_to_open_file'," info_file in cancelSubRoutine: $info_file to write, Reason:$!"]); # die handle?
+		open FD_WRITE, ">>", $info_file or (print $Locale::strings{'failed_to_open_file'}." info_file in cancelSubRoutine: $info_file to write, Reason:$!"); # die handle?
 		autoflush FD_WRITE;
 		#print FD_WRITE "TOTALFILES $totalFiles\n";
 		print FD_WRITE "TOTALFILES $Configuration::totalFiles\n";
@@ -669,7 +639,6 @@ sub cancelBackupSubRoutine {
 
 		if($Configuration::nonExistsCount == 0 and -e $info_file) {
 			my $nonExistCheckCmd = "cat '$info_file' | grep -m1 \"^FAILEDCOUNT\"";
-			$nonExistCheckCmd = Helpers::updateLocaleCmd($nonExistCheckCmd);
 			$Configuration::nonExistsCount = `$nonExistCheckCmd`;
 			$Configuration::nonExistsCount =~ s/FAILEDCOUNT//;
 			Helpers::Chomp(\$Configuration::nonExistsCount);
@@ -703,157 +672,4 @@ sub waitForEnginesToFinish{
 	}
 
 	return;
-}
-
-#****************************************************************************************************
-# Subroutine Name : doBackupOperation.
-# Objective       : This subroutine performs the actual task of backing up files. It creates
-#							a child process which executes the backup command. It also creates a process
-#							which continuously monitors the temporary output file. At the end of backup,
-#							it inspects the temporary error file if present. It then deletes the temporary
-#							output file, temporary error file and the temporary directory created by
-#							idevsutil binary.
-# Usage			  : doBackupOperation($line);
-# Where			  : $line :
-# Modified By     : Deepak Chaurasia, Vijay Vinoth, Senthil Pandian
-#*****************************************************************************************************/
-sub doBackupOperation
-{
-	my $parameters       = $_[0];
-	my $silentBackupFlag = $_[1];
-	my $scheduleFlag     = $_[2];
-	my $operationEngineId = $_[3];
-	my $retry_failedfiles_index = $_[4];
-	my $pidPath       = $Configuration::jobRunningDir."/".$Configuration::pidFile;
-	my $backupUTFpath = $Configuration::jobRunningDir.'/'.$Configuration::utf8File."_".$operationEngineId;
-	my $evsOutputFile = $Configuration::jobRunningDir.'/'.$Configuration::evsOutputFile.'_'.$operationEngineId;
-	my $evsErrorFile  = $Configuration::jobRunningDir.'/'.$Configuration::evsErrorFile.'_'.$operationEngineId;
-	my $isDedup  	  = Helpers::getUserConfiguration('DEDUP');
-	my $bwPath     	  = Helpers::getUserProfilePath()."/bw.txt";
-	my $defLocal	  = (-e Helpers::getIDPVTFile())?0:1;
-	my $backupHost	  = Helpers::getUserConfiguration('BACKUPLOCATION');
-	if ($isDedup eq 'off' and $Configuration::jobType eq "LocalBackup") {
-		my @backupTo = split("/",$backupHost);
-		$backupHost	 = (substr($backupHost,0,1) eq '/')? '/'.$backupTo[1]:'/'.$backupTo[0];
-	}
-	my $userName 	      = Helpers::getUsername();
-	my $backupLocationDir = Helpers::getLocalBackupDir();
-	my @parameter_list = split /\' \'/,$parameters,3;
-	my $engineLockFile = $Configuration::jobRunningDir."/".Configuration::ENGINE_LOCKE_FILE;
-	$backupUTFpath = $backupUTFpath;
-
-	open(my $startPidFileLock, ">>", $engineLockFile) or return 0;
-	if (!flock($startPidFileLock, 1)){
-		Helpers::traceLog("Failed to lock engine file");
-		return 0;
-	}
-
-	Helpers::fileWrite($pidPath.'_evs_'.$operationEngineId, 1); #Added for Harish_2.19_7_7, Harish_2.19_6_7
-	open(my $engineFp, ">>", $pidPath.'_'.$operationEngineId) or return 0;
-	if (!flock($engineFp, 2)){
-		Helpers::display('failed_to_lock',1);
-		return 0;
-	}
-
-	Helpers::createUTF8File(['EXPRESSBACKUP',$backupUTFpath],
-				$parameter_list[2],
-				$bwPath,
-				$defLocal,
-				$Configuration::jobRunningDir."/",
-				$parameter_list[1],
-				$evsOutputFile,
-				$evsErrorFile,
-				$backupLocationDir,
-				$parameter_list[0],
-				$backupLocationDir
-				) or Helpers::retreat('failed_to_create_utf8_file');
-
-	my $backupPid = fork();
-	if (!defined $backupPid) {
-		$Configuration::errStr = Helpers::getStringConstant('cannot_fork_child')."\n";
-		#return BACKUP_PID_FAIL;
-		return 2;
-	}
-
-	if ($backupPid == 0) {
-		$Configuration::pidOperationFlag = "EVS_process";
-		if ( -e $pidPath) {
-			#exec($idevsutilCommandLine);
-			my @responseData = Helpers::runEVS('item',1);
-			if ($responseData[0]->{'STATUS'} eq 'FAILURE') {
-				if (open(ERRORFILE, ">> $Configuration::errorFilePath"))
-				{
-					autoflush ERRORFILE;
-					print ERRORFILE $Configuration::errStr;
-					close ERRORFILE;
-					chmod $Configuration::filePermission, $Configuration::errorFilePath;
-				}
-				else {
-					Helpers::traceLog('failed_to_open_file',"errorFilePath in doBackupOperation:".$Configuration::errorFilePath.", Reason:$! \n");
-				}
-			}
-
-			if (open OFH, ">>", $evsOutputFile) {
-				print OFH "\nCHILD_PROCESS_COMPLETED\n";
-				close OFH;
-				chmod $Configuration::filePermission, $evsOutputFile;
-			}
-			else {
-				$Configuration::errStr = Helpers::getStringConstant('failed_to_open_file').": $Configuration::outputFilePath in doBackupOperation. Reason: $!";
-				Helpers::display($Configuration::errStr);
-				Helpers::traceLog($Configuration::errStr);
-				return 0;
-			}
-		}
-		exit 1;
-	}
-
-	$Configuration::pidOperationFlag = "child_process";
-	$Configuration::pidOutputProcess = $backupPid;
-	exit(1) unless(-f $pidPath);
-
-	#$isLocalBackup = 0;
-	my $currentDir = Helpers::getAppPath();
-	my $workingDir = $currentDir;
-	$workingDir =~ s/\'/\'\\''/g;
-	my $tmpoutputFilePath = $Configuration::outputFilePath;
-	$tmpoutputFilePath =~ s/\'/\'\\''/g;
-	my $TmpBackupSetFile = $parameter_list[2];
-	$TmpBackupSetFile =~ s/\'/\'\\''/g;
-	my $TmpSource = $parameter_list[0];
-	$TmpSource =~ s/\'/\'\\''/g;
-	my $tmp_jobRunningDir = $Configuration::jobRunningDir;
-	$tmp_jobRunningDir =~ s/\'/\'\\''/g;
-	my $tmpBackupHost = $backupHost;
-	$tmpBackupHost =~ s/\'/\'\\''/g;
-
-	my $fileChildProcessPath = $currentDir.'/'.$Configuration::idriveScripts{'operations'};
-	my $bwThrottle 			 = Helpers::getUserConfiguration('BWTHROTTLE');
-	my $backupPathType       = Helpers::getUserConfiguration('BACKUPTYPE');
-	my @param = join ("\n",('LOCAL_BACKUP_OPERATION',$tmpoutputFilePath,$TmpBackupSetFile,$parameter_list[1],$TmpSource,$Configuration::progressSizeOp,$tmpBackupHost,$bwThrottle,$silentBackupFlag,$backupPathType,$scheduleFlag,$operationEngineId));
-
-	Helpers::writeParamToFile("$tmp_jobRunningDir/$Configuration::operationsfile"."_".$operationEngineId,@param);
-	my $perlPath = Helpers::getPerlBinaryPath();
-	#traceLog("cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\'");
-	{
-		#my $execString = getStringConstant('support_file_exec_string');
-		my $cmd = "cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmp_jobRunningDir\' \'$userName\' \'$operationEngineId\' \'$retry_failedfiles_index\'";
-		$cmd = Helpers::updateLocaleCmd($cmd);
-		system($cmd);
-	}
-
-	waitpid($backupPid, 0);
-	unlink($pidPath.'_evs_'.$operationEngineId);
-	Helpers::waitForChildProcess($pidPath.'_proc_'.$operationEngineId);
-	unlink($pidPath.'_'.$operationEngineId);
-
-	return 0 unless(Helpers::updateServerAddr());
-
-	unlink($parameter_list[2]);
-	unlink($evsOutputFile.'_'.$operationEngineId);
-	flock($startPidFileLock, 8);
-	flock($engineFp, 8);
-
-	return 0 if (-e $Configuration::errorFilePath && -s $Configuration::errorFilePath);
-	return 1; #Success
 }

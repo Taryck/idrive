@@ -3,9 +3,10 @@
 ###############################################################################
 #Script Name : Header.pl
 ###############################################################################
-#use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
-use lib map{if (__FILE__ =~ /\//) {if ($_ eq '.') {substr(__FILE__, 0, rindex(__FILE__, '/'));}else {substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";}}else {if ($_ eq '.') {substr(__FILE__, 0, rindex(__FILE__, '/'));}else {"./$_";}}} qw(Idrivelib/lib .);
+use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
+use Taryck;
+#use strict;
 use Cwd;
 use Tie::File;
 use File::Copy;
@@ -19,8 +20,7 @@ use JSON;
 
 #use Constants 'CONST';
 require Constants;
-#require Strings;
-use Configuration;
+require Strings;
 use Helpers;
 
 Helpers::loadAppPath();
@@ -39,8 +39,7 @@ our $fileTransferCount = 1;
 our $currentDir = $userScriptLocation;
 our $userName = undef;
 our ( $proxyOn, $proxyIp, $proxyPort, $proxyUsername, $proxyPassword) = (undef) x 5;
-my $mcUserLocaleCmd = Helpers::updateLocaleCmd('whoami');
-our $mcUser = `$mcUserLocaleCmd`;
+our $mcUser = `whoami`;
 chomp($mcUser);
 our ($appTypeSupport,$appType) = getAppType();
 our $appMaintainer = getAppMaintainer();
@@ -48,7 +47,47 @@ our @columnNames = (['S.No.','Device Name','Device ID','OS','Date & Time','IP Ad
 our $freshInstallFile = "$userScriptLocation/freshInstall";
 my $serviceDir = '';
 our @linesCrontab = ();
-
+our $excludedFileIndex = 1;
+# TBE Config
+our $backupHost;
+our $backupType;
+our $restoreHost;
+our $configEmailAddress;
+our $bwThrottle;
+our $restoreLocation;
+our $ifRetainLogs;
+our $backupPathType;
+our $serverRoot;
+our $totalEngineBackup = 4;
+our $percentToNotifyForFailedFiles;
+our $percentToNotifyForMissedFiles;
+our $isIgnorePermissionErrors;
+#our $currentDirforCmd; # not used
+our $pwdPath;
+our $enPwdPath;
+our $pvtPath;
+our $utf8File;
+our $serverfile;
+our $bwPath;
+our $excludeFullPath;
+our $excludePartialPath;
+our $regexExcludePath;
+our $backupsetFilePath;
+our $RestoresetFile;
+#our $backupsetSchFilePath;
+#our $RestoresetSchFile;
+our $localBackupsetFilePath;
+our $validateRestoreFromFile;
+our $configFilePath;
+our $excludeDirPath;
+our $excludedLogFilePath;
+my @linkDataList = ();
+my $usrProfileDir;
+my $content = "";
+my $commandOutput;
+my $oldBackupLoc = '';
+my $tHandle;			# pour que ca compile pas convaincu
+my $isSameDeviceID; 	# pour que ca compile pas convaincu
 #-------------------------------------------------------Function Prototypes-------------------------------------
 #---------------------------------------------------------------------------------------------------------------
 #######################################################################
@@ -95,6 +134,15 @@ our $machineInfo;
 my $freebsdProgress = "";
 my $latestCulmn;
 getPSoption(); #Getting PS option to get process id.
+#Added for FreeBSD machine's progress bar display
+if($machineInfo eq 'freebsd'){
+	$latestCulmn = `tput cols`;
+	my $lineCount = 11;
+	for(my $i=0; $i<=$lineCount; $i++){
+		$freebsdProgress .= (' ')x$latestCulmn;
+		$freebsdProgress .= "\n";
+	}
+}
 
 #Path change required
 our $pidPath = undef;
@@ -114,7 +162,7 @@ our $data = undef;
 
 our $fileCountThreadStatus;
 our $summary = undef;
-our $finalSummary = undef; #This variable content will be shown on the terminal whenever jobs get completed,accidently/abrouptly terminated.
+our $finalSummery = undef; #This variable content will be shown on the terminal whenever jobs get completed,accidently/abrouptly terminated.
 our $summaryError = undef;
 our $errStr = undef;
 our $location = undef;
@@ -233,23 +281,19 @@ my %hashEvsParameters = (
 #Errors encountered during backup operation#
 #for which the script should retry the     #
 #backup operation                          #
-our @ErrorArgumentsRetry = (
-                           #"idevs error",
+our @ErrorArgumentsRetry = ("idevs error",
                            "io timeout",
                            "Operation timed out",
                            "nodename nor servname provided, or not known",
                            "failed to connect",
-                           "Connection reset",
+                           "Connection refused",
+						   "Connection reset",
+                           "unauthorized user",
                            "connection unexpectedly closed",
-                           "failed to get the host name"
+                           "failed verification -- update",
+						   "user information not found",
+						   "failed to get the host name"
                           );
-
-our @ErrorListForMinimalRetry = (
-	'Connection refused',
-	'failed verification -- update retained',
-	'unauthorized user',
-	'user information not found',
-);
 
 # Errors encountered during backup operation for which the script should not retry the backup operation
 our @ErrorArgumentsExit = ( "encryption verification failed",
@@ -271,12 +315,8 @@ our @ErrorArgumentsExit = ( "encryption verification failed",
 							"Connection timed out",
 							"Invalid device id",
 							"not enough free space on device",
+							"unauthorized user"
                         );
-our @ErrorArgumentsNoRetry = ("Permission denied",
-                           "Directory not empty",
-                           "No such file or directory"
-                          );
-
 our $relative = 1;
 our $defaultBw = undef;
 our $defaultEncryptionKey = "DEFAULT";
@@ -294,10 +334,8 @@ our $parentDir = substr($currentDir, 0, $indexLastDir);
 our $idriveServicePath = $userServicePath;
 our $usrProfilePath = ($idriveServicePath)?"$idriveServicePath/user_profile/$mcUser":"";
 our $cacheDir = ($idriveServicePath)?"$idriveServicePath/cache":"";
-#our $userTxt  = ($cacheDir)?"$cacheDir/idriveuser.txt":"";
-#our $idriveUserTxt  = ($cacheDir)?"$cacheDir/idriveuser.txt":"";
-our $userTxt  = ($cacheDir)?"$idriveServicePath/$Configuration::cachedIdriveFile":"";
-our $idriveUserTxt  = ($cacheDir)?"$idriveServicePath/$Configuration::cachedIdriveFile":"";
+our $userTxt  = ($cacheDir)?"$cacheDir/idriveuser.txt":"";
+our $idriveUserTxt  = ($cacheDir)?"$cacheDir/idriveuser.txt":"";
 
 our $idevsutilBinaryName      = "idevsutil";#Name of idevsutil binary#
 our $idevsutilDedupBinaryName = "idevsutil_dedup";#Name of dedup idevsutil binary#
@@ -375,6 +413,12 @@ our $faqURL			   = "https://www.idrive.com/faq_linux";
 
 if((${ARGV[0]} eq "SCHEDULED") || (${ARGV[0]} eq "immediate") || (${ARGV[0]} eq "dashboard")) {
 	$userName = $ARGV[1] if($ARGV[1] ne "");
+	# Helpers::loadUsername();
+	# if($userName ne Helpers::getUsername()) {
+		# Helpers::setUsername($userName);
+		# Helpers::deactivateOtherUserCRONEntries(Helpers::getUsername());
+		# exit(0);
+	# }
 }
 else{
 	$userName = getCurrentUser();
@@ -399,15 +443,15 @@ sub loadUserData {
 			($proxyUsername,$proxyPassword,$proxyIp,$proxyPort) = ($1,$2,$3,$4);
 		}
 	}
-	our $backupType = Helpers::getUserConfiguration('BACKUPTYPE');
+	$backupType = Helpers::getUserConfiguration('BACKUPTYPE');
 	$dedup = Helpers::getUserConfiguration('DEDUP') if(Helpers::getUserConfiguration('DEDUP') ne '');
-	our $backupHost = Helpers::getUserConfiguration('BACKUPLOCATION');
+	$backupHost = Helpers::getUserConfiguration('BACKUPLOCATION');
 	$backupHost = checkLocationInput($backupHost);
 	if($backupHost ne "" && substr($backupHost, 0, 1) ne "/") {
 		$backupHost = ($dedup eq 'off') ? "/".$backupHost : $backupHost;
 	}
 	$backupHost =~ s/^\/+$|^\s+\/+$//g; ## Removing if only "/"(s) to avoid root
-	our $restoreHost = Helpers::getUserConfiguration('RESTOREFROM');
+	$restoreHost = Helpers::getUserConfiguration('RESTOREFROM');
 	$restoreHost = checkLocationInput($restoreHost);
 	if ($dedup eq 'on'){
 		($restoreDeviceID,$restoreHost) = split ('#',$restoreHost);
@@ -416,37 +460,37 @@ sub loadUserData {
 	if($restoreHost ne "" && substr($restoreHost, 0, 1) ne "/") {
 		$restoreHost = ($dedup eq 'off') ? "/".$restoreHost : $restoreHost;
 	}
-	our $configEmailAddress = Helpers::getUserConfiguration('EMAILADDRESS');
-	our $bwThrottle = getThrottleVal();
-	our $restoreLocation = Helpers::getUserConfiguration('RESTORELOCATION');
+	$configEmailAddress = Helpers::getUserConfiguration('EMAILADDRESS');
+	$bwThrottle = getThrottleVal();
+	$restoreLocation = Helpers::getUserConfiguration('RESTORELOCATION');
 	$restoreLocation = checkLocationInput($restoreLocation);
 	#$restoreLocation =~ s/^\/+$|^\s+\/+$//g; ## Removing if only "/"(s) to avoid root
-	#our $ifRetainLogs = Helpers::getUserConfiguration('RETAINLOGS');
-	our $backupPathType = Helpers::getUserConfiguration('BACKUPTYPE');
-	our $serverRoot = Helpers::getUserConfiguration('SERVERROOT');
-	our $totalEngineBackup = $Configuration::maxEngineCount;
+	$ifRetainLogs = Helpers::getUserConfiguration('RETAINLOGS');
+	$backupPathType = Helpers::getUserConfiguration('BACKUPTYPE');
+	$serverRoot = Helpers::getUserConfiguration('SERVERROOT');
+	$totalEngineBackup = 4;
 	$totalEngineBackup = Helpers::getUserConfiguration('ENGINECOUNT') if(Helpers::getUserConfiguration('ENGINECOUNT') ne '');
 
-	our $percentToNotifyForFailedFiles = (Helpers::getUserConfiguration('NFB') ne '')? Helpers::getUserConfiguration('NFB'):5;
-	our $percentToNotifyForMissedFiles = (Helpers::getUserConfiguration('NMB') ne '')? Helpers::getUserConfiguration('NMB'):5;
+	$percentToNotifyForFailedFiles = (Helpers::getUserConfiguration('NFB') ne '')? Helpers::getUserConfiguration('NFB'):5;
+	$percentToNotifyForMissedFiles = (Helpers::getUserConfiguration('NMB') ne '')? Helpers::getUserConfiguration('NMB'):5;
 
-    our $isIgnorePermissionErrors = (Helpers::getUserConfiguration('IFPE') ne '')? Helpers::getUserConfiguration('IFPE'):0;
+	$isIgnorePermissionErrors = (Helpers::getUserConfiguration('IFPE') ne '')? Helpers::getUserConfiguration('IFPE'):0;
 	#our $currentDirforCmd = quotemeta($currentDir); # not used
-	our $pwdPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDPWD'};
-	our $enPwdPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDENPWD'};
-	our $pvtPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDPVT'};
-	our $utf8File = "$usrProfileDir/.utf8File.txt";
-	our $serverfile = "$usrProfileDir/.userInfo/".Constants->CONST->{'serverAddress'};
-	our $bwPath = "$usrProfileDir/bw.txt";
-	our $excludeFullPath =  "$usrProfileDir/FullExcludeList.txt";
-	our $excludePartialPath = "$usrProfileDir/PartialExcludeList.txt";
-	our $regexExcludePath = "$usrProfileDir/RegexExcludeList.txt";
-	our $backupsetFilePath = "$usrProfileDir/Backup/DefaultBackupSet/BackupsetFile.txt";
-	our $RestoresetFile = "$usrProfileDir/Restore/DefaultRestoreSet/RestoresetFile.txt";
+	$pwdPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDPWD'};
+	$enPwdPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDENPWD'};
+	$pvtPath = "$usrProfileDir/.userInfo/".Constants->CONST->{'IDPVT'};
+	$utf8File = "$usrProfileDir/.utf8File.txt";
+	$serverfile = "$usrProfileDir/.userInfo/".Constants->CONST->{'serverAddress'};
+	$bwPath = "$usrProfileDir/bw.txt";
+	$excludeFullPath =  "$usrProfileDir/FullExcludeList.txt";
+	$excludePartialPath = "$usrProfileDir/PartialExcludeList.txt";
+	$regexExcludePath = "$usrProfileDir/RegexExcludeList.txt";
+	$backupsetFilePath = "$usrProfileDir/Backup/DefaultBackupSet/BackupsetFile.txt";
+	$RestoresetFile = "$usrProfileDir/Restore/DefaultRestoreSet/RestoresetFile.txt";
 	#our $backupsetSchFilePath = "$usrProfileDir/Backup/DefaultBackupSet/BackupsetFile.txt";
 	#our $RestoresetSchFile = "$usrProfileDir/Restore/Scheduled/RestoresetFile.txt";
-	our $localBackupsetFilePath = "$usrProfileDir/Backup/LocalBackupSet/BackupsetFile.txt";
-	our $validateRestoreFromFile = "$usrProfileDir/validateRestoreFromFile.txt";
+	$localBackupsetFilePath = "$usrProfileDir/Backup/LocalBackupSet/BackupsetFile.txt";
+	$validateRestoreFromFile = "$usrProfileDir/validateRestoreFromFile.txt";
 	chmod $filePermission, $usrProfilePath;
 
 	if( -e $serverfile) {
@@ -623,7 +667,6 @@ sub getAppType
 {
 	$appType = "IDrive";
 	#$appType = "IBackup";
-	$appType = $Configuration::appType;
 	$appTypeSupport = lc ($appType);
 	return ($appTypeSupport,$appType);
 }
@@ -675,8 +718,7 @@ sub createEncodeFile
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".
 	$whiteSpace.$hashEvsParameters{UTF8CMD}.$assignmentOperator."'".$utfFile."'".$whiteSpace.$errorRedirection;
 
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
-	my $commandOutput = `$idevsutilCommandLine`;
+	$commandOutput = `$idevsutilCommandLine`;
 	if ($commandOutput =~ /idevsutil: not found/){
 		print "\nPlease reconfigure your account using account_setting.pl script or add this functionality to login \n";
 		exit 0;
@@ -742,8 +784,7 @@ sub getUtf8File
 	my ($getVal, $encPath) = @_;
 	my $usrProfileDir = defined ($usrProfileDir) ? $usrProfileDir : $usrProfilePath	;
 	if (!-e $usrProfileDir){
-		my $usrProfileDirCmd = Helpers::updateLocaleCmd("mkdir -p '$usrProfileDir'");
-		my $res = `$usrProfileDirCmd`;
+		my $res = `mkdir -p '$usrProfileDir'`;
 	}
 	#create utf8 file.
  	open FILE, ">", "$usrProfileDir/utf8.txt" or (traceLog($lineFeed. $lineFeed.Constants->CONST->{'FileOpnErr'}."utf8.txt. failed reason:$! $lineFeed", __FILE__, __LINE__) and die);
@@ -764,36 +805,37 @@ sub getUtf8File
 #*****************************************************************************************************/
 sub getServerAddr
 {
-	my (%evsServerHashOutput, $commandOutput, $addrMessage, $desc);
 	if ($_[0]){
-		open FILE, ">", $serverfile or (traceLog($lineFeed.Constants->CONST->{'FileOpnErr'}."$serverfile for getServerAddress, Reason:$! $lineFeed") and die);
+		open FILE, ">", $serverfile or (print $tHandle $lineFeed.Constants->CONST->{'FileOpnErr'}."$serverfile for getServerAddress, Reason:$! $lineFeed" and die);
                 print FILE $_[0];
                 close FILE;
                 chmod $filePermission, $serverfile;
 		return 1;
 	}
-	my $authCGI = $Configuration::IDriveAuthCGI;
-	$authCGI = $Configuration::IBackupAuthCGI if ($Configuration::appType eq 'IBackup');
-	my %params = (
-		'host' => $authCGI,
-		'method' => 'POST',
-		'data' => {
-			'username' => Helpers::getUsername(),
-			'password' => &Helpers::getPdata(Helpers::getUsername()),
+	my $getServerUtfFile = undef;
+	$getServerUtfFile = getOperationFile(Constants->CONST->{'GetServerAddressOp'});
+
+	$getServerUtfFile =~ s/\'/\'\\''/g;
+
+	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getServerUtfFile."'".$whiteSpace.$errorRedirection.$lineFeed;
+
+	my $commandOutput = `$idevsutilCommandLine`;
+	unlink($getServerUtfFile);
+
+	my %evsServerHashOutput = parseXMLOutput(\$commandOutput);
+	my $addrMessage = $evsServerHashOutput{'message'};
+	$serverAddress = $evsServerHashOutput{'cmdUtilityServerIP'};
+	my $desc = $evsServerHashOutput{'desc'};
+	traceLog($lineFeed.Constants->CONST->{'GetServAddr'}.$commandOutput.$lineFeed, __FILE__, __LINE__);
+
+	if($commandOutput =~ /reason\: connect\(\) failed/) {
+		print $lineFeed.Constants->CONST->{'ProxyErr'}.$lineFeed.$whiteSpace;
+		traceLog($lineFeed.Constants->CONST->{'ProxyErr'}.$lineFeed, __FILE__, __LINE__);
+		if($mkDirFlag) {
+			rmtree($userName);
 		}
-	);
-	my $res = Helpers::requestViaUtility(\%params);
-	if(defined($res->{DATA})) {
-		%evsServerHashOutput = parseXMLOutput(\$res->{DATA});
-		$addrMessage   = $evsServerHashOutput{'message'};
-		#$serverAddress = $evsServerHashOutput{'cmdUtilityServerIP'};
-		$serverAddress = $evsServerHashOutput{'evssrvrip'};
-		$desc = $evsServerHashOutput{'desc'};	
-	} else {
 		return 0;
 	}
-	
-
 	if($addrMessage =~ /ERROR/) {
 		if($desc ne ''){
 			print $lineFeed.$desc.$lineFeed.$whiteSpace;
@@ -806,7 +848,7 @@ sub getServerAddr
 		return 0;
 	}
 	if(0 < length($serverAddress)) {
-		open FILE, ">", $serverfile or (traceLog($lineFeed.Constants->CONST->{'FileOpnErr'}."$serverfile for getServerAddress, Reason:$! $lineFeed") and die);
+		open FILE, ">", $serverfile or (print $tHandle $lineFeed.Constants->CONST->{'FileOpnErr'}."$serverfile for getServerAddress, Reason:$! $lineFeed" and die);
 		print FILE $serverAddress;
 		close FILE;
 		chmod $filePermission, $serverfile;
@@ -892,18 +934,16 @@ sub readStatusFile
 # Subroutine Name         : readFinalStatus.
 # Objective               : reads the overall status file based on engine
 # Added By                : Vijay Vinoth
-# Modified By             : Senthil Pandian
 #*****************************************************************************************************/
 sub readFinalStatus
 {
 
-	for($i=1; $i<= $totalEngineBackup; $i++){
+	for(my $i=1; $i<= $totalEngineBackup; $i++){
 		if(-e $statusFilePath."_$i" and -f $statusFilePath."_$i" and -s $statusFilePath."_$i" ) {
 			readStatusFile($i);
 			$statusFinalHash{'FILES_COUNT_INDEX'} += $statusHash{'FILES_COUNT_INDEX'};
 			$statusFinalHash{'SYNC_COUNT_FILES_INDEX'} += $statusHash{'SYNC_COUNT_FILES_INDEX'};
-			# $statusFinalHash{'FAILED_COUNT_FILES_INDEX'} += $statusHash{'FAILED_COUNT_FILES_INDEX'};
-			$statusFinalHash{'FAILEDFILES_LISTIDX'} += $statusHash{'FAILEDFILES_LISTIDX'};
+			$statusFinalHash{'FAILED_COUNT_FILES_INDEX'} += $statusHash{'FAILED_COUNT_FILES_INDEX'};
 			$statusFinalHash{'ERROR_COUNT_FILES'} += $statusHash{'ERROR_COUNT_FILES'};
 			$statusFinalHash{'DENIED_COUNT_FILES'} += $statusHash{'DENIED_COUNT_FILES'};
 			$statusFinalHash{'MISSED_FILES_COUNT'} += $statusHash{'MISSED_FILES_COUNT'};
@@ -970,7 +1010,7 @@ sub getParameterValueFromStatusFileFinal
 #*****************************************************************************************************/
 sub putParameterValueInStatusFile
 {
-	($operationEngineId) = @_;
+	my ($operationEngineId) = @_;
 	open STAT_FILE, ">", $statusFilePath."_".$operationEngineId or (traceLog($lineFeed.Constants->CONST->{'StatMissingErr'}." reason :$! $lineFeed", __FILE__, __LINE__) and die);
 	foreach my $keys(keys %statusHash) {
 		print STAT_FILE "$keys = $statusHash{$keys}\n";
@@ -998,11 +1038,9 @@ sub getOperationFile
 	my $serverNameOperator = "::";
 	my $operationType = $_[0];
 	my $encType = checkEncType();
-	Helpers::loadServerAddress();
-	my $serverAddress = Helpers::getServerAddress();
-	$xmlOutputParam  = '';
-	$itemStatusParam = $hashEvsParameters{ITEMSTATUS}.$lineFeed;
-	$backupLocation  = $backupHost.$pathSeparator;
+	my $xmlOutputParam  = '';
+	my $itemStatusParam = $hashEvsParameters{ITEMSTATUS}.$lineFeed;
+	my $backupLocation  = $backupHost.$pathSeparator;
 	#$deviceID = "5c0bD015009889990006548954b5z"; #Senthil Added
 	if($dedup eq 'on'){
 		$xmlOutputParam  = $hashEvsParameters{XMLOUTPUT}.$lineFeed;
@@ -1132,17 +1170,17 @@ sub getOperationFile
 			    open UTF8FILE, ">", $utfPath or (traceLog(Constants->CONST->{'FileOpnErr'}.$utfPath." for createDir, Reason:$!", __FILE__, __LINE__) and die);
                 $utfFile = $hashEvsParameters{PASSWORD}.$assignmentOperator.$pwdPath.$lineFeed;
 #                if($_[1] eq "PRIVATE"){
-		if ($encType eq "PRIVATE") {
-			$utfFile .= $hashEvsParameters{ENCTYPE}.$assignmentOperator.$privateEncryptionKey.$lineFeed.
-			$hashEvsParameters{PVTKEY}.$assignmentOperator.$pvtPath.$lineFeed;
-		}
+		if($encType eq "PRIVATE"){
+                        $utfFile .= $hashEvsParameters{ENCTYPE}.$assignmentOperator.$privateEncryptionKey.$lineFeed.
+                                    $hashEvsParameters{PVTKEY}.$assignmentOperator.$pvtPath.$lineFeed;
+                }
 
-			$utfFile .= $hashEvsParameters{ENCODE}.$lineFeed.
-			$hashEvsParameters{PROXY}.$assignmentOperator.$proxyStr.$lineFeed.
-			$hashEvsParameters{CREATEDIR}.$assignmentOperator.$backupHost.$lineFeed.
-			$userName.$serverAddressOperator.
-			$serverAddress.$serverNameOperator.
-			$serverName.$lineFeed;
+		$utfFile .= $hashEvsParameters{ENCODE}.$lineFeed.
+		$hashEvsParameters{PROXY}.$assignmentOperator.$proxyStr.$lineFeed.
+		$hashEvsParameters{CREATEDIR}.$assignmentOperator.$backupHost.$lineFeed.
+		$userName.$serverAddressOperator.
+		$serverAddress.$serverNameOperator.
+		$serverName.$lineFeed;
         }
 	elsif($operationType eq Constants->CONST->{'BackupOp'}) {
 		my $BackupsetFile = $_[1];
@@ -1241,11 +1279,11 @@ sub getOperationFile
 		$utfFile .= $hashEvsParameters{ENCOPT}.$lineFeed.
 					$hashEvsParameters{PORTABLE}.$lineFeed.
 					$hashEvsParameters{NOVERSIONS}.$lineFeed.
-					$hashEvsParameters{PORTABLEDEST}.$assignmentOperator.$backupLocationDir.$lineFeed;
+					$hashEvsParameters{PORTABLEDEST}.$assignmentOperator.$Helpers::backupLocationDir.$lineFeed;
 		$utfFile .= $source.$lineFeed.
 					$userName.$serverAddressOperator.
 					$serverAddress.$serverNameOperator.
-					$serverName.$backupLocationDir.$lineFeed;
+					$serverName.$Helpers::backupLocationDir.$lineFeed;
 	}
 	elsif($operationType eq Constants->CONST->{'PropertiesOp'}) {
 		##restoreHost [DHRITI: need removal of starting / if exists
@@ -1395,7 +1433,6 @@ sub getOperationFile
 	print UTF8FILE $utfFile;
 	close UTF8FILE;
 	#traceLog("$operationType has been executed", __FILE__, __LINE__);
-	#traceLog("utfFile: $utfFile", __FILE__, __LINE__);
 	chmod $filePermission, $utfPath;
 	return $utfPath;
 }
@@ -1404,8 +1441,7 @@ sub getOperationFile
 # Subroutine Name         : parseXMLOutput.
 # Objective               : Parse evs command output and load the elements and values to an hash.
 # Added By                : Dhritikana.
-# Modified By 		      : Abhishek Verma - 7/7/2017 - Now this subroutine can parse multiple tags of xml. Previously it was restricted to one level.
-#						  : Senthil Pandian
+# Modified By 		  : Abhishek Verma - 7/7/2017 - Now this subroutine can parse multiple tags of xml. Previously it was restricted to one level.
 #*****************************************************************************************************/
 sub parseXMLOutput
 {
@@ -1420,8 +1456,7 @@ sub parseXMLOutput
 			if($evsOutput =~ /No devices found/){
 				return %resultHash;
 			} else {
-				#@evsArrLine = grep {/\w+/} grep {/bucket_type=\"D\"/} split(/(?:\<item|\<login|<tree)/g, $evsOutput);
-				@evsArrLine = grep {/\w+/} split(/(?:\<item|\<login|<tree)/g, $evsOutput);
+				@evsArrLine = grep {/\w+/} grep {/bucket_type=\"D\"/} split(/(?:\<item|\<login|<tree)/g, $evsOutput);
 			}
 		}else{
 				@evsArrLine = grep {/\w+/} split(/(?:\<item|\<login|<tree)/g, $evsOutput);
@@ -1551,7 +1586,7 @@ sub sendMail
 	if($notifyEmailStatus eq "DISABLED") {
 			return;
 	}
-	$configEmailAddress = $responseData[1] if (defined $responseData[1]);
+	$configEmailAddress = $responseData[1] if(defined $responseData[1]);
 	my $jobStatus = (split '\_', $outputFilePath)[-2];
 
 	if ($notifyEmailStatus eq 'notify_failure'){
@@ -1570,7 +1605,6 @@ sub sendMail
 	}
 
 	my $sender = "support\@".$appTypeSupport.".com";
-	my $content = "";
 	my $subjectLine = $_[0];
 	my $operationData = $_[1];
 	my $backupRestoreFileLink = $_[2];
@@ -1602,7 +1636,6 @@ sub sendMail
 	#`curl -d '$data' '$PATH' &>/dev/nul` or print $tHandle "$linefeed Couldn't send mail. $linefeed";
 	my $curlCmd = formSendMailCurlcmd();
 
-	$curlCmd = Helpers::updateLocaleCmd($curlCmd);
 	my $sendMailMsg = `$curlCmd`;
 
 }
@@ -1613,9 +1646,8 @@ sub sendMail
 # Added By                : Dhritikana
 #*****************************************************************************************************
 sub formSendMailCurlcmd {
-	my $curlPathCmd = Helpers::updateLocaleCmd('which curl');
 	#Assigning curl path
-	my $curlPath = `$curlPathCmd`;
+	my $curlPath = `which curl`;
 	chomp($curlPath);
 	if($curlPath eq ''){
 		$curlPath = '/usr/local/bin/curl';
@@ -1666,7 +1698,6 @@ sub terminateStatusRetrievalScript
 	my $statusScriptName = Constants->FILE_NAMES->{statusRetrivalScript};
 	my $statusScriptCmd = "ps $psOption | grep $statusScriptName | grep -v grep";
 
-	$statusScriptCmd = Helpers::updateLocaleCmd($statusScriptCmd);
 	my $statusScriptRunning = `$statusScriptCmd`;
 	if($statusScriptRunning ne "") {
 		my @processValues = split /[\s\t]+/, $statusScriptRunning;
@@ -1727,9 +1758,7 @@ sub copyTempErrorFile
 sub appendErrorFileContents
 {
 	my $error_dir = $_[0]."/";
-
-	my $filesListCmd = Helpers::updateLocaleCmd("ls '$error_dir'");
-	my @files_list = `$filesListCmd`;
+	my @files_list = `ls '$error_dir'`;
 	my $fileopen = 0;
 	my ($proxyErr,$conOrProtocol) = (0) x 2;
 	chomp(@files_list);
@@ -1782,6 +1811,7 @@ sub checkAndUpdatePermissionDeniedList
 {
 	my $permissionError = $_[0];
 	my $summaryError	= '';
+	my $buffer;
 	if(-e $permissionError && !-z $permissionError){
 		$summaryError.=$lineFeed."_______________________________________________________________________________________";
 		$summaryError.="$lineFeed$lineFeed|Information|$lineFeed";
@@ -1809,7 +1839,6 @@ sub getPermissionDeniedCount
 
 	if(-e $infoFile && !-z $infoFile){
 		my $deniedCountCheckCmd = "cat '$infoFile' | grep \"^DENIEDCOUNT\"";
-		$deniedCountCheckCmd = Helpers::updateLocaleCmd($deniedCountCheckCmd);
 		$deniedCount = `$deniedCountCheckCmd`;
 		$deniedCount =~ s/DENIEDCOUNT//;
 		Chomp(\$deniedCount);
@@ -1830,15 +1859,15 @@ sub createLogFiles
 	my $jobType = $_[0];
 	our $progressDetailsFileName = "PROGRESS_DETAILS";
 	our $outputFileName = $jobType;
-	#our $errorFileName = $jobType."_ERRORFILE";
+	our $errorFileName = $jobType."_ERRORFILE";
 	my $logDir = "$jobRunningDir/LOGS";
 	$errorDir = "$jobRunningDir/ERROR";
 	my $logPidFilePath = $jobRunningDir.$pathSeparator.$logPidFile;
 
-	# if(!$ifRetainLogs) {
-		# chmod $filePermission, $logDir;
-		# rmtree($logDir);
-	# }
+	if(!$ifRetainLogs) {
+		chmod $filePermission, $logDir;
+		rmtree($logDir);
+	}
 
 	if(!-d $logDir)
 	{
@@ -1846,11 +1875,17 @@ sub createLogFiles
 		chmod $filePermission, $logDir;
 	}
 
+#=====================================================================================================================
+# TBE : ENH-003 TIMESTAMP fix to YYYY-MM-DD_HH-MM-SS
 #	my $currentTime = localtime;
-	my $currentTime = time;#This function will give the current epoch time.
+#	my $currentTime = time;#This function will give the current epoch time.
 	#previous log file name use to be like 'BACKUP Wed May 17 12:34:47 2017_FAILURE'.Now log name will be '1495007954_SUCCESS'.
+# Correct timestamp string : YYYY-MM-DD_HH-MM-SS
+	my $currentTime = POSIX::strftime("%Y-%m-%d_%H-%M-%S", localtime);
+#=====================================================================================================================
 	$outputFilePath = $logDir.$pathSeparator.$currentTime."_Running_".$taskType;
-	$errorFilePath  = $jobRunningDir."/exitError.txt";
+	$errorFilePath = $errorDir.$pathSeparator.$errorFileName;
+
 	#Keeping current log file name in logpid file
 	open(my $handle, '>', $logPidFilePath) or traceLog("\n Could not open file '$logPidFilePath' $! \n", __FILE__, __LINE__);
 	print $handle $outputFilePath;
@@ -1956,38 +1991,34 @@ sub displayProgressBar
 	my $fileSizeUnit = convertFileSize($incrFileSize);
 	#$kbps =~ s/\s+//;
 	$percent = sprintf "%4s", "$percent%";
-	$spAce = " " x 6;
-	$boundary = "-"x(100/$progressSizeOp);
-	$spAce1 = " "x(38/$progressSizeOp);
+	my $spAce = " "x6;
+	my $boundary = "-"x(100/$progressSizeOp);
+	my $spAce1 = " "x(38/$progressSizeOp);
 
 	my $fileDetailRow =  $progressDataFileDisplayHash[rand @progressDataFileDisplayHash];
 	return if($fileDetailRow eq "");
 
 	my $strLen  = length $fileDetailRow;
-	$emptySpaceDetail = " "x($latestCulmn-$strLen);
-
-	my $sizeRowDetail = "$spAce1\[$fileSizeUnit of $totalSizeUnit] [$kbps/s]";
-	$strLen  = length $sizeRowDetail;
-	$emptySizeRowDetail = " "x($latestCulmn-$strLen);
+	$emptySpace = " "x($latestCulmn-$strLen);
 
 	if($machineInfo eq 'freebsd'){
-		system(Helpers::updateLocaleCmd("tput rc"));
-		system(Helpers::updateLocaleCmd("tput ed"));
+		system("tput rc");
+		system("tput ed");
 		print $freebsdProgress;
 		$emptyLine = (" "x(100))."\n";
 	}
 
-	system(Helpers::updateLocaleCmd("tput rc"));
-	system(Helpers::updateLocaleCmd("tput ed"));
+	system("tput rc");
+	system("tput ed");
 
 	print $fullHeader;
-	print "$fileDetailRow $emptySpaceDetail\n\n";
+	print "$fileDetailRow $emptySpace\n\n";
 	print "$spAce$boundary\n";
 	print "$percent [";
 	print $progress.$cellSize;
 	print "]\n";
 	print "$spAce$boundary\n";
-	print "$sizeRowDetail $emptySizeRowDetail\n";
+	print "$spAce1\[$fileSizeUnit of $totalSizeUnit] [$kbps/s]$emptySpace\n";
 
 	if($jobType =~ /Backup/i) {
 		if($dedup eq 'on'){
@@ -2024,8 +2055,7 @@ sub writeLogHeader {
 
 
 	autoflush OUTFILE;
-	my $hostCmd = Helpers::updateLocaleCmd('hostname');
-	my $host = `$hostCmd`;
+	my $host = `hostname`;
 	chomp($host);
 
 	autoflush OUTFILE;
@@ -2033,11 +2063,13 @@ sub writeLogHeader {
 	my $backupMountPath = '';
 	if($tempJobType =~ /Local/){
 		$tempJobType =~ s/Local//;
-		$backupMountPath = "Mount Path: $expressLocalDir $lineFeed";
+#		$backupMountPath = "Mount Path: $expressLocalDir $lineFeed";
+		$backupMountPath = "Mount Path: <expressLocalDir> $lineFeed";
 	}
 
 	@startTime = localtime();
-	my $st = localtime(mktime(@startTime));
+#	my $st = localtime(mktime(@startTime));
+	my $st = Taryck::TS2Text(mktime(@startTime));
 
 	my $jobname = '';
 	my $jt = 'backup';
@@ -2062,15 +2094,10 @@ sub writeLogHeader {
 	}
 	$mailHeadB .= $backupMountPath;
 	if($tempJobType eq "Restore") {
-		my $fromLocation = ($dedup eq 'on' and $restoreHost =~ /#/)?(split('#',$restoreHost))[1]:$restoreHost;
+		my $fromLocation = ($restoreHost =~ /#/)?(split('#',$restoreHost))[1]:$restoreHost;
 		$mailHeadB .= "$tempJobType From Location: $fromLocation $lineFeed";
-		#Ignoring if version restore
-		if($_[1] ne Constants->CONST->{'VersionOp'}) {
-			$jsc 		.= 'Restore Set Contents:' . "\n";
-			$jsc 		.= Helpers::getJobSetLogSummary(lc($tempJobType));
-		} else {
-			$jsc 		.= 'Version restore' . "\n";
-		}
+		$jsc 		.= 'Restore Set Contents:' . "\n";
+		$jsc 		.= Helpers::getJobSetLogSummary(lc($tempJobType));
 	}
 	else {
 		#$mailHeadB .= "Backup Failure(%): $percentToNotifyForFailedFiles $lineFeed";FAILED FILES
@@ -2101,13 +2128,10 @@ sub writeOperationSummary
 	$filesConsideredCount = $totalFiles;
 	chomp($filesConsideredCount);
 
-	my $transferredFileSize = $_[2] || 0;
-	my $fs = convertFileSize($transferredFileSize);
-
 	chmod $filePermission, $outputFilePath;
 	$summary = '';
-	$status  = "Aborted";
-	if (-e $outputFilePath and -s $outputFilePath > 0){# If $outputFilePath exists then only summary will be written otherwise no summary file will exists.
+
+	if (-e $outputFilePath and -s $outputFilePath > 0){# If $outputFilePath exists then only summery will be written otherwise no summery file will exists.
 		# open output.txt file to write restore summary.
 		if (!open(OUTFILE, ">> $outputFilePath")){
 			traceLog(Constants->CONST->{'FileOpnErr'}.$outputFilePath.", Reason:$! $lineFeed", __FILE__, __LINE__);
@@ -2126,7 +2150,7 @@ sub writeOperationSummary
 				$filesConsideredCount -= $noPermissionCount;
 				$summary .= checkAndUpdatePermissionDeniedList($permissionError);
 			} else {
-				#$failedFilesCount += $noPermissionCount; #Commented by Senthil on 11-June-2019
+				$failedFilesCount += $noPermissionCount;
 				my $deniedCount = getPermissionDeniedCount();
 				if($deniedCount =~ /^\d+$/){
 					$failedFilesCount     += $deniedCount;
@@ -2144,41 +2168,57 @@ sub writeOperationSummary
 		# construct summary message.
 		my $mail_summary = undef;
 		$summary .= $lineFeed."Summary: ".$lineFeed;
-		$finalSummary =  $lineFeed."Summary: ".$lineFeed;
+		$finalSummery =  $lineFeed."Summary: ".$lineFeed;
 		Chomp(\$filesConsideredCount);
 		#Needs to be removed: Senthil
 		#$filesConsideredCount = 90;
 		#$failedFilesCount  = 5;
 		@endTime = localtime();
-		my $et = localtime(mktime(@endTime));
+#TBE
+		my $duration = (mktime(@endTime) - mktime(@startTime))/60;
+# Re calculate Quota
+		if($_[0] eq Constants->CONST->{'BackupOp'}) {
+			Helpers::reCalculateStorageSize();
+			Helpers::loadStorageSize();
+		}
+#		my $et = localtime(mktime(@endTime));
+		my $et = Taryck::TS2Text(mktime(@endTime));
 		if($_[0] eq Constants->CONST->{'BackupOp'}) {
 			$mail_summary .= Constants->CONST->{'TotalBckCnsdrdFile'} . $filesConsideredCount.
-			$mail_summary .= $lineFeed . Constants->CONST->{'TotalBckFile'} . $successFiles." [Size: $fs]";
+			$mail_summary .= $lineFeed . Constants->CONST->{'TotalBckFile'} . $successFiles;
 			$mail_summary .= $lineFeed . Constants->CONST->{'TotalCondSynFile'} . $syncedFiles;
 			$mail_summary .= $lineFeed . Constants->CONST->{'TotalBckFailFile'} . $failedFilesCount;
 			$mail_summary .= $lineFeed . Constants->CONST->{'BckEndTm'} . $et . $lineFeed;
+			$mail_summary .= $lineFeed . 'Duration: ' . $duration . ' minutes' . $lineFeed;
 			$mail_summary .= $lineFeed . Constants->CONST->{'trashFileRestoreNotice'} . $lineFeed;
 
-			$finalSummary .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
-					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles." [Size: $fs]".
+			$finalSummery .= Constants->CONST->{'TotalBckCnsdrdFile'}.$filesConsideredCount.
+					       $lineFeed.Constants->CONST->{'TotalBckFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFile'}.$syncedFiles.
 					       $lineFeed.Constants->CONST->{'TotalBckFailFile'}.$failedFilesCount.$lineFeed;
+#TBE
+			$mail_summary .= $lineFeed . qq($Locale::strings{'total_quota'}: ) . Helpers::getTotalStorage();
+			$mail_summary .= $lineFeed . qq($Locale::strings{'used_space'}: ) . Helpers::getStorageUsed();
+			$mail_summary .= $lineFeed . 'Available space: ' . Helpers::getFreeStorage();
+			$finalSummery .= $lineFeed . qq($Locale::strings{'total_quota'}: ) . Helpers::getTotalStorage();
+			$finalSummery .= $lineFeed . qq($Locale::strings{'used_space'}: ) . Helpers::getStorageUsed();
+			$finalSummery .= $lineFeed . 'Available space: ' . Helpers::getFreeStorage() . $lineFeed ;
 
 		} else 	{
 			$mail_summary .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
-						$lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles." [Size: $fs]".
+						$lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 						$lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
 						$lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.
 						$lineFeed.Constants->CONST->{'RstEndTm'}.$et. $lineFeed;
 
-			$finalSummary .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
-					       $lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles." [Size: $fs]".
+			$finalSummery .= Constants->CONST->{'TotalRstCnsdFile'}.$filesConsideredCount.
+					       $lineFeed.Constants->CONST->{'TotalRstFile'}.$successFiles.
 					       $lineFeed.Constants->CONST->{'TotalSynFileRestore'}.$syncedFiles.
 					       $lineFeed.Constants->CONST->{'TotalRstFailFile'}.$failedFilesCount.$lineFeed;
 		}
-		# if($errStr ne "" &&  $errStr ne "SUCCESS"){
-			# $mail_summary .= $lineFeed.$lineFeed.$errStr.$lineFeed;
-		# }
+		if($errStr ne "" &&  $errStr ne "SUCCESS"){
+			$mail_summary .= $lineFeed.$lineFeed.$errStr.$lineFeed;
+		}
 
 		if ($_[1]) {
 			$status = "Aborted";
@@ -2200,7 +2240,6 @@ sub writeOperationSummary
 				if($status ne "Failure"){
 					if($percentToNotifyForMissedFiles and -e $infoFile){
 						my $missedCountCheckCmd = "cat '$infoFile' | grep \"^MISSINGCOUNT\"";
-						$missedCountCheckCmd = Helpers::updateLocaleCmd($missedCountCheckCmd);
 						my $missedCount = `$missedCountCheckCmd`;
 						$missedCount =~ s/MISSINGCOUNT//;
 						Chomp(\$missedCount) if($missedCount);
@@ -2214,20 +2253,18 @@ sub writeOperationSummary
 			}
 		}
 
-		if ($errStr ne "" &&  $status ne "Success") {
-			$mail_summary .= $lineFeed.$lineFeed.$errStr.$lineFeed;
-		}
-
 		if (Helpers::loadAppPath()  and Helpers::loadServicePath()) {
 			Helpers::setUsername($userName) if(defined($userName) && $userName ne '');
+			my $transferredFileSize = $_[2] || 0;
+			my $fs   = convertFileSize($transferredFileSize);
 			my $tempOutputFilePath = $outputFilePath;
 			$tempOutputFilePath = (split("_Running_",$tempOutputFilePath))[0] if($tempOutputFilePath =~ m/_Running_/);
 			my %logStat = (
 				(split('_', basename($tempOutputFilePath)))[0] => {
-					'datetime' => strftime("%m/%d/%Y %H:%M:%S", localtime(mktime(@startTime))),
+#					'datetime' => strftime("%d/%m/%Y %H:%M:%S", localtime(mktime(@startTime))),
+					'datetime' => Taryck::TS2Text(mktime(@startTime)),
 					'duration' => (mktime(@endTime) - mktime(@startTime)),
 					'filescount' => $filesConsideredCount,
-					'bkpfiles' => $successFiles,
 					'status' => $status."_".$taskType,
 					'size' => $fs,
 				}
@@ -2274,8 +2311,7 @@ sub writeOperationSummary
 		unlink($logPidFilePath);
 
 		$summary .= $mail_summary;
-#		$mail_content .= $mail_summary;
-		$Configuration::mailContent .= $mail_summary;
+		$mail_content .= $mail_summary;
 		print OUTFILE $summary;
 		close OUTFILE;
 	}
@@ -2319,7 +2355,7 @@ sub createUserDir {
 #************************************************************************************************/
 sub pidAliveCheck {
 	my $pidMsg = undef;
-	$pidPath = $_[0] if(defined($_[0]));
+
 	if(!open(PIDFILE, '>', $pidPath)) {
 		traceLog("Cannot open '$pidPath' for writing: $!", __FILE__, __LINE__);
 		return 0;
@@ -2358,41 +2394,27 @@ sub backupTypeCheck {
 # Subroutine Name         :	getCursorPos
 # Objective               :	gets the current cusror position
 # Added By                : Dhritikana
-# Modified By			  : Senthil Pandian
 #********************************************************************************************************/
 sub getCursorPos {
-	# Added here to resolve: tput: no terminal type specified and no TERM environmental variable.
-	# Added for FreeBSD machine's progress bar display
-	if($machineInfo eq 'freebsd'){
-		my $latestCulmnCmd = Helpers::updateLocaleCmd('tput cols');
-		$latestCulmn = `$latestCulmnCmd` if($tputBinPath);
-		my $lineCount = 11;
-		for(my $i=0; $i<=$lineCount; $i++){
-			$freebsdProgress .= (' ')x$latestCulmn;
-			$freebsdProgress .= "\n";
-		}
-	}
-
 	system('stty', '-echo');
 	my $x='';
 	my $inputTerminationChar = $/;
 
-	system Helpers::updateLocaleCmd("stty cbreak </dev/tty >/dev/tty 2>&1");
+	system "stty cbreak </dev/tty >/dev/tty 2>&1";
 	print "\e[6n";
 	$/ = "R";
 	$x = <STDIN>;
 	$/ = $inputTerminationChar;
 
-	system Helpers::updateLocaleCmd("stty -cbreak </dev/tty >/dev/tty 2>&1");
+	system "stty -cbreak </dev/tty >/dev/tty 2>&1";
 	my ($curLines, $cols)=$x=~m/(\d+)\;(\d+)/;
 	system('stty', 'echo');
-	my $totalLinesCmd = Helpers::updateLocaleCmd('tput lines');
-	my $totalLines = `$totalLinesCmd`;
+	my $totalLines = `tput lines`;
 	chomp($totalLines);
 	my $threshold = $totalLines-12;
 
 	if($curLines >= $threshold) {
-		system(Helpers::updateLocaleCmd("clear"));
+		system("clear");
 		print "\n";
 		$curLines = 0;
 	} else {
@@ -2401,7 +2423,7 @@ sub getCursorPos {
 
 	changeSizeVal();
 	print $lineFeed;
-	system(Helpers::updateLocaleCmd("tput sc"));
+	system("tput sc");
 	print "\n$_[0]" if ($_[0] ne '');
 	print Constants->CONST->{'PrepFileMsg'}.$lineFeed;
 }
@@ -2413,8 +2435,7 @@ sub getCursorPos {
 #*****************************************************************************************************/
 sub changeSizeVal {
 	$progressSizeOp = 1;
-	my $latestCulmnCmd = Helpers::updateLocaleCmd('tput cols');
-	$latestCulmn = `$latestCulmnCmd`;
+	$latestCulmn = `tput cols`;
 	chomp($latestCulmn);
 	if($latestCulmn < 100) {
 		$progressSizeOp = 2;
@@ -2431,10 +2452,9 @@ sub changeSizeVal {
 #****************************************************************************/
 sub emptyLocationsQueries {
 	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
 
-	my $hostNameCmd = Helpers::updateLocaleCmd('hostname');
-	my $hostName = `$hostNameCmd`;
+	my $hostName = `hostname`;
 	chomp($hostName);
 	my $noRestoreLocation = $_[1];#Used to negate the call of Restore location in case of running restore_version script.
 	my $defaultLocationFlag = 0;
@@ -2444,13 +2464,12 @@ sub emptyLocationsQueries {
 	my $displayLocation = $backupHost;
 	if($jobType eq "Backup" or $jobType eq "LocalBackup") {
 		#my $encType = checkEncType(1);
-		my $oldBackupLoc = '';
 		my $backupLocationCheckCount = 0;
 		my $currentBackupLocation='';
 		my $locName = (($backupHost eq $hostName) or (substr($backupHost, 1) eq $hostName)) ? q{default Backup} : q{Backup};
 		if($backupHost eq $hostName or substr($backupHost, 1) eq $hostName or $backupHost eq "") {
 			$locationQuery = Constants->CONST->{'defBackupLocMsg'};
-			$displayLocation = "/".$hostName;
+			$displayLocation = $hostName;
 			$defaultLocationFlag=1;
 		}
 
@@ -2508,7 +2527,7 @@ sub emptyLocationsQueries {
 						chomp($createDirUtfFile);
 						$createDirUtfFile =~ s/\'/\'\\''/g;
 						$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$createDirUtfFile."'".$whiteSpace.$errorRedirection;
-						$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
+
 						$commandOutput = `$idevsutilCommandLine`;
 					    unlink($createDirUtfFile);
 						$backupHost = '/'.$backupHost if ($backupHost !~/^\//);
@@ -2603,7 +2622,7 @@ sub emptyLocationsQueries {
 		my $tempRestoreHost = $restoreHost; #to keep data of $restoreHost variable unchanged while checking location validity.
 		my ($currentRestoreLocation, $locName) = ('') x 2;
 
-		$choice = 'y';
+		my $choice = 'y';
 		if($dedup eq 'off' or ($dedup eq 'on' and $restoreHost ne '' )){
 			$locName = (($restoreHost eq $hostName) or (substr($restoreHost, 1) eq $hostName)) ? q{default Restore} : q{Restore};
 			my $restoreLocationMess = qq{\nYour $locName from location is "$restoreHost". }.Constants->CONST->{'editQuery'};
@@ -2656,7 +2675,6 @@ sub emptyLocationsQueries {
 							$propertiesFile =~ s/\'/\'\\''/g;
 #							$idevsutilCommandLine = $idevsutilBinaryPath.$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$propertiesFile."'".$whiteSpace.$errorRedirection;
 							$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$propertiesFile."'";
-							$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
 							my $commandOutput = `$idevsutilCommandLine`;
 							unlink $propertiesFile;
                                                         my $invalidLocationFlag = 0;
@@ -2787,6 +2805,7 @@ sub appLogout{
 #****************************************************************************/
 sub askRestoreLocation{
 	my $continue = $_[1];
+	my $askLocation;
 	my $locName = ($restoreLocation =~ /\/?$usrProfilePath\/$userName\/Restore_Data\/?/) ? q{default Restore} : q{Restore};
 	print qq{\nYour $locName Location is set to "$restoreLocation". }.Constants->CONST->{'reallyEditQuery'};
 	my $choiceR = getConfirmationChoice();
@@ -2968,7 +2987,7 @@ sub getLocationInput {
 sub writeToTrace
 {
 	open LOG_TRACE_HANDLE, ">>", $_[0];
-	($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst) = localtime();
+	my ($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst) = localtime();
 	$year           += 1900;
 	$mon            += 1;
 	$mday           = (($mday < 10)? "0" . $mday : $mday);
@@ -2992,8 +3011,7 @@ sub traceLog
 	my $traceDir = "$usrProfilePath/$userName/.trace";
 
 	if(!-d $traceDir) {
-		my $mkResCmd = Helpers::updateLocaleCmd("mkdir -p '$traceDir' $errorRedirection");
-		my $mkRes = `$mkResCmd`;
+		my $mkRes = `mkdir -p '$traceDir' $errorRedirection`;
                 Chomp(\$mkRes);
                 if ($mkRes !~ /Permission denied/){
                          changeMode($idriveServicePath);
@@ -3015,17 +3033,17 @@ sub traceLog
 	}
 	my ($logData, $fileName, $lineNumber)  = @_;
 	opendir(DIR, $traceDir);
-	@files = grep(/traceLog.txt_/, readdir(DIR));
+	my @files = grep(/traceLog.txt_/, readdir(DIR));
 	closedir(DIR);
 
 	my $remFileCount = scalar(@files) - 5;
 	while($remFileCount > 0) {
 		unlink "$traceDir/" . pop(@files);
-		$remFileCount--;
+			$remFileCount--;
 	}
 
-	@fNameArr = split("/", $fileName);
-	$logContent = "[$fNameArr[-1]][Line: $lineNumber] $logData\n";
+	my @fNameArr = split("/", $fileName);
+	my $logContent = "[$fNameArr[-1]][Line: $lineNumber] $logData\n";
 	writeToTrace($traceFileName, $logContent);
 }
 
@@ -3035,24 +3053,23 @@ sub traceLog
 #Added By              : Abhishek Verma
 #*********************************************************************************************/
 sub findUserLocation{
-	my $scriptFilePath = __FILE__;
-	my $pwdCmd = Helpers::updateLocaleCmd('pwd');
-	chomp(my $presentWorkingDir =`$pwdCmd`);
-	$scriptFilePath =~ s/^\.\/// if ($scriptFilePath =~ /^\.\//);
+         my $scriptFilePath = __FILE__;
+         chomp(my $presentWorkingDir =`pwd`);
+         $scriptFilePath =~ s/^\.\/// if ($scriptFilePath =~ /^\.\//);
 
-	my $scriptLoc = $scriptFilePath =~/(.*)\//?$1:$presentWorkingDir;
-	if ($scriptLoc ne ''){
-		$scriptLoc = $scriptLoc =~ /^\//?$scriptLoc:$presentWorkingDir."/".$scriptLoc;
-	}
-	else{
-		$scriptLoc = $presentWorkingDir;
-	}
+         my $scriptLoc = $scriptFilePath =~/(.*)\//?$1:$presentWorkingDir;
+		 if ($scriptLoc ne ''){
+			$scriptLoc = $scriptLoc =~ /^\//?$scriptLoc:$presentWorkingDir."/".$scriptLoc;
+         }
+		else{
+			$scriptLoc = $presentWorkingDir;
+		}
 
-	#        This statement will check if script location path contains '..' pattern.
-	if ($scriptLoc =~ /\.\./g){
-		$scriptLoc = getAbsolutePath(split('/',$scriptLoc)); #getAbsolutePath subroutine will return the absolute path for the given relative path
-	}
-	return $scriptLoc;
+#        This statement will check if script location path contains '..' pattern.
+         if ($scriptLoc =~ /\.\./g){
+                $scriptLoc = getAbsolutePath(split('/',$scriptLoc)); #getAbsolutePath subroutine will return the absolute path for the given relative path
+         }
+         return $scriptLoc;
  }
 #**********************************************************************************************
 #Sbroutine Name         : getAbsolutePath
@@ -3087,16 +3104,16 @@ sub uniqueData{
 #Added By               : Abhishek Verma.
 #***********************************************************************************************/
 sub getValidateIPaddress{
-	my $exitStatus = shift;
-	print Constants->CONST->{'AskProxyIp'};
-	my $ipAddress = getInput();
-	unless ($ipAddress =~ /^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$/){
-		print Constants->CONST->{'InvalidIP'}.qq( $ipAddress \n);
-		$ipAddress = $exitStatus ? getValidateIPaddress(--$exitStatus) : Constants->CONST->{'InvalidIP'}.qq( $ipAddress);
-	}else{
-		$ipAddress = qq(Valid IP Address  $ipAddress);
-	}
-	return $ipAddress;
+        my $exitStatus = shift;
+        print Constants->CONST->{'AskProxyIp'};
+        my $ipAddress = getInput();
+        unless ($ipAddress =~ /^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$/){
+                print Constants->CONST->{'InvalidIP'}.qq( $ipAddress \n);
+                $ipAddress = $exitStatus ? getValidateIPaddress(--$exitStatus) : Constants->CONST->{'InvalidIP'}.qq( $ipAddress);
+        }else{
+                $ipAddress = qq(Valid IP Address  $ipAddress);
+        }
+        return $ipAddress;
 }
 #**********************************************************************************************
 #Sbroutine Name         : getValidatePortNumber
@@ -3104,17 +3121,18 @@ sub getValidateIPaddress{
 #Usage                  : getValidatePortNumber(NUMBER_OF_REPETATION); eg getValidatePortNumber(3); if you want user to repeat or retry 3 times.
 #Added By               : Abhishek Verma.
 #***********************************************************************************************/
+
 sub getValidatePortNumber{
-    my $exitStatus = shift;
-    print Constants->CONST->{'AskProxyPort'};
+        my $exitStatus = shift;
+        print Constants->CONST->{'AskProxyPort'};
 	my $portNumber = getInput();
-	unless ($portNumber =~ /^(0|[1-9][0-9]{0,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/){
-		print Constants->CONST->{'InvalidPort'}.qq( $portNumber. );
-		$portNumber = $exitStatus ? getValidatePortNumber(--$exitStatus) : Constants->CONST->{'InvalidPort'}.qq( $portNumber);
-	}else{
-		$portNumber = qq(Valid port number : $portNumber);
-	}
-	return $portNumber;
+        unless ($portNumber =~ /^(0|[1-9][0-9]{0,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/){
+                print Constants->CONST->{'InvalidPort'}.qq( $portNumber. );
+                $portNumber = $exitStatus ? getValidatePortNumber(--$exitStatus) : Constants->CONST->{'InvalidPort'}.qq( $portNumber);
+        }else{
+                $portNumber = qq(Valid port number : $portNumber);
+        }
+        return $portNumber;
 
 }
 
@@ -3157,12 +3175,12 @@ sub getProxyDetails {
 			}else{
 				$proxyOn = 0;
 				print $lineFeed.Constants->CONST->{'portError'};
-				my $confirmationChoice = getConfirmationChoice();
-				if ($confirmationChoice eq 'n' or $confirmationChoice eq 'N'){
-					exit 0;
-				}else{
-					$proxyPort = undef;
-				}
+	                        my $confirmationChoice = getConfirmationChoice();
+        	                if ($confirmationChoice eq 'n' or $confirmationChoice eq 'N'){
+                	                exit 0;
+                        	}else{
+                                	$proxyPort = undef;
+                        	}
 			}
 		}else{
 			$proxyOn = 0;
@@ -3180,9 +3198,9 @@ sub getProxyDetails {
 	return $proxyOn;
 }
 #**********************************************************************************************
-#Sbroutine Name         : displayFinalSummary(SCALAR,SCALAR);
-#Objective              : It display the final summary after the backup/restore job has been completed.
-#Usage                  : displayFinalSummary(JOB_TYPE,FINAL_SUMMARY_FILE_PATH);
+#Sbroutine Name         : displayFinalSummery(SCALAR,SCALAR);
+#Objective              : It display the final summery after the backup/restore job has been completed.
+#Usage                  : displayFinalSummery(JOB_TYPE,FINAL_SUMMARY_FILE_PATH);
 #Added By               : Abhishek Verma.
 #***********************************************************************************************/
 sub displayFinalSummary{
@@ -3191,8 +3209,8 @@ sub displayFinalSummary{
 	if (open(FS,'<',$finalSummaryFile)){#FS file handel means (F)ile (S)ummary.
 		chomp(my @fileSummary = <FS>);
 		close(FS);
-		$errString	= pop (@fileSummary) if ($#fileSummary > 8);
-		$jobStatus	= pop (@fileSummary);
+		my $errString	= pop (@fileSummary) if ($#fileSummary > 8);
+		my $jobStatus	= pop (@fileSummary);
 		my $logFilePath = pop (@fileSummary);
 		my $fileSummary = join ("\n",@fileSummary);
 
@@ -3245,8 +3263,7 @@ sub writeToFile{
 #***********************************************************************************************/
 sub ifUbuntu{
 	my $checkUbuntu = 0;
-	my $versionCmd = Helpers::updateLocaleCmd('cat /proc/version');
-	if (-e '/proc/version' && `$versionCmd` =~ /ubuntu/){
+	if (-e '/proc/version' && `cat /proc/version` =~ /ubuntu/){
 		$checkUbuntu = 1;
 	}
 	return $checkUbuntu;
@@ -3258,8 +3275,7 @@ sub ifUbuntu{
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub isGentoo {
-	my $versionCmd = Helpers::updateLocaleCmd('cat /proc/version');
-	return 1 if(-e '/proc/version' && `$versionCmd` =~ /gentoo/);
+	return 1 if(-e '/proc/version' && `cat /proc/version` =~ /gentoo/);
 	return 0;
 }
 
@@ -3324,7 +3340,6 @@ sub runningJobHandler{
 			print qq(\nTerminating your $jobMode $jobType job. Please Wait ... $lineFeed);
 			my $jobTerminationScript = "$userScriptLocation/".Constants->FILE_NAMES->{jobTerminationScript};
 			my $JobTermCmd = "perl  '$jobTerminationScript' ".lc($jobType)." $username";
-			$JobTermCmd = Helpers::updateLocaleCmd($JobTermCmd);
 			my $res = system($JobTermCmd);
 			if($res != 0){
                 traceLog("Error in terminating Manual Restore job.", __FILE__, __LINE__);
@@ -3362,10 +3377,10 @@ sub createDefaultRestoreLoc{
 #***********************************************************************************************/
 sub clearSpecialChar{
 	${$_[0]} =~ s/^.\///;
-	${$_[0]} =~ s/^\'//;
-	${$_[0]} =~ s/\'$//;
-	${$_[0]} =~ s/^\s+//;
-	${$_[0]} =~ s/\s+$//;
+        ${$_[0]} =~ s/^\'//;
+        ${$_[0]} =~ s/\'$//;
+        ${$_[0]} =~ s/^\s+//;
+        ${$_[0]} =~ s/\s+$//;
 	${$_[0]} =~ s/^\///;
 	${$_[0]} =~ s/\/$//;
 }
@@ -3398,12 +3413,12 @@ sub createDirectory {
         my $location            = shift;
         my $defaultDirFlag      = shift;
         my $result=q();
+		my $cmd;
         if (isSingleLevelDirectory($location) or ($defaultDirFlag eq 'DEFAULT')){
 			$cmd = "mkdir '$location' $errorRedirection"; #Need not to add single quote again
         }else{
 			$cmd = "mkdir -p '$location' $errorRedirection";
         }
-		$cmd = Helpers::updateLocaleCmd($cmd);
 		$result = `$cmd`;
 		chmod $filePermission, $location;
         return $result;
@@ -3419,13 +3434,13 @@ sub createDirectory {
 #Added By               : Abhishek Verma.
 #***********************************************************************************************/
 sub isSingleLevelDirectory{
-	my $location = shift;
-	clearSpecialChar(\$location);
-	my $isSingleLevel = 1;
-	if (scalar(grep /\S/,split('/',$location)) > 1){
-		$isSingleLevel = 0;
-	}
-	return $isSingleLevel;
+        my $location = shift;
+        clearSpecialChar(\$location);
+        my $isSingleLevel = 1;
+        if (scalar(grep /\S/,split('/',$location)) > 1){
+                $isSingleLevel = 0;
+        }
+        return $isSingleLevel;
 }
 
 #**********************************************************************************************
@@ -3437,14 +3452,14 @@ sub isSingleLevelDirectory{
 #Added By               : Abhishek Verma.
 #***********************************************************************************************/
 sub hasWritePermission{
-	my $testPath    = $restoreLocation."/Idrivetest.txt";
-	my $isWrite     = 0;
-	if (open FILE, ">$testPath"){
-		$isWrite = 1;
-		close FILE;
-		unlink $testPath;
-	}
-	return $isWrite;
+        my $testPath    = $restoreLocation."/Idrivetest.txt";
+        my $isWrite     = 0;
+        if (open FILE, ">$testPath"){
+                $isWrite = 1;
+                close FILE;
+                unlink $testPath;
+        }
+        return $isWrite;
 }
 #**********************************************************************************************
 #Sbroutine Name         : isDefaultRestoreLoc(RESTORE_LOCATION);
@@ -3479,13 +3494,13 @@ sub setRestoreLocation{
         $restoreLocation .= '/' if(substr($restoreLocation, -1, 1) ne "/");
         if( -f $restoreLocation or -l $restoreLocation or -p $restoreLocation or -S $restoreLocation or -b $restoreLocation or -c $restoreLocation or -t $restoreLocation) {
 		print Constants->CONST->{'InvRestoreLoc'}.$whiteSpace.": \"$restoreLocation\"".$lineFeed;
-			$restoreLocation = $defaultRestoreLocation;
-			$res = createDefaultRestoreLoc($restoreLocation);
+                $restoreLocation = $defaultRestoreLocation;
+                $res = createDefaultRestoreLoc($restoreLocation);
         }else{
-			print $userLocMessage;
-			$restoreLocation = '/'.$restoreLocation if(substr($restoreLocation, 0, 1) ne "/");
-			#$restoreLocation = qq('$restoreLocation');
-			$res = createDirectory($restoreLocation,$defaultKey);
+                print $userLocMessage;
+                $restoreLocation = '/'.$restoreLocation if(substr($restoreLocation, 0, 1) ne "/");
+                #$restoreLocation = qq('$restoreLocation');
+                $res = createDirectory($restoreLocation,$defaultKey);
         }
 	$res='' if ($res =~ /File exists/);
 	return $res;
@@ -3503,7 +3518,7 @@ sub checkRestoreLocation{
 	my $restoreLoc = shift;
 	if (-d $restoreLoc){
 		if (hasWritePermission()){#If restore location exists and has write permission then return 1.
-            return 1;
+                        return 1;
 		}
 		print Constants->CONST->{'InvRestoreLoc'}.qq(: "$restoreLocation". Permission denied.\n);
 		return 2;#If restore location exists but no write permission then return 2.
@@ -3533,8 +3548,8 @@ sub getRestoreLocation{
 #Added By               : Abhishek Verma.
 #***********************************************************************************************/
 sub Chomp{
-	chomp(${$_[0]});
-	${$_[0]} =~ s/^[\s\t]+|[\s\t]+$//g;
+		chomp(${$_[0]});
+        ${$_[0]} =~ s/^[\s\t]+|[\s\t]+$//g;
 }
 
 #****************************************************************************
@@ -3579,8 +3594,7 @@ sub removeFilesFolders{
 #****************************************************************************/
 sub changeMode{
 	#Keeping 0777 as hardcoded value only
-	my $changeModeCmd = Helpers::updateLocaleCmd("chmod -R 0777 '$_[0]' $errorDevNull");
-	my $res	= `$changeModeCmd`;
+	my $res	= `chmod -R 0777 '$_[0]' $errorDevNull`;
 	return $res;
 }
 #*******************************************************************************************************
@@ -3595,28 +3609,21 @@ sub checkEvsStatus{
 	return 1 if($err_string eq "");
 
 	if ($taskType eq "Scheduled"){
-#		$mail_content = qq{\n$err_string\nAfter complition, run scheduled $jobType Job again.};
-		$Configuration::mailContent = qq{\n$err_string\nAfter complition, run scheduled $jobType Job again.};
+		$mail_content = qq{\n$err_string\nAfter complition, run scheduled $jobType Job again.};
 		my $subjectLine = "$taskType $jobType Status Report "."[$userName]"." [Failed $jobType]";
 		$status = "FAILURE";
 		traceLog($err_string."$lineFeed", __FILE__, __LINE__);
-		Helpers::sendMail({
-				'serviceType' => $taskType,
-				'jobType' => $jobType,
-				'subject' => $subjectLine,
-				'jobStatus' => lc($status)
-			});
+		sendMail($subjectLine);
 	}
 	print qq($err_string);
 	return 0;
 }
 #****************************************************************************
-# Subroutine Name : headerDisplay
-# Objective       : To display header information
+# Subroutine Name         : headerDisplay
+# Objective               : To display header information
 # Usgae 		  : headerDisplay($callingScript)
-# 			      : where, $callingScript = From which script headerDisplay subroutine has been called.
-# Added By        : Abhishek Verma.
-# Modified By     : Senthil Pandian
+# 			  : where, $callingScript = From which script headerDisplay subroutine has been called.
+# Added By                : Abhishek Verma.
 #****************************************************************************/
 sub headerDisplay{
 	getQuotaDetails();
@@ -3624,8 +3631,6 @@ sub headerDisplay{
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
 	# Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
 	Helpers::setUsername($userName) if(defined($userName) && $userName ne '');
-	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);	
 	Helpers::isLoggedin() or Helpers::retreat('login_&_try_again');
 	Helpers::displayHeader();
 }
@@ -3767,9 +3772,9 @@ sub getQuotaForAccountSettings
 {
 	my $accountQuota = $_[0];
 	my $quotaUsed = $_[1];
-
-	open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-	chmod $filePermission,$usrProfileDir.'/.quota.txt';
+	die "getQuotaForAccountSettings" ;
+	open (AQ,'>',$usrProfileDir.'/.quota.txt.getQuotaForAccountSettings') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+	chmod $filePermission,$usrProfileDir.'/.quota.txt.getQuotaForAccountSettings';
 	if ($accountQuota =~/\d+/ and $quotaUsed =~ /\d+/){
 		$quotaUsed =~ s/(\d+)\".*/$1/isg;
 		print AQ "totalQuota=$accountQuota\n";
@@ -3783,38 +3788,25 @@ sub getQuotaForAccountSettings
 #Objective               : This function will create a quota.txt file based on the quota details which is received during  final backup.
 #Usgae                   : getQuota()
 #Added By                : Abhishek Verma.
-# Modified By			 : Senthil Pandian
 #****************************************************************************/
 sub getQuota{
 	#my $encType = checkEncType(1);
-	my %evsQuotaHashOutput;
-	my $webAPI = Helpers::getUserConfiguration('WEBAPI');
-	my $getQuotaCGI = $Configuration::evsAPI{$Configuration::appType}{'getAccountQuota'};
-	$getQuotaCGI =~ s/EVSSERVERADDRESS/$webAPI/;
-	my %params = (
-		'host' => $getQuotaCGI,
-		'method' => 'POST',
-		'data' => {
-			'uid' => Helpers::getUsername(),
-			'pwd' => &Helpers::getPdata(Helpers::getUsername()),
-		}
-	);
-
-	my $res = Helpers::requestViaUtility(\%params);
-	if(defined($res->{DATA})) {
-		%evsQuotaHashOutput = parseXMLOutput(\$res->{DATA});
-		if($evsQuotaHashOutput{'message'} eq 'ERROR') {
-			Helpers::retreat($LS{'failed_to_fetch_quota'}.ucfirst($evsQuotaHashOutput{'desc'}));
-		}
-	}
+	my $getQuotaUtfFile = getOperationFile(Constants->CONST->{'GetQuotaOp'});
+	$getQuotaUtfFile =~ s/\'/\'\\''/g;
+	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$getQuotaUtfFile."'".$whiteSpace.$errorRedirection;
+	my $commandOutput = `$idevsutilCommandLine &`;
+	my %evsQuotaHashOutput = parseXMLOutput(\$commandOutput);
 
 	if (($evsQuotaHashOutput{"message"} eq 'SUCCESS') and ($evsQuotaHashOutput{"totalquota"} =~/\d+/) and ($evsQuotaHashOutput{"usedquota"} =~/\d+/)){
-		open (AQ,'>',$usrProfileDir.'/.quota.txt') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
-		chmod $filePermission,$usrProfileDir.'/.quota.txt';
+		open (AQ,'>',$usrProfileDir.'/.quota.txt.getQuota') or (traceLog($lineFeed.Constants->CONST->{'FileCrtErr'}.$enPwdPath."failed reason: $! $lineFeed", __FILE__, __LINE__) and die);# File handler AQ means Account Quota.
+		chmod $filePermission,$usrProfileDir.'/.quota.txt.getQuota';
 		$evsQuotaHashOutput{"usedquota"} =~ s/(\d+)\".*/$1/isg;
 		print AQ "totalQuota=".$evsQuotaHashOutput{"totalquota"}."\n";
 		print AQ "usedQuota=".$evsQuotaHashOutput{"usedquota"}."\n";
+		traceLog("TBE Add : remainingQuota=".($evsQuotaHashOutput{"totalquota"} - $evsQuotaHashOutput{"usedquota"}), __FILE__, __LINE__);
+		print AQ "remainingQuota=".($evsQuotaHashOutput{"totalquota"} - $evsQuotaHashOutput{"usedquota"})."\n";
 	}
+	unlink($getQuotaUtfFile);
 	close AQ;
 }
 #****************************************************************************
@@ -3830,7 +3822,7 @@ sub getQuotaDetails{
 		if (!-e $usrDir.'/.quota.txt'){
 			if($userName eq '' or $usrProfileDir eq ''){
 				$userName = $displayCurrentUser;
-	        	loadUserData();
+	        	        loadUserData();
 			}
 			getQuota($0);
 		}
@@ -3900,6 +3892,7 @@ sub returnKeyName{
     my $userChoice = $_[0];
 	my @keyName2Return = @{$_[1]};
 	my $totalChoice = $_[2];
+	my $keyName;
 	if($totalChoice==8){
         $keyName = $userChoice =~ /^1$|^2$/ ? $keyName2Return[0]:$userChoice =~ /^3$/ ? $keyName2Return[1]:$userChoice =~ /^4$|^5$|^6$/ ? $keyName2Return[2]:$userChoice =~ /^7$|^8$/ ? $keyName2Return[3]:'';
 	} else {
@@ -3938,13 +3931,13 @@ sub getUserDateRange{
 	Chomp(\$stDate);
 	unless (validateDatePattern($stDate)){
 		$stDate = '';
-    }
+        }
 	print $lineFeed.Constants->CONST->{'endDate'};
-	my $edDate = <STDIN>;
-	Chomp(\$edDate);
-	unless (validateDatePattern($edDate)){
-		$edDate = '';
-	}
+        my $edDate = <STDIN>;
+        Chomp(\$edDate);
+        unless (validateDatePattern($edDate)){
+                $edDate = '';
+        }
 	return ($stDate,$edDate);
 }
 #****************************************************************************
@@ -4045,7 +4038,7 @@ sub getServiceLocation{
 #****************************************************************************/
 sub writeParameterValuesToStatusFile
 {
-	($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$deniedFilesCount,$missingCount,$transferredFileSize,$exit_flag,$failedfiles_index,$operationEngineId) = @_;
+	my ($fileBackupCount,$fileRestoreCount,$fileSyncCount,$failedfiles_count,$deniedFilesCount,$missingCount,$transferredFileSize, $exit_flag, $failedfiles_index, $operationEngineId) = @_;
 
 	my ($Count,$Synccount,$Errorcount,$Deniedcount,$Missedcount,$TransferredSize) = (0) x 6;
 
@@ -4057,6 +4050,15 @@ sub writeParameterValuesToStatusFile
 	$Missedcount = getParameterValueFromStatusFile('MISSED_FILES_COUNT',$operationEngineId);
 	$TransferredSize = getParameterValueFromStatusFile('TOTAL_TRANSFERRED_SIZE',$operationEngineId);
 
+	# open status file to modify
+=beg        if(!open(STATUS_FILE, ">", $statusFilePath)) {
+			traceLog("Failed to open $statusFilePath, Reason:$! $lineFeed", __FILE__, __LINE__);
+			print "Failed to open $statusFilePath, Reason:$! $lineFeed";
+			return;
+	}
+	chmod $filePermission, $statusFilePath;
+	autoflush STATUS_FILE;
+=cut
 	# Calculate the backup, sync and error count based on new values
 	if($jobType eq "backup" || $jobType eq "localbackup") {
 		$Count += $fileBackupCount;
@@ -4112,8 +4114,7 @@ sub getDeviceList{
 	chomp($listDeviceUtfFile);
 	$listDeviceUtfFile =~ s/\'/\'\\''/g;
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$listDeviceUtfFile."'".$whiteSpace.$errorRedirection;
-	$commandOutput = qx{$idevsutilCommandLine};
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
+	my $commandOutput = qx{$idevsutilCommandLine};
 	unlink($listDeviceUtfFile);
 	if ($commandOutput =~ /password\s+mismatch|encryption verification failed|Unable to proceed; private encryption key must be between 4 and 256 characters in length/i){
 		return $commandOutput;
@@ -4127,37 +4128,36 @@ sub getDeviceList{
 #Added By               : Abhishek Verma.
 #*********************************************************************************************************/
 sub displayDeviceList{
-	my %evsHashData = %{$_[0]};
-	my @columnNames = @{$_[1]};
-	my $tableHeader = getTableHeader(@columnNames);
-	my @dataToDisplay = qw(nick_name device_id os bucket_ctime ip);
-	my ($tableData,$columnIndex,$serialNumber) = ('',1,1);
-	my @uids = keys %{$evsHashData{uid}};
-	my @linkDataList = ();
-	foreach (@uids){
-		my $positionNo = $evsHashData{uid}->{$_};
-		$tableData .= $serialNumber;
-		$tableData .= (' ') x ($columnNames[1]->[0] - length($serialNumber));
-		my $linkDataHash = {};
-		$columnIndex = 1;
-		foreach(@dataToDisplay){
-			my %reversedHash = reverse(%{$evsHashData{$_}});
-			my $displayData = $reversedHash{$positionNo};
-			$displayData =~ s/(.*)\_\d+/$1/;
-			$linkDataHash->{$_} = $displayData;
+        my %evsHashData = %{$_[0]};
+        my @columnNames = @{$_[1]};
+        my $tableHeader = getTableHeader(@columnNames);
+        my @dataToDisplay = qw(nick_name device_id os bucket_ctime ip);
+        my ($tableData,$columnIndex,$serialNumber) = ('',1,1);
+        my @uids = keys %{$evsHashData{uid}};
+        foreach (@uids){
+                my $positionNo = $evsHashData{uid}->{$_};
+                $tableData .= $serialNumber;
+                $tableData .= (' ') x ($columnNames[1]->[0] - length($serialNumber));
+                my $linkDataHash = {};
+                $columnIndex = 1;
+                foreach(@dataToDisplay){
+                        my %reversedHash = reverse(%{$evsHashData{$_}});
+                        my $displayData = $reversedHash{$positionNo};
+                        $displayData =~ s/(.*)\_\d+/$1/;
+                        $linkDataHash->{$_} = $displayData;
 			$displayData = trimData($displayData,$columnNames[1]->[$columnIndex]) if($columnIndex == 1 or $columnIndex == 3);
-			$tableData .= $displayData;
-			$tableData .= (' ') x ($columnNames[1]->[$columnIndex] - length($displayData));
-			$columnIndex++;
-		}
-		$tableData .= $lineFeed;
-		$serialNumber += 1;
-		push (@linkDataList,$linkDataHash);
-	}
-	if ($tableData ne ''){
-		print "$tableHeader$tableData\n";
-	}
-	return @linkDataList;
+                        $tableData .= $displayData;
+                        $tableData .= (' ') x ($columnNames[1]->[$columnIndex] - length($displayData));
+                        $columnIndex++;
+                }
+                $tableData .= $lineFeed;
+                $serialNumber += 1;
+                push (@linkDataList,$linkDataHash);
+        }
+        if ($tableData ne ''){
+                print "$tableHeader$tableData\n";
+        }
+        return @linkDataList;
 }
 #*********************************************************************************************************
 #Subroutine Name        : trimData
@@ -4243,7 +4243,7 @@ sub linkBucket {
 	$configFilePath = $usrProfilePath."/$userName/".Constants->CONST->{'configurationFile'};
 	my $deviceID = shift;
 	my $deviceNickName = shift;
-	my $isSameDeviceID = shift;
+	$isSameDeviceID = shift;
 	if($deviceID eq '' or $deviceNickName eq ''){
 		return 0;
 	}
@@ -4253,7 +4253,6 @@ sub linkBucket {
 	chomp($linkBucketUtfFile);
 	$linkBucketUtfFile =~ s/\'/\'\\''/g;
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$linkBucketUtfFile."'".$whiteSpace.$errorRedirection;
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
 	my $commandOutput = qx{$idevsutilCommandLine};
 	unlink($linkBucketUtfFile);
 	traceLog("DEBUG - link bucket :: $commandOutput", __FILE__, __LINE__);
@@ -4283,8 +4282,8 @@ sub linkBucket {
 #*********************************************************************************************************/
 sub getUniqueID{
 	my $cmd;
-	my $ifConfigPathCmd = Helpers::updateLocaleCmd('which ifconfig 2>/dev/null');
-	my $ifConfigPath = `$ifConfigPathCmd`;
+	my $muid;
+	my $ifConfigPath = `which ifconfig 2>/dev/null`;
 	chomp($ifConfigPath);
 	if($ifConfigPath ne '') {
 		$cmd = 'ifconfig -a';
@@ -4300,7 +4299,6 @@ sub getUniqueID{
 		return 0;
 	}
 
-	$cmd = Helpers::updateLocaleCmd($cmd);
 	my $result = `$cmd`;
 	my @macAddr = $result =~ /HWaddr [a-fA-F0-9:]{17}|[a-fA-F0-9]{12}/g;
 	if (@macAddr) {
@@ -4315,8 +4313,7 @@ sub getUniqueID{
 		$macAddr[0] =~ s/ether |:|-//g;
 		return ($muid = ('Linux' . $macAddr[0]));
 	}
-	my $hostNameCmd = Helpers::updateLocaleCmd('hostname');
-	my $hostName = `$hostNameCmd`;
+	my $hostName = `hostname`;
 	chomp($hostName);
 	$result = 'Linux'.$hostName;
 	return $result;
@@ -4352,6 +4349,8 @@ sub checkDeviceID{
 	my $userInput = $_[0];
 	%evsDeviceHashOutput = getDeviceList();
 	return 0 if (keys %evsDeviceHashOutput == 1);
+	my $backupLoc = Helpers::getUserConfiguration('BACKUPLOCATION');
+	my $restoreFrom = Helpers::getUserConfiguration('RESTOREFROM');
 	my $totalElements = keys %evsDeviceHashOutput;
 	my $needToUpdateRestFrom =0;
 	   $needToUpdateRestFrom =1 if($backupLoc eq $restoreFrom);
@@ -4457,16 +4456,16 @@ sub createOrLinkBucket{
 #Objective              : This function will get the bucket name(backup location) from the user.
 #Usage                  : getBucketName();
 #Added By               : Abhishek Verma.
-# Modified By           : Senthil Pandian
 #*********************************************************************************************************/
 sub getBucketName{
 	my $oldBackupLocName = shift;
 	my $retryCount = 4;
+	my $backupHostTemp;
 	while($retryCount){
 		#print $lineFeed.Constants->CONST->{'AskBackupLoc'}.': ';
 		#print $lineFeed.Constants->CONST->{'AskBackupLoc'}.' '.Constants->CONST->{'BackupLocNoteDedup'}.': ';
-		Helpers::display([$lineFeed,'enter_your_backup_location_optional',': ']);
-		my $backupHostTemp = getLocationInput();
+		print $lineFeed.$Locale::strings{'enter_your_backup_location_optional'}.': ';
+		$backupHostTemp = getLocationInput();
 		Chomp(\$backupHostTemp);#This will trim the spaces or tab from string
 		#if ($backupHostTemp =~ /^(?=.{4,64}$)^[A-Za-z0-9_\-\.\s]+$/ or $backupHostTemp eq ''){
 		if ($backupHostTemp =~ /^(?=.{4,64}$)^[A-Za-z0-9_\-]+$/ or $backupHostTemp eq ''){
@@ -4510,7 +4509,6 @@ sub createBucket{
 	chomp($createBucketUtfFile);
 	$createBucketUtfFile =~ s/\'/\'\\''/g;
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$createBucketUtfFile."'".$whiteSpace.$errorRedirection;
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
 	my $commandOutput = qx{$idevsutilCommandLine};
 	unlink($createBucketUtfFile);
 	#traceLog("DEBUG create bucket :: $commandOutput", __FILE__, __LINE__);
@@ -4538,7 +4536,6 @@ sub nickUpdate {
 	chomp($nickUpdateUtfFile);
 	$nickUpdateUtfFile =~ s/\'/\'\\''/g;
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$nickUpdateUtfFile."'".$whiteSpace.$errorRedirection;
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
 	my $commandOutput = qx{$idevsutilCommandLine};
 	unlink($nickUpdateUtfFile);
 	#traceLog("DEBUG - nickupdate :: $commandOutput", __FILE__, __LINE__);
@@ -4573,15 +4570,19 @@ sub holdScreen2displayMessage{
 sub verifyPvtKey {
 	my $dedup = shift;
 	my $retType = '';
-        print $lineFeed.Constants->CONST->{'verifyPvt'}.$lineFeed;
+	my $pvtVerifyUtfFile;
+	my $idevsUtilCommand;
+	my $tmp_idevsutilBinaryPath;
+	my $tmp_pvtVerifyUtfFile;
+	my $pvt;
+	print $lineFeed.Constants->CONST->{'verifyPvt'}.$lineFeed;
 	if ($dedup eq 'off'){
-        my $pvtVerifyUtfFile = getOperationFile(Constants->CONST->{'validatePvtKeyOp'});
-        my $tmp_pvtVerifyUtfFile = $pvtVerifyUtfFile;
+        $pvtVerifyUtfFile = getOperationFile(Constants->CONST->{'validatePvtKeyOp'});
+        $tmp_pvtVerifyUtfFile = $pvtVerifyUtfFile;
         $tmp_pvtVerifyUtfFile =~ s/\'/\'\\''/g;
-        my $tmp_idevsutilBinaryPath = $idevsutilBinaryPath;
+        $tmp_idevsutilBinaryPath = $idevsutilBinaryPath;
         $tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
-        my $idevsUtilCommand = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_pvtVerifyUtfFile\'".$whiteSpace.$errorRedirection;
-		$idevsUtilCommand = Helpers::updateLocaleCmd($idevsUtilCommand);
+        $idevsUtilCommand = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_pvtVerifyUtfFile\'".$whiteSpace.$errorRedirection;
         $retType = `$idevsUtilCommand`;
 		unlink($pvtVerifyUtfFile);
 	}else{
@@ -4613,7 +4614,6 @@ sub verifyPvtKey {
                 $tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
 
                 $idevsUtilCommand = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_pvtVerifyUtfFile\'".$whiteSpace.$errorRedirection;
-				$idevsUtilCommand = Helpers::updateLocaleCmd($idevsUtilCommand);
                 $retType = `$idevsUtilCommand`;
 
 	            unlink($pvtVerifyUtfFile);
@@ -4690,7 +4690,7 @@ sub checkPreReq {
 	if((!-e $fileName) or (!-s $fileName)) {
 		$isEmpty = 1;
 	} elsif(-s $fileName > 0 && -s $fileName <= 50) {
-		Helpers::traceLog(['failed_to_open_file',":$fileName, Reason:$!"]) if(!open(OUTFH, "< $fileName"));
+		traceLog($Locale::strings{'failed_to_open_file'}.":$fileName, Reason:$!") if(!open(OUTFH, "< $fileName"));
 		close OUTFH;
 
 		my $buffer = Helpers::getFileContents($fileName);
@@ -4732,13 +4732,15 @@ sub checkPvtKeyCondtions {
 # Added By                : Dhritikana
 #********************************************************************************************/
 sub configAccount {
+	my $encType = "";
+	my $menuChoice;
 	unlink($pvtPath) if(-e $pvtPath);
 	my ($pvt,$pvtPath) = @_;
-        print $lineFeed.Constants->CONST->{'AskConfig'}.$whiteSpace;
-        $confirmationChoice = getConfirmationChoice();
-        if($confirmationChoice eq "N" || $confirmationChoice eq "n") {
-                exit 0;
-        }
+	print $lineFeed.Constants->CONST->{'AskConfig'}.$whiteSpace;
+	my $confirmationChoice = getConfirmationChoice();
+	if($confirmationChoice eq "N" || $confirmationChoice eq "n") {
+		exit 0;
+	}
         print Constants->CONST->{'AskDefAcc'}.$lineFeed;
         print Constants->CONST->{'AskPvtAcc'}.$lineFeed;
         getMenuChoice();
@@ -4771,7 +4773,6 @@ sub configAccount {
         $configUtf8File =~ s/\'/\'\\''/g;
 
         $idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$configUtf8File."'".$whiteSpace.$errorRedirection;
-		$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
         my $commandOutput = `$idevsutilCommandLine`;
         #traceLog("$lineFeed $commandOutput $lineFeed", __FILE__, __LINE__);
         unlink $configUtf8File;
@@ -4812,7 +4813,9 @@ sub confirmPvtKey {
 #*********************************************************************************************************/
 sub setAccount{
 	my ($cnfgstat,$pvt,$pvtPath) = @_;
-    configAccount($pvt,$pvtPath) if($cnfgstat eq "NOT SET");
+        if($cnfgstat eq "NOT SET") {
+                configAccount($pvt,$pvtPath);
+        }
 }
 
 #*********************************************************************************************************
@@ -4834,7 +4837,7 @@ sub validateDir{
 #*********************************************************************************************************/
 sub validateCommandArgs{
 	#@_ first argument(0th element) is ref to @ARGV and second input (1st element) is array ref which shows valid command line inputs to be used in scripts.
-	return $match = grep {my $argV = $_; grep {/^$argV$/}@{$_[1]}}@{$_[0]};
+	return my $match = grep {my $argV = $_; grep {/^$argV$/}@{$_[1]}}@{$_[0]};
 }
 #****************************************************************************
 # Subroutine Name         : connectionIssueExit
@@ -4895,17 +4898,16 @@ sub convertToBytes{
 sub getCurlOutput{
 	my $PATH = $_[0];
 	my $data = $_[1];
-	my $whichCurlCmd = Helpers::updateLocaleCmd('which curl 2>/dev/null');
-	my $curl = `$whichCurlCmd`;
+	my $curl = `which curl 2>/dev/null`;
 	chomp($curl);
-
+	my $curlCmd;
+	
 	if($proxyOn eq 1) {
 		$curlCmd = "$curl --max-time 15 -x http://$proxyIp:$proxyPort --proxy-user $proxyUsername:$proxyPassword -L -s -k -d '$data' '$PATH'";
 	} else {
 		$curlCmd = "$curl --max-time 15 -s -k -d '$data' '$PATH'";
 	}
 
-	$curlCmd = Helpers::updateLocaleCmd($curlCmd);
 	my $res = `$curlCmd`;
 	if ($res =~ /SSH-2.0-OpenSSH_6.8p1-hpn14v6|Protocol mismatch/) {
 		traceLog("Failed get curl Output: $res\n", __FILE__, __LINE__);
@@ -4920,13 +4922,13 @@ sub getCurlOutput{
 # Added By                : Senthil Pandian
 #****************************************************************************************/
 sub checkAndUpdateClientRecord {
-	$updated = isUserDetailUpdated();
+	my $updated = isUserDetailUpdated();
 	if($updated){
 		return;
 	}
-	$userName = $_[0];
-	$password = $_[1];
-	$isUpdated = updateUserDetail($userName,$password,1);
+	my $userName = $_[0];
+	my $password = $_[1];
+	my $isUpdated = updateUserDetail($userName,$password,1);
 	if($isUpdated){
 		if(!open(FH, ">>", $freshInstallFile)) {
 			traceLog("Not able to open $freshInstallFile, Reason:$! $lineFeed", __FILE__, __LINE__);
@@ -4943,13 +4945,13 @@ sub checkAndUpdateClientRecord {
 # Added By                : Senthil Pandian
 #****************************************************************************************/
 sub isUserDetailUpdated {
-	$userExist = 0;
+	my $userExist = 0;
 	if(-e $freshInstallFile) {
 		if(!open(FH, "<", $freshInstallFile)) {
 			traceLog("Not able to open $freshInstallFile, Reason:$! $lineFeed", __FILE__, __LINE__);
 			return;
 		}
-		@idriveUsers = <FH>;
+		my @idriveUsers = <FH>;
 		close FH;
 		chomp(@idriveUsers);
 		foreach my $user (@idriveUsers) {
@@ -4967,8 +4969,7 @@ sub isUserDetailUpdated {
 # Added By                : Senthil Pandian
 #****************************************************************************************/
 sub updateUserDetail {
-	my $deviceNameCmd = Helpers::updateLocaleCmd('hostname');
-	my $device_name = `$deviceNameCmd`;
+	my $device_name = `hostname`;
 	chomp($device_name);
 
 	my $os = $appType."ForLinux";
@@ -4988,7 +4989,7 @@ sub updateUserDetail {
 
 	my $data = 'username='.$encodedUname.'&password='.$encodedPwod.'&device_name='.$device_name.'&device_id='.$uniqueID.'&enabled='.$enabled.'&os='.$encodedOS.'&version='.$currentVersion;
 	#print "CGI URL:$IDriveUserInoCGI$data\n\n";
-	$res 	 = getCurlOutput($IDriveUserInoCGI,$data);
+	my $res 	 = getCurlOutput($IDriveUserInoCGI,$data);
 	if($res =~ /Error:/){
 		#print "Failed to update user detail: $res\n";
 		traceLog("Failed to update user detail: $res\n", __FILE__, __LINE__) if($enabled ==1);
@@ -5010,8 +5011,7 @@ sub updateUserDetail {
 #*************************************************************************************************/
 sub whichPackage{
 	my $pckg = ${$_[0]};
-	my $pckgPathCmd = Helpers::updateLocaleCmd('which $pckg 2>/dev/null');
-	my $pckgPath = `$pckgPathCmd`;
+	my $pckgPath = `which $pckg 2>/dev/null`;
 	chomp($pckgPath);
 	return $pckgPath;
 }
@@ -5025,8 +5025,7 @@ sub getZipPath{
 	if($zipPath =~ /^\//){
 		return $zipPath;
 	}
-	my $pwdCmd = Helpers::updateLocaleCmd('pwd');
-	$currDirLocal = `$pwdCmd`;
+	my $currDirLocal = `pwd`;
 	chomp($currDirLocal);
 	$zipPath = "$currDirLocal/$zipPath";
 	chomp($zipPath);
@@ -5039,8 +5038,7 @@ sub getZipPath{
 #Added By                      : Senthil Pandian
 #*************************************************************************************************/
 sub getPSoption{
-	my $machineInfoCmd = Helpers::updateLocaleCmd('uname -a');
-	$machineInfo = `$machineInfoCmd`;
+	$machineInfo = `uname -a`;
 	chomp($machineInfo);
 	if($machineInfo =~ /freebsd/i){
 		$psOption = "-auxww";
@@ -5058,7 +5056,7 @@ sub readFromCrontab {
 	my $retVal = 1;
 	if(-l $crontabFilePath){
 		my $crontabFilePath_bak = $crontabFilePath."_bak";
-		$res = system(Helpers::updateLocaleCmd("mv $crontabFilePath $crontabFilePath_bak 2>/dev/null"));
+		my $res = system("mv $crontabFilePath $crontabFilePath_bak 2>/dev/null");
 		if($res ne "0") {
 			traceLog("Unable to move crontab link file");
 			$retVal = 0;
@@ -5069,7 +5067,7 @@ sub readFromCrontab {
 			traceLog("Couldn't open file $crontabFilePath");
 			$retVal = 0;
 		}
-	} elsif(-f $crontabFilePath) {
+	} else {
 		if(open CRONTABFILE, "<", $crontabFilePath){
 			@linesCrontab = <CRONTABFILE>;
 			close CRONTABFILE;
@@ -5103,8 +5101,7 @@ sub createExcludedLogFile30k {
 sub appendExcludedLogFileContents
 {
 	my $exclude_dir = $excludeDirPath."/";
-	my $filesListCmd = Helpers::updateLocaleCmd("ls '$exclude_dir'");
-	my @files_list = `$filesListCmd`;
+	my @files_list = `ls '$exclude_dir'`;
 	my $fileopen = 0;
 	my $excludeLogSummary ='';
 	chomp(@files_list);
@@ -5132,7 +5129,7 @@ sub appendExcludedLogFileContents
 	if($excludeLogSummary){
 		$excludeLogSummary.$lineFeed.$lineFeed;
 	}
-	if(-d $exclude_dir){
+	if(-e $exclude_dir){
 		rmtree($exclude_dir);
 	}
 	return $excludeLogSummary;
@@ -5145,6 +5142,7 @@ sub appendExcludedLogFileContents
 #*****************************************************************************************************/
 sub checkAndLinkBucketSilently
 {
+	my $deviceID;
 	my $actualDeviceID;
 	my $backupLoc = Helpers::getUserConfiguration('BACKUPLOCATION');
 	my $restoreFrom = Helpers::getUserConfiguration('RESTOREFROM');
@@ -5164,7 +5162,7 @@ sub checkAndLinkBucketSilently
 
 	if(!defined($backupHost) or $backupHost eq '' or !defined($evsDeviceHashOutput{device_id}->{$actualDeviceID})){
 		#elsif(no <your device id> or <your device id != received ids>){
-		$isExistFlag = exists ($evsDeviceHashOutput{uid}->{$uniqueID});
+		my $isExistFlag = exists ($evsDeviceHashOutput{uid}->{$uniqueID});
 		if(!$isExistFlag){
 			#$uniqueID detech _1
 			$isExistFlag = exists ($evsDeviceHashOutput{uid}->{$uniqueID."_1"});
@@ -5253,11 +5251,11 @@ sub calculateProgress{
 				close progressDetails;
 				#print $#progressDetailsFileData ."\n";
 			#if($#linesStatusFile >= 0) {
-				$type = $progressDetailsFileData[0];
+				my $type = $progressDetailsFileData[0];
 				chomp($type);
-				$trnsFileSize = $progressDetailsFileData[1];
+				my $trnsFileSize = $progressDetailsFileData[1];
 				chomp($trnsFileSize);
-				$fileName = $progressDetailsFileData[5];
+				my $fileName = $progressDetailsFileData[5];
 				chomp($fileName);
 
 				$fileName =~ s/^\s*(.*?)\s*$/$1/; # Added to remove spaces from both side
@@ -5287,7 +5285,6 @@ sub get_load_average {
 	my $cmd = "uname";
 	my $load_avg;
 	my ( @one_min_avg );
-	$cmd = Helpers::updateLocaleCmd($cmd);
 	chomp(my $OS = `$cmd`);
 	$OS = lc $OS;
 	if($OS ne "freebsd"){
@@ -5298,7 +5295,6 @@ sub get_load_average {
 		return (sprintf '%.2f', $one_min_avg[1]);
 	}else{
 		my $load_avg_data = 'uptime | awk \'{print $(NF-2)" "$(NF-1)" "$(NF-0)}\' | tr "," " "\'\'';
-		$load_avg_data = Helpers::updateLocaleCmd($load_avg_data);
 		$load_avg = `$load_avg_data`;
 		chomp($load_avg);
 		my ( @one_min_avg ) = split /\s/, $load_avg;
@@ -5309,24 +5305,20 @@ sub get_load_average {
 
 sub getSystemCpuCores{
     my $cmd = "uname";
-	$cmd = Helpers::updateLocaleCmd($cmd);
 	chomp(my $OS = `$cmd`);
 	$OS = lc $OS;
 	my $retVal = 2;
 	my ($cmdCpuCores,$totalCores);
 	if($OS eq "freebsd"){
-	  my $totalCoresCmd = Helpers::updateLocaleCmd("sysctl -a | grep 'hw.ncpu' | cut -d ':' -f2");
-	  $totalCores = `$totalCoresCmd`;
+	  $totalCores = `sysctl -a | grep 'hw.ncpu' | cut -d ':' -f2`;
 	  chomp($totalCores);
 	  $totalCores = int($totalCores);
 	  $retVal = ($totalCores == 1 ? 2 : ($totalCores == 2 ? 4 : $totalCores));
     }
 	elsif($OS eq "linux"){
-	  my $cpuProcessorCountCmd = Helpers::updateLocaleCmd("cat /proc/cpuinfo | grep processor | wc -l");
-	  my $cpuProcessorCount = `$cpuProcessorCountCmd`;
+	  my $cpuProcessorCount = `cat /proc/cpuinfo | grep processor | wc -l`;
 	  chomp($cpuProcessorCount);
-	  my $cmdCpuCoresCmd = Helpers::updateLocaleCmd("grep 'cpu cores' /proc/cpuinfo | tail -1 | cut -d ':' -f2");
-	  $cmdCpuCores = `$cmdCpuCoresCmd`;
+	  $cmdCpuCores = `grep 'cpu cores' /proc/cpuinfo | tail -1 | cut -d ':' -f2`;
 	  chomp($cmdCpuCores);
 
 	  $cmdCpuCores = ($cmdCpuCores ne "" ? int($cmdCpuCores) : 1);

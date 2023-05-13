@@ -5,12 +5,11 @@
 #########################################################################
 
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
-# $incPos = rindex(__FILE__, '/');
-# $incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
-# unshift (@INC,$incLoc);
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
 
 use Helpers;
-Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 require 'Header.pl';
@@ -48,9 +47,7 @@ holdScreen2displayMessage(3);
 my $BackupScriptCmd  = "ps $psOption | grep \"".Constants->FILE_NAMES->{backupScript}." SCHEDULED $userName\" | grep -v grep";
 my $RestoreScriptCmd = "ps $psOption | grep \"".Constants->FILE_NAMES->{restoreScript}." SCHEDULED $userName\" | grep -v grep";
 my $ExpressScriptCmd = "ps $psOption | grep \"".Constants->FILE_NAMES->{expressBackupScript}." SCHEDULED $userName\" | grep -v grep";
-$BackupScriptCmd = Helpers::updateLocaleCmd($BackupScriptCmd);
-$RestoreScriptCmd = Helpers::updateLocaleCmd($RestoreScriptCmd);
-$ExpressScriptCmd = Helpers::updateLocaleCmd($ExpressScriptCmd);
+
 $BackupScriptRunning  = `$BackupScriptCmd`;
 $RestoreScriptRunning = `$RestoreScriptCmd`;
 $ExpressScriptRunning = `$ExpressScriptCmd`;
@@ -62,16 +59,15 @@ my $userProfilePath = Helpers::getUserProfilePath();
 foreach my $job (@jobNameArr) {
 	my $pidFile = Helpers::getCatfile($userProfilePath, $Configuration::userProfilePaths{$job}, $Configuration::pidFile);
 	if (Helpers::isFileLocked($pidFile)) {
-		my $jobRunningDir  = Helpers::getJobsPath($job);
+		my $jobRunningDir  = Helpers::getUsersInternalDirPath($job);
 		push @runningJobTitle, $job."_job";
 		push @runningDir, $jobRunningDir;
 	}
 }
 
 if (scalar(@runningJobTitle) > 0) {
-	Helpers::display('');
+	Helpers::display(""); #To keep empty line
 	Helpers::displayMenu('select_the_job_from_the_above_list',@runningJobTitle);
-	Helpers::display('');
 	$userSelection = Helpers::getUserMenuChoice(scalar(@runningJobTitle));
 }
 else
@@ -129,7 +125,7 @@ do {
 		Helpers::removeItems("$progressDetailsFilePath*")
 	}
 	#select undef, undef, undef, 0.005;
-	Helpers::sleepForMilliSec(100); # Sleep for 100 milliseconds
+	Helpers::sleepForMilliSec(5); # Sleep for 5 milliseconds
 }
 while($displayProgress);
 process_term();

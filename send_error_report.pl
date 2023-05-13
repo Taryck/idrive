@@ -11,10 +11,10 @@ use warnings;
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
 use Helpers;
+use Strings;
 use Configuration;
 use File::Basename;
 use Scalar::Util qw(reftype);
-Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 init();
@@ -23,10 +23,9 @@ init();
 # Subroutine Name         : init
 # Objective               : This function is entry point for the script
 # Added By                : Sabin Cheruvattil
-# Modified By             : Senthil Pandian
 #****************************************************************************************************/
 sub init {
-	system(Helpers::updateLocaleCmd('clear'));
+	system('clear');
 	my $totalNumberOfArgs = $#ARGV + 1;
 
 	Helpers::loadAppPath();
@@ -55,7 +54,7 @@ sub init {
 		$reportInputs{'reportMessage'}    = getReportUserMessage();
 	}
 
-	my $reportSubject = qq($Configuration::appType ).Helpers::getStringConstant('for_linux_user_feed');
+	my $reportSubject = qq($Configuration::appType $Locale::strings{'for_linux_user_feed'});
 	$reportSubject   .= qq( [#$reportInputs{'reportUserTicket'}]) if($reportInputs{'reportUserTicket'} ne '');
 
 	my $reportContents = getReportMailContent(%reportInputs);
@@ -91,8 +90,7 @@ sub getReportUserName {
 	my ($reportUserName, $choiceRetry) = ('', 0);
 
 	if(Helpers::isLoggedin()) {
-		$reportUserName = Helpers::getUsername();
-		Helpers::display(['current_loggedin_username_is', ': ', "\n\t", $reportUserName]);
+		Helpers::display(['current_loggedin_username_is', ': ', "\n\t", Helpers::getUsername()]);
 	} else {
 		# Get user name and validate
 		$reportUserName = Helpers::getAndValidate(['enter_your', " ", $Configuration::appType, " ", 'username', ' : '], "username", 1);
@@ -182,29 +180,27 @@ sub getReportUserMessage {
 # Subroutine Name         : getReportUserInputs
 # Objective               : This subroutine prepares the content for error report
 # Added By                : Sabin Cheruvattil
-# Modified By             : Yogesh Kumar, Senthil Pandian
+# Modified By             : Yogesh Kumar
 #****************************************************************************************************/
 sub getReportMailContent {
 	my %reportInputs = @_;
 	my ($reportContent, $logContent) = ('', '');
-	my $osd = Helpers::getOSBuild();
 	my $proxyEnabled = Helpers::isProxyEnabled()? 'Yes' : 'No';
 
-	$reportContent .= "<<< Feedback from $Configuration::appType ".Helpers::getStringConstant('linux_backup')." - $Configuration::version >>> \n";
-	$reportContent .= Helpers::getStringConstant('machine_details').": $Configuration::machineOS \n";
-	$reportContent .= Helpers::getStringConstant('os_details').": $osd->{'os'} $osd->{'build'} \n";
-	$reportContent .= Helpers::getStringConstant('computer_name').": $Configuration::hostname \n";
-	$reportContent .= Helpers::getStringConstant('profile_name').": " . $Configuration::mcUser . qq( \n);
-	$reportContent .= Helpers::getStringConstant('proxy_server').": $proxyEnabled \n";
-	$reportContent .= qq($Configuration::appType ) . ucfirst(Helpers::getStringConstant('username')).": ".$reportInputs{'reportUserName'}."\n";
+	$reportContent .= qq(<<< Feedback from $Configuration::appType $Locale::strings{'linux_backup'} - $Configuration::version >>> \n);
+	$reportContent .= qq($Locale::strings{'machine_details'}: ) . $Configuration::machineOS . qq( \n);
+	$reportContent .= qq($Locale::strings{'computer_name'}: $Configuration::hostname \n);
+	$reportContent .= qq($Locale::strings{'profile_name'}: ) . Helpers::getMachineUser() . qq( \n);
+	$reportContent .= qq($Locale::strings{'proxy_server'}: $proxyEnabled \n);
+	$reportContent .= qq($Configuration::appType ) . ucfirst($Locale::strings{'username'}) . qq(: $reportInputs{'reportUserName'} \n);
 
 	if (Helpers::loadStorageSize() or Helpers::reCalculateStorageSize()) {
-		$reportContent .= Helpers::getStringConstant('total_quota').": " . Helpers::getTotalStorage() . qq( \n);
-		$reportContent .= Helpers::getStringConstant('used_space').": " . Helpers::getStorageUsed() . qq( \n);
+		$reportContent .= qq($Locale::strings{'total_quota'}: ) . Helpers::getTotalStorage() . qq( \n);
+		$reportContent .= qq($Locale::strings{'used_space'}: ) . Helpers::getStorageUsed() . qq( \n);
 	}
 
-	$reportContent .= Helpers::getStringConstant('title_email_address').": $reportInputs{'reportUserEmail'} \n";
-	$reportContent .= Helpers::getStringConstant('tech_issue_comment_suggest').": \n";
+	$reportContent .= qq($Locale::strings{'title_email_address'}: $reportInputs{'reportUserEmail'} \n);
+	$reportContent .= qq($Locale::strings{'tech_issue_comment_suggest'}: \n);
 	$reportContent .= qq(\n);
 	$reportContent .= qq($reportInputs{'reportMessage'} \n);
 

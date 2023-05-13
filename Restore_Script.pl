@@ -3,15 +3,16 @@
 ########################################################################
 #Script Name : Restore_Script.pl
 ########################################################################
-use lib map{if (__FILE__ =~ /\//) {if ($_ eq '.') {substr(__FILE__, 0, rindex(__FILE__, '/'));}else {substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";}}else {if ($_ eq '.') {substr(__FILE__, 0, rindex(__FILE__, '/'));}else {"./$_";}}} qw(Idrivelib/lib .);
+use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
+$incPos = rindex(__FILE__, '/');
+$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+unshift (@INC,$incLoc);
 
 use FileHandle;
 use Sys::Hostname;
 use POSIX;
 
 use Helpers;
-
-Helpers::waitForUpdate();
 Helpers::initiateMigrate();
 
 require 'Header.pl';
@@ -131,8 +132,7 @@ $SIG{KILL} = \&process_term;
 $SIG{USR1} = \&process_term;
 
 #Assigning Perl path
-my $perlPathCmd = Helpers::updateLocaleCmd('which perl');
-my $perlPath = `$perlPathCmd`;
+my $perlPath = `which perl`;
 chomp($perlPath);
 if($perlPath eq ''){
 	$perlPath = '/usr/local/bin/perl';
@@ -217,11 +217,11 @@ my $trfSizeAndCountFile = "$jobRunningDir/trfSizeAndCount.txt";
 my $utf8Files = $jobRunningDir."/utf8.txt_";
 my $engineLockFile = $jobRunningDir.'/'.ENGINE_LOCKE_FILE;
 my $progressDetailsFile = $jobRunningDir.$pathSeparator."PROGRESS_DETAILS";
-my $jobCancelFile = $jobRunningDir.'/exitError.txt';
+my $jobCancelFile = $jobRunningDir.'/cancel.txt';
 my $summaryFilePath = "$jobRunningDir/".Constants->CONST->{'fileDisplaySummary'};
 
 #Renaming the log file if restore process terminated improperly
-Helpers::checkAndRenameFileWithStatus($jobRunningDir, lc($jobType));
+Helpers::checkAndRenameFileWithStatus($jobRunningDir);
 
 # pre cleanup for all intermediate files and folders.
 Helpers::removeItems([$RestoresetFile_relative."*", $noRelativeFileset."*", $filesOnly."*", $info_file, $retryinfo, "ERROR", $statusFilePath."*", $failedfiles."*", $progressDetailsFile."*", $jobCancelFile, $summaryFilePath]);
@@ -235,17 +235,14 @@ if(!-d $errorDir) {
 	}
 	chmod $filePermission, $errorDir;
 }
-my $operationType = Constants->CONST->{'RestoreOp'};
 # Deciding Restore set File based on normal restore or version restore
 if($ARGV[0] eq Constants->CONST->{'versionRestore'}) {
 	$RestoreFileName = $jobRunningDir."/versionRestoresetFile.txt";
-	$operationType = Constants->CONST->{'VersionOp'};
 }
-# Commented as per Deepak's instruction: Senthil
-# my $serverAddress = verifyAndLoadServerAddr();
-# if ($serverAddress == 0){
-    # exit_cleanup($errStr);
-# }
+my $serverAddress = verifyAndLoadServerAddr();
+if ($serverAddress == 0){
+    exit_cleanup($errStr);
+}
 #my $encType = checkEncType($isScheduledJob); # This function has been called inside getOperationFile() function.
 #createUpdateBWFile(); #Commented by Senthil: 13-Aug-2018
 my $isEmpty = checkPreReq($RestoreFileName,$jobType,$taskType,'NORESTOREDATA');
@@ -269,12 +266,12 @@ if(${ARGV[0]} eq ""){				#Only for Manual Restore.
 	emptyLocationsQueries();
 }
 $location = $restoreLocation;
-$mail_content_head = writeLogHeader($isScheduledJob,$operationType);
-if($isScheduledJob == 0 and $silentFlag == 0 and !$isEmpty and -e $pidPath) {
+$mail_content_head = writeLogHeader($isScheduledJob);
+if($isScheduledJob == 0 and $silentFlag == 0 and !$isEmpty) {
 	getCursorPos();
 }
 
-startRestore() if(!$isEmpty and -e $pidPath);
+startRestore() unless($isEmpty);
 exit_cleanup($errStr);
 
 #****************************************************************************************************
@@ -371,7 +368,7 @@ START:
 
 						$exec_loads = get_load_average();
 						if($exec_loads > $exec_cores){
-							sleep(10);
+							sleep(20);
 							next;
 						}
 						last;
@@ -422,7 +419,7 @@ START:
 			}
 		}
 
-		Helpers::waitForEnginesToFinish(\@RestoreForkchilds,$engineLockFile);
+		waitForEnginesToFinish();
 		close FD_READ;
 		$nonExistsCount    = Helpers::readInfoFile('FAILEDCOUNT');
 		waitpid($generateFilesPid,0);
@@ -432,7 +429,7 @@ START:
 			if(-e $info_file){
 				$totalFiles    = Helpers::readInfoFile('TOTALFILES');
 				if($totalFiles == 0 or $totalFiles !~ /\d+/){
-					Helpers::traceLog("Unable to get total files count: $totalFiles");
+					Helpers::traceLog("Unable to get total files count");
 				}
 			}
 		}
@@ -513,11 +510,10 @@ GETSTAT:
 
 	$checkItemUtf =~ s/\'/\'\\''/g;
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$checkItemUtf."'".$whiteSpace.$errorRedirection;
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
 	my @itemsStat = `$idevsutilCommandLine`;
 
 	# update server address if cmd failed due to wrong evs server address
-	unless(updateServerAddr()){
+	if(updateServerAddr()){
 		goto GETSTAT;
 	}
 
@@ -556,8 +552,8 @@ sub enumerateRemote {
 
 	my $searchOutput = $search."/output.txt";
 	my $searchError = $search."/error.txt";
-	my $searchRetryCount = 5;
-STARTSEARCH:
+
+START:
 	my $searchUtfFile = getOperationFile(Constants->CONST->{'SearchOp'}, $remoteFolder);
 	if(!$searchUtfFile) {
 		return 0;
@@ -567,7 +563,6 @@ STARTSEARCH:
 	$idevsutilCommandLine = "'$idevsutilBinaryPath'".$whiteSpace.$idevsutilArgument.$assignmentOperator."'".$searchUtfFile."'".$whiteSpace.$errorRedirection;
 #	my $commandOutput = `$idevsutilCommandLine`;
 	# EVS command execute
-	$idevsutilCommandLine = Helpers::updateLocaleCmd($idevsutilCommandLine);
 	$res = `$idevsutilCommandLine`;
 	# traceLog(qq(res - $res));
 
@@ -577,15 +572,14 @@ STARTSEARCH:
 	}
 
 	# update server address if cmd failed due to wrong evs server address
-	unless(updateServerAddr($searchError)){
-		$searchRetryCount--;
-		goto STARTSEARCH if($searchRetryCount);
+	if(updateServerAddr($searchError)){
+		goto START;
 	}
 
 	if(-s $searchError > 0) {
 		$errStr = "Remote folder enumeration has failed.\n";
 		checkExitError($searchError);
-		writeParameterValuesToStatusFile($fileBackupCount, $fileRestoreCount, $fileSyncCount, $failedfiles_count, $deniedFilesCount, $missingCount, 0, $exit_flag, $failedfiles_index, $engineID);
+		writeParameterValuesToStatusFile($fileBackupCount, $fileRestoreCount, $fileSyncCount, $failedfiles_count, $deniedFilesCount, $missingCount, $exit_flag, $failedfiles_index, $engineID);
 		return REMOTE_SEARCH_FAIL;
 	}
 	unlink($searchUtfFile);
@@ -689,7 +683,7 @@ STARTSEARCH:
 			}
 		}
 	}
-	Helpers::traceLog($errStr) if($errStr);
+	Helpers::traceLog($errStr);
 	return REMOTE_SEARCH_SUCCESS;
 }
 
@@ -808,7 +802,6 @@ sub generateRestoresetFiles {
 
 					# EVS command to execute for properties
 					my $propertiesCmd = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_propertiesFile\'".$whiteSpace.$errorRedirection;
-					$propertiesCmd = Helpers::updateLocaleCmd($propertiesCmd);
 					my $commandOutput = `$propertiesCmd`;
 					# traceLog($commandOutput);
 
@@ -914,7 +907,6 @@ sub generateRestoresetFiles {
 
 						# EVS command to execute for properties
 						my $propertiesCmd = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmp_propertiesFile\'".$whiteSpace.$errorRedirection;
-						$propertiesCmd = Helpers::updateLocaleCmd($propertiesCmd);
 						my $commandOutput = `$propertiesCmd`;
 						# traceLog($commandOutput);
 						unlink $propertiesFile;
@@ -955,7 +947,7 @@ sub generateRestoresetFiles {
 	}
 	else{
 		checkExitError($idevsErrorFile);
-		writeParameterValuesToStatusFile($fileBackupCount, $fileRestoreCount, $fileSyncCount, $failedfiles_count, $deniedFilesCount, $missingCount, 0, $exit_flag, $failedfiles_index, $engineID);
+		writeParameterValuesToStatusFile($fileBackupCount, $fileRestoreCount, $fileSyncCount, $failedfiles_count, $deniedFilesCount, $missingCount, $exit_flag, $failedfiles_index, $engineID);
 	}
 
 	if($relative == 1 && $filecount > 0){
@@ -1068,8 +1060,8 @@ sub doRestoreOperation {
 		return 0;
 	}
 
-	Helpers::fileWrite($pidPath.'_evs_'.$operationEngineId, 1); #Added for Harish_2.19_7_5
 	open(my $engineFp, ">>", $pidPath.'_'.$operationEngineId) or return 0;
+
 	if(!flock($engineFp, 2)){
 		print "Unable to lock \n";
 		return 0;
@@ -1086,31 +1078,29 @@ sub doRestoreOperation {
 	$tmp_idevsutilBinaryPath =~ s/\'/\'\\''/g;
 	# EVS command to execute for backup
 	$idevsutilCommandLine = "\'$tmp_idevsutilBinaryPath\'".$whiteSpace.$idevsutilArgument.$assignmentOperator."\'$tmprestoreUtfFile\'".$whiteSpace.$errorRedirection;
-	$restorePid = fork();
-	if(!defined $restorePid) {
+	$pid = fork();
+	if(!defined $pid) {
 		$errStr = Constants->CONST->{'ForkErr'}.$whiteSpace.Constants->CONST->{"EvsChild"}.$lineFeed;
 		return RESTORE_PID_FAIL;
 	}
-	if($restorePid == 0)
+	if($pid == 0)
 	{
 		if(-e $pidPath) {
-			system(Helpers::updateLocaleCmd($idevsutilCommandLine." > /dev/null 2>'$doRestoreOperationErrorFile'"));
+			system($idevsutilCommandLine." > /dev/null 2>'$doRestoreOperationErrorFile'");
 			if(-e $doRestoreOperationErrorFile && -s $doRestoreOperationErrorFile) {
-				my $error = Helpers::getFileContents($doRestoreOperationErrorFile);
-				if($error ne '' and $error !~ /no version information available/) {
-					$errStr = Constants->CONST->{'DoRstOpErr'}.Constants->CONST->{'ChldFailMsg'};
-					Helpers::traceLog($errStr);
-					Helpers::traceLog("Child Launch Error: $error");
-					if(open(ERRORFILE, ">> $errorFilePath")) {
-						autoflush ERRORFILE;
+				$errStr = Constants->CONST->{'DoRstOpErr'}.Constants->CONST->{'ChldFailMsg'};
+				print $errStr;
+				Helpers::traceLog($errStr);
 
-						print ERRORFILE $errStr;
-						close ERRORFILE;
-						chmod $filePermission, $errorFilePath;
-					}
-					else {
-						Helpers::traceLog(Constants->CONST->{'FileOpnErr'}.$errorFilePath.", Reason:$!");
-					}
+				if(open(ERRORFILE, ">> $errorFilePath")) {
+					autoflush ERRORFILE;
+
+					print ERRORFILE $errStr;
+					close ERRORFILE;
+					chmod $filePermission, $errorFilePath;
+				}
+				else {
+					Helpers::traceLog(Constants->CONST->{'FileOpnErr'}.$errorFilePath.", Reason:$!");
 				}
 			}
 
@@ -1137,7 +1127,7 @@ sub doRestoreOperation {
 	}
 
 	exit 1 if( !-e $pidPath);
-	#$pid_OutputProcess	= $pid;
+	$pid_OutputProcess	= $pid;
 
 	$isLocalRestore = 0;
 	$workingDir = $currentDir;
@@ -1155,26 +1145,20 @@ sub doRestoreOperation {
 	$tmpRestoreHost =~ s/\'/\'\\''/g;
 	my $tmpRestoreLoc = $restoreLocation;
 	$tmpRestoreLoc =~ s/\'/\'\\''/g;
-	#my $execString = Helpers::getStringConstant('support_file_exec_string');
 	my @param = join ("\n",('RESTORE_OPERATION',$tmpOpFilePath,$tmpRstSetFile,$parameter_list[1],$tmpSrc,$progressSizeOp,$tmpRestoreHost,$tmpRestoreLoc,$silentFlag,'',$scheduleFlag));
 	writeParamToFile("$tmpJobRngDir/operationsfile.txt_".$operationEngineId,@param);
 	$cmd = "cd \'$workingDir\'; $perlPath \'$fileChildProcessPath\' \'$tmpJobRngDir\' \'$userName\' \'$operationEngineId\' \'$retry_failedfiles_index\'";
-	$cmd = Helpers::updateLocaleCmd("$cmd 2>/dev/null &");
 	system($cmd);
 
-	waitpid($restorePid,0) if($restorePid);
-
-	unlink($pidPath.'_evs_'.$operationEngineId);
-	Helpers::waitForChildProcess($pidPath.'_proc_'.$operationEngineId);
-	unlink($pidPath.'_'.$operationEngineId);
+	waitpid($pid,0);
 	updateServerAddr();
 
 	unlink($parameter_list[2]);
 	unlink($idevsOutputFile."_".$operationEngineId);
-	flock($startPidFileLock, 8);
-	flock($engineFp, 8);
 
-	#return 0 if(-e $errorFilePath && -s $errorFilePath);
+	if(-e $errorFilePath && -s $errorFilePath) {
+		return 0;
+	}
 
 	return RESTORE_SUCCESS;
 }
@@ -1247,7 +1231,6 @@ sub cancelSubRoutine {
 		Helpers::sendFailureNotice($userName, 'update_restore_progress', $taskType);
 
 		my $evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$jobRunningDir\'";
-		$evsCmd = Helpers::updateLocaleCmd($evsCmd);
 		$evsRunning = `$evsCmd`;
 		@evsRunningArr = split("\n", $evsRunning);
 		my $arrayData = ($machineInfo eq 'freebsd')? 1 : 3;
@@ -1257,17 +1240,14 @@ sub cancelSubRoutine {
 			my @lines = split(/[\s\t]+/, $_);
 			my $pid = $lines[$arrayData];
 
-			$scriptTerm = system(Helpers::updateLocaleCmd("kill -9 $pid"));
+			$scriptTerm = system("kill -9 $pid");
 			Helpers::traceLog(Constants->CONST->{'KilFail'}." Restore") if(defined($scriptTerm) && $scriptTerm != 0 && $scriptTerm ne "")
 		}
 
 		waitpid($generateFilesPid, 0) if($generateFilesPid);
 		waitpid($displayProgressBarPid, 0) if($displayProgressBarPid);
-		Helpers::waitForChildProcess();
-
 		if(($totalFiles == 0 or $totalFiles !~ /\d+$/) and (-s $info_file)) {
 			my $fileCountCmd = "cat '$info_file' | grep \"^TOTALFILES\"";
-			$fileCountCmd = Helpers::updateLocaleCmd($fileCountCmd);
 			$totalFiles = `$fileCountCmd`;
 			$totalFiles =~ s/TOTALFILES//;
 		}
@@ -1276,13 +1256,11 @@ sub cancelSubRoutine {
 
 		if($nonExistsCount == 0 and -s $info_file) {
 			my $nonExistCheckCmd = "cat '$info_file' | grep \"^FAILEDCOUNT\"";
-			$nonExistCheckCmd = Helpers::updateLocaleCmd($nonExistCheckCmd);
 			$nonExistsCount = `$nonExistCheckCmd`;
 			$nonExistsCount =~ s/FAILEDCOUNT//;
 		}
 
 		waitpid($pid_OutputProcess, 0) if($pid_OutputProcess);
-		$errStr = Constants->CONST->{'operationFailUser'};
 		exit_cleanup($errStr);
 	}
 }
@@ -1296,7 +1274,7 @@ sub cancelSubRoutine {
 sub exit_cleanup {
 	if ($silentFlag == 0){
 		system('stty', 'echo');
-		system(Helpers::updateLocaleCmd("tput sgr0"));
+		system("tput sgr0");
 	}
 
 	unless($isEmpty) {
@@ -1314,10 +1292,16 @@ sub exit_cleanup {
 
 			# In childprocess, if we exit due to some exit scenario, then this exit_flag will be true with error msg
 			@exit = split("-",$exit_flag,2);
-			if(!$exit[0] and $errStr eq "") {
+			if(!$exit[0]) {
 				if($isScheduledJob) {
 					$errStr = Constants->CONST->{'operationFailCutoff'};
-					if(!-e Helpers::getServicePath()) {
+					if (-e $jobCancelFile and (-s $jobCancelFile > 0)){
+						open (FH, "<$jobCancelFile") or die $!;
+						my @errStr = <FH>;
+						chomp(@errStr);
+						grep { print $_."\n" } @errStr;
+						$errStr = $errStr[0] if (defined $errStr[0]);
+					} elsif(!-e Helpers::getServicePath()) {
 						$errStr = Constants->CONST->{'operationFailUser'};
 					}
 				}
@@ -1327,8 +1311,7 @@ sub exit_cleanup {
 			} else {
 				if($exit[1] ne ""){
 					$errStr = $exit[1];
-					#Below section has been added to provide user friendly message and clear instruction in case of password mismatch or encryption verification failed.
-					#In this case we are removing the IDPWD file.So that user can login and recreate these files with valid credential.
+	#Below section has been added to provide user friendly message and clear instruction in case of password mismatch or encryption verification failed. In this case we are removing the IDPWD file.So that user can login and recreate these files with valid credential.
 					if ($errStr =~ /password mismatch|encryption verification failed/i){
 						$errStr = $errStr.'. '.Constants->CONST->{loginAccount}.$lineFeed;
 						unlink($pwdPath);
@@ -1348,7 +1331,7 @@ sub exit_cleanup {
 	unlink($pidPath);
 	waitpid($displayProgressBarPid,0);
 	wait();
-	writeOperationSummary(Constants->CONST->{'RestoreOp'}, $cancelFlag, $transferredFileSize);
+	writeOperationSummary(Constants->CONST->{'RestoreOp'}, $cancelFlag);
 	unlink($fileForSize);
 	#unlink($incSize);
 	unlink($trfSizeAndCountFile);
@@ -1357,9 +1340,9 @@ sub exit_cleanup {
 		unlink($RestoreItemCheck);
 	}
 	unlink($jobCancelFile) if(-e $jobCancelFile);
-	rmtree($evsTempDirPath) if (-e $evsTempDirPath);
-	#rmtree(SEARCH);
-	rmtree($search) if (-e $search);
+	rmtree($evsTempDirPath);
+	rmtree(SEARCH);
+	rmtree($search);
 	if(-d $errorDir) {
 		rmtree($errorDir);
 	}
@@ -1378,10 +1361,10 @@ sub exit_cleanup {
 
 		$outputFilePath = $finalOutFile;
 
-		$finalSummary .= Constants->CONST->{moreDetailsReferLog}.qq(\n);# Concat log file path with job summary. To access both at once while displaying the summary and log file location.
-		$finalSummary .= "\n".$status."\n".$errStr;
+		$finalSummery .= Constants->CONST->{moreDetailsReferLog}.qq(\n);# Concat log file path with job summary. To access both at once while displaying the summery and log file location.
+		$finalSummery .= "\n".$status."\n".$errStr;
 		#if($silentFlag == 0){ #Commented by Senthil
-			writeToFile($summaryFilePath,$finalSummary) ;
+			writeToFile($summaryFilePath,$finalSummery) ;
 			chmod $filePermission, $summaryFilePath;
 		#}
 		#It is a generic function used to write content to file.
@@ -1463,19 +1446,17 @@ sub updateServerAddr {
 		$tempErrorFileSize = -s $idevsErrorFile;
 	}
 	if($tempErrorFileSize > 0) {
-		my $errorPatternServerAddr = "unauthorized user|user information not found";
+		my $errorPatternServerAddr = "unauthorized user";
 		open EVSERROR, "<", $idevsErrorFile or Helpers::traceLog("Failed to open error.txt Reason : $!");
 		$errorContent = <EVSERROR>;
 		close EVSERROR;
 		if($errorContent =~ m/$errorPatternServerAddr/){
 			if (!(getServerAddr())){
 				exit_cleanup($errStr);
-				return 1;
 			}
-			return 0;
+			return 1;
 		}
 	}
-	return 1;
 }
 
 #****************************************************************************************************
@@ -1556,8 +1537,8 @@ sub updateRetryCount()
 		$retrycount = 0;
 	}
 	else {
-		if($currentTime-$prevTime < 90) {
-			sleep 10;
+		if($currentTime-$prevTime < 120) {
+			sleep 300;
 		}
 		$retrycount++;
 	}
@@ -1606,7 +1587,7 @@ sub checkExitError
 				#kill evs and then exit
 				my $jobTerminationPath = $currentDir.'/'.Constants->FILE_NAMES->{jobTerminationScript};
 				my $jobToTerm = lc($jobType);
-				system(Helpers::updateLocaleCmd("$perlPath \'$jobTerminationPath\' \'$jobToTerm\' \'$userName\' 1>/dev/null 2>/dev/null"));
+				system("$perlPath \'$jobTerminationPath\' \'$jobToTerm\' \'$userName\' 1>/dev/null 2>/dev/null");
 
 				$exit_flag = "1-$errStr";
 				#unlink($pwdPath);
@@ -1616,3 +1597,21 @@ sub checkExitError
 	}
 }
 
+
+sub waitForEnginesToFinish{
+	my $res = '';
+	while(@RestoreForkchilds > 0) {
+		foreach (@RestoreForkchilds) {
+			$res = waitpid($_, 0);
+			if ($res > 0 or $res == -1) {
+				@RestoreForkchilds = grep(!/$_/, @RestoreForkchilds);
+			}
+		}
+	}
+
+	while(isAnyEngineRunning($engineLockFile)){
+		sleep(1);
+	}
+
+	return;
+}

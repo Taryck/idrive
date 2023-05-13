@@ -12,6 +12,7 @@ use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/
 
 use Helpers;
 use Configuration;
+use Strings;
 
 #need to change to 200MB for production release
 use constant SPEED_TEST_FILE_SIZE => "10M";
@@ -31,15 +32,15 @@ init();
 # Added By				: Senthil pandian
 #****************************************************************************************************/
 sub init {
-	system(Helpers::updateLocaleCmd("clear"));
-	checkVersionInfo() if($Configuration::appType eq 'IDrive');
+	system("clear");
+	checkVersionInfo();
 
 	Helpers::loadAppPath() or Helpers::retreat('Failed to load source Code path');
 	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
 	Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
 	Helpers::isLoggedin() or Helpers::retreat('login_&_try_again');
 	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey > 1);
+	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
 	Helpers::displayHeader();
 	displayDescription();
 
@@ -65,7 +66,7 @@ sub init {
 	deleteTestFileFromIDrive($testFileName);
 	my $speedtesnetResult = speedTestViaSpeedtestnet();
 
-	$evsResult .= Helpers::getStringConstant('speed_test_result_via_speed_test_net'). " \n===================================\n\t". $speedtesnetResult;
+	$evsResult .= $Locale::strings{'speed_test_result_via_speed_test_net'}. " \n===================================\n\t". $speedtesnetResult;
 	Helpers::display(["\n", 'do_you_want_to_view_speed_analysis_report', "\n"], 0);
 	my $displayChoice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
 
@@ -95,7 +96,7 @@ sub init {
 #********************************************************************************
 sub displayDescription {
 	my $description = "Description: \n\n";
-	$description .= Helpers::getStringConstant('description_for_speed_test');
+	$description .= $Locale::strings{'description_for_speed_test'};
 	$description .= "\n";
 	Helpers::display($description, 1);
 }
@@ -198,7 +199,6 @@ sub generateFileForBackup {
 
 	# need to update size to 200 MB for production release.
 	my $cmdToCreateFile = "dd if=/dev/urandom of='$testFile' bs=".SPEED_TEST_FILE_SIZE." count=1 2>/dev/null";
-	$cmdToCreateFile = Helpers::updateLocaleCmd($cmdToCreateFile);
 	`$cmdToCreateFile`;
 
 	if(open(my $fh, ">", $tempBackupsetFilePath)){
@@ -367,7 +367,7 @@ sub sendReportMail {
 	my $reportUserTicket = $_[0];
 	my $reportContents   = $_[1];
 	my $reportUserEmail  = $_[2];
-	my $reportSubject 	 = qq($Configuration::appType ).Helpers::getStringConstant('for_linux_user_feed');
+	my $reportSubject 	 = qq($Configuration::appType $Locale::strings{'for_linux_user_feed'});
 	   $reportSubject 	.= qq( [#$reportUserTicket]) if($reportUserTicket ne '');
 	my $reportEmailCont	 = qq(Email=) . Helpers::urlEncode($Configuration::IDriveSupportEmail) . qq(&subject=) . Helpers::urlEncode($reportSubject);
 	$reportEmailCont	.= qq(&content=).Helpers::urlEncode($reportContents).qq(&user_email=).Helpers::urlEncode($reportUserEmail);
@@ -421,8 +421,7 @@ sub getReportUserEmails {
 # Modified By			: Sabin Cheruvattil
 #****************************************************************************************************/
 sub speedTestViaSpeedtestnet {
-	my $pythonbinCmd = Helpers::updateLocaleCmd('which python');
-	my $pythonbin = `$pythonbinCmd`;
+	my $pythonbin = `which python`;
 	Helpers::Chomp(\$pythonbin);
 	unless($pythonbin) {
 		Helpers::display(["\n",'python_not_found_no_speedtest'], 1);
@@ -446,7 +445,6 @@ sub speedTestViaSpeedtestnet {
 		$proxy = "--proxy $proxyStr";
 	}
 
-	my $cmdtoGetSpeedInfoCmd = Helpers::updateLocaleCmd('curl -sk $proxy https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py | python -');
-	my $cmdtoGetSpeedInfo = `$cmdtoGetSpeedInfoCmd`;
+	my $cmdtoGetSpeedInfo = `curl -s $proxy https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py | python -`;
 	return $cmdtoGetSpeedInfo;
 }
