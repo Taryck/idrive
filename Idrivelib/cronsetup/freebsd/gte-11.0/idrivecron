@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# __APP__ CRON Service
+# Created By: Sabin Cheruvattil
+# Modified By: Senthil Pandian
+#
+# PROVIDE: __APP__ cron
+# REQUIRE: LOGIN FILESYSTEMS
+# BEFORE: securelevel
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="__APP__cron"
+Desc="Daemon to execute scheduled commands"
+rcvar="__APP__cron_enable"
+
+command="/usr/local/bin/perl __LAUNCHPATH__"
+pidfile="/var/run/__APP__cron.pid"
+
+load_rc_config $name
+
+start_cmd=__APP__cron_start
+stop_cmd=__APP__cron_stop
+restart_cmd=__APP__cron_restart
+status_cmd=__APP__cron_status
+
+__APP__cron_start() {
+	${command} 2>/dev/null 1>/dev/null &
+	touch ${pidfile}
+	echo $! > ${pidfile}
+}
+
+__APP__cron_stop() {
+	if [ -f ${pidfile} ]; then
+		value=`cat ${pidfile}`
+		`kill $value`
+	fi
+}
+
+__APP__cron_restart() {
+	__APP__cron_stop
+	__APP__cron_start
+}
+
+__APP__cron_status() {
+	if [ -f ${pidfile} ]; then
+		value=`cat ${pidfile}`
+		ps -p ${value} > /dev/null 2>&1 && echo "* "${name}" is running: ${value}" || echo "* "${name}" is not running"
+		return 1
+	fi
+	
+	echo "* "${name}" is not running"
+}
+
+run_rc_command "$1"

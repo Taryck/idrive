@@ -1,0 +1,19 @@
+# @IDrive Inc
+# Created By  : Sabin Cheruvattil
+# Modified By : Senthil Pandian
+
+[Unit]
+Description=__APP__ Scheduler
+After=local-fs.target multi-user.target
+
+[Service]
+Type=simple
+TimeoutSec=10
+ExecStart=__LAUNCHPATH__
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=always
+PIDFile=/var/run/__APP__cron.pid
+
+[Install]
+WantedBy=multi-user.target

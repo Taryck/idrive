@@ -1,0 +1,72 @@
+Revision history for Linux::Inotify2
+
+TODO: document move/renaming issues for fullname
+TODO: find_watchers($path), or maybe just ->watchers
+
+2.1  Fri Oct 26 03:16:03 CEST 2018
+	- damn, left debugging code not caught by tests (reported by losyme).
+
+2.0  Thu Oct 25 03:19:08 CEST 2018
+	- fix poll and read documentation w.r.t. errors - this changes the
+          documented API, but is how the module has always behaved.
+	- mention https://lwn.net/Articles/605128/ in the docs.
+	- new on_overflow callback, called for overflow events.
+        - new ->broadcast method that calls all watchers with some event.
+        - automatically broadcast overflow events to all watchers by default.
+	- read now returns all events (except ignored ones), not just ones
+          it has registered watchers for (e.g. overflow events).
+	- reduced dependencies (Mike Pomraning).
+        - add IN_EXCL_UNLINK flag.
+        - more efficient constant initialisation.
+
+1.22 Tue Jun 14 08:34:38 CEST 2011
+	- use a more useful definition of IN_xxx methods - any bits, not
+          a match. (pointed out by Anatoliy Grishayev).
+        - slightly reworked the documentation.
+
+1.21 Mon Sep 21 10:07:07 CEST 2009
+	- fix a couple of typoes, as pointed out by Grant McLean.
+        - rely on common::sense for stricter namespace checking.
+
+1.2  Tue Oct  7 19:23:57 CEST 2008
+	- include IN_DELETE_SELF in events that cancel watchers, as
+          the kernel seems to handle it this way only.
+        - require sys/inotify.h to be installed, remove the local
+          copy (patch by Adrian Bunk).
+        - update examples.
+
+1.1  Fri Sep 29 16:40:14 CEST 2006
+	- fixed formatting.
+	- add IN_MASK_ADD, IN_DONT_FOLLOW, IN_ONLYDIR.
+        - updated inotify.h from inotify-utils for wider architecture support.
+        - no internal changes.
+
+1.01 Tue Dec 20 12:31:16 CET 2005
+	- more fixes by Andrejs Dubovskis:
+	- removed debugging code accidentally left in.
+        - streaming API didn't always return properly blessed objects.
+
+1.0  Mon Dec 19 17:48:01 CET 2005
+	- incorporated a major patch by Andrejs Dubovskis:
+        - added a non-callback interface to read events
+        - better error handling in non-blocking case.
+        - added test case.
+        - fix reading events leaking memory.
+
+0.8  Sun Nov 27 13:43:14 CET 2005
+	- improved documentation.
+        - added IN_MOVE_SELF.
+        - cancel events when receiving an IN_ONESHOT event.
+        - clarify documentation for ->cookie.
+
+0.2  Tue Aug 23 04:27:31 CEST 2005
+	- poll now really returns the #events.
+        - handle multiple cancel's gracefully.
+        - auto-cancel watchers on IN_IGNORED and IN_UNMOUNT.
+          situation with IN_ONESHOT is unclear
+          (does have no effect on 2.6.13-rc6-git13).
+        - avoid race between canceled and newly-created watches.
+        - improved documentation.
+
+0.1  Mon Aug 22 12:05:15 CEST 2005
+	- original version, a Linux::AIO clone.

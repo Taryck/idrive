@@ -1,0 +1,22 @@
+
+=head2 Tue Aug 13 05:22:48 2019: C<Module> L<Linux::Inotify2|Linux::Inotify2>
+
+=over 4
+
+=item *
+
+C<installed into: __SITEPERL_LIB_PATH__>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.1>
+
+=item *
+
+C<EXE_FILES: >
+
+=back

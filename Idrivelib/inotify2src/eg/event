@@ -1,0 +1,22 @@
+#!/opt/bin/perl
+
+# example for Event integration
+
+use Event;
+use Linux::Inotify2;
+
+my $inotify = new Linux::Inotify2;
+
+Event->io (fd => $inotify->fileno, poll => 'r', cb => sub { $inotify->poll });
+
+$inotify->watch ("/tmp", IN_ALL_EVENTS, sub {
+   my $e = shift;
+   printf "events for <%s>:%d received: %x\n", $e->fullname, $e->cookie, $e->mask;
+   print "$e->{w}{name} was accessed\n" if $e->IN_ACCESS;
+   print "$e->{w}{name} was modified\n" if $e->IN_MODIFY;
+   print "$e->{w}{name} is no longer mounted\n" if $e->IN_UNMOUNT;
+   print "events for $e->{w}{name} have been lost\n" if $e->IN_Q_OVERFLOW;
+});
+
+Event::loop;
+

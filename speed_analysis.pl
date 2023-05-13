@@ -10,9 +10,8 @@ use warnings;
 
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
-use Helpers;
-use Configuration;
-use Strings;
+use Common;
+use AppConfig;
 
 #need to change to 200MB for production release
 use constant SPEED_TEST_FILE_SIZE => "10M";
@@ -22,7 +21,9 @@ $SIG{INT}  = \&cancelProcess;
 $SIG{TERM} = \&cancelProcess;
 $SIG{TSTP} = \&cancelProcess;
 $SIG{QUIT} = \&cancelProcess;
-my $testFileName = "";
+my ($testFileName, $speedTestErrorFile) = ('') x 2;
+my $speedTestScriptURL = "https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py";
+my $speedTestWebURL    = "https://www.speedtest.net/";
 
 init();
 
@@ -32,60 +33,55 @@ init();
 # Added By				: Senthil pandian
 #****************************************************************************************************/
 sub init {
-	system("clear");
-	checkVersionInfo();
+	system(Common::updateLocaleCmd("clear"));
+	checkVersionInfo() if($AppConfig::appType eq 'IDrive');
 
-	Helpers::loadAppPath() or Helpers::retreat('Failed to load source Code path');
-	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
-	Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
-	Helpers::isLoggedin() or Helpers::retreat('login_&_try_again');
-	my $errorKey = Helpers::loadUserConfiguration();
-	Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
-	Helpers::displayHeader();
+	Common::loadAppPath() or Common::retreat('Failed to load source Code path');
+	Common::loadServicePath() or Common::retreat('invalid_service_directory');
+	Common::loadUsername() or Common::retreat('login_&_try_again');
+	Common::isLoggedin() or Common::retreat('login_&_try_again');
+	my $errorKey = Common::loadUserConfiguration();
+	Common::retreat($AppConfig::errorDetails{$errorKey}) if($errorKey > 1);
+	Common::displayHeader();
 	displayDescription();
 
-	my $tempBackupsetFilePath   = Helpers::getUserProfilePath()."/tempBackupsetFile.txt";
-	my $ticketID  = getUserTicketID();
+	my $tempBackupsetFilePath   = Common::getUserProfilePath()."/tempBackupsetFile.txt";
+	$speedTestErrorFile = Common::getUserProfilePath().'/speedTestError.txt';
+	$testFileName = "speedTest.txt_".time;
 
-	Helpers::display(["\n", 'can_we_upload_a_sample_file_for_speed_test_analysis', "\n"], 0);
-	my $userOpt = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+	my $msg = Common::getStringConstant('can_we_upload_a_sample_file_for_speed_test_analysis');
+	$msg =~ s/SPEED_TEST_FILE/$testFileName/;
+	Common::display(["\n", $msg, "\n"], 0);
+	my $userOpt = Common::getAndValidate(['enter_your_choice'], "YN_choice", 1);
 
 	unless(lc($userOpt) eq 'y'){
-		Helpers::display(["\n", 'aborting_the_operation', "\n"], 1);
+		Common::display(["\n", 'aborting_the_operation', "\n"], 1);
 		exit;
 	}
 
-	$testFileName = checkItemStatus();
-
-	Helpers::display(['speed_test_file_created_successfully'], 1);
+	# $testFileName = checkItemStatus();
+	$msg = Common::getStringConstant('creating_the_speed_test_file_for_backup');
+	$msg =~ s/SPEED_TEST_FILE/$testFileName/;
+	Common::display(["\n", $msg], 1);
 	my $backupFileList   = $tempBackupsetFilePath;
-	my $testFile  = Helpers::getUserProfilePath()."/".$testFileName;
-
+	my $testFile  = Common::getUserProfilePath()."/".$testFileName;
 	generateFileForBackup($testFile);
+	Common::display(["\"$testFileName\"", " ", 'created_successfully'], 1);
+
 	my $evsResult = speedTestViaEVS($backupFileList);
 	deleteTestFileFromIDrive($testFileName);
 	my $speedtesnetResult = speedTestViaSpeedtestnet();
 
-	$evsResult .= $Locale::strings{'speed_test_result_via_speed_test_net'}. " \n===================================\n\t". $speedtesnetResult;
-	Helpers::display(["\n", 'do_you_want_to_view_speed_analysis_report', "\n"], 0);
-	my $displayChoice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+	$evsResult .= "\n";
+	$evsResult .= Common::getStringConstant('speed_test_result_via_speed_test_net').$speedtesnetResult;
 
-	if(lc($displayChoice) eq 'y'){
-		#Helpers::display(["\n", "SPEED ANALYSIS RESULT :::", "\n=======================\n", "\n"], 0);
-		Helpers::display(["\n\n",$evsResult], 1);
-	}
+	Common::display(["\n\n",$evsResult], 1);
 
-	Helpers::display(["\n", 'do_you_want_to_send_speed_analysis_report_to_idrive_team', "\n"], 0);
-	my $askEmailChoice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
-
-	if(lc($askEmailChoice) eq 'y'){
+	my $ticketID  = getUserTicketID();
+	if($ticketID) {
 		my $userEmail = getReportUserEmails();
 		sendReportMail($ticketID,$evsResult,$userEmail);
 	}
-	else{
-		Helpers::display(["\n", 'aborting_the_operation', "\n"], 1);
-	}
-
 	unlink($testFile);
 }
 
@@ -96,9 +92,9 @@ sub init {
 #********************************************************************************
 sub displayDescription {
 	my $description = "Description: \n\n";
-	$description .= $Locale::strings{'description_for_speed_test'};
+	$description .= Common::getStringConstant('description_for_speed_test');
 	$description .= "\n";
-	Helpers::display($description, 1);
+	Common::display($description, 1);
 }
 
 #********************************************************************************
@@ -109,7 +105,7 @@ sub displayDescription {
 #********************************************************************************
 sub checkVersionInfo {
 	my $version = Constants->CONST->{'ScriptBuildVersion'};
-	Helpers::retreat(["\n", 'please_update_your_script_to_latest_version', "\n"], 1) unless(Helpers::versioncompare('2.16', $version) == 2);
+	Common::retreat(["\n", 'please_update_your_script_to_latest_version', "\n"], 1) unless(Common::versioncompare('2.16', $version) == 2);
 }
 
 #********************************************************************************
@@ -120,18 +116,18 @@ sub checkVersionInfo {
 #********************************************************************************
 sub checkItemStatus {
 
-	Helpers::display(["\n", 'creating_the_speed_test_file_for_backup'], 1);
+	Common::display(["\n", 'creating_the_speed_test_file_for_backup'], 1);
 
-	my $isDedup  	   = Helpers::getUserConfiguration('DEDUP');
-	my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
+	my $isDedup  	   = Common::getUserConfiguration('DEDUP');
+	my $backupLocation = Common::getUserConfiguration('BACKUPLOCATION');
 	   $backupLocation = '/'.$backupLocation unless($backupLocation =~ m/^\//);
 	my $remoteFolder = "*speedTestFile.txt*";
 	my $strReplace = "";
 
-	my $searchDir 	   = Helpers::getUserProfilePath();
-	my $tempSearchUTFpath = $searchDir.'/'.$Configuration::utf8File;
-	my $tempEvsOutputFile = $searchDir.'/'.$Configuration::evsOutputFile;
-	my $tempEvsErrorFile  = $searchDir.'/'.$Configuration::evsErrorFile;
+	my $searchDir 	   = Common::getUserProfilePath();
+	my $tempSearchUTFpath = $searchDir.'/'.$AppConfig::utf8File;
+	my $tempEvsOutputFile = $searchDir.'/'.$AppConfig::evsOutputFile;
+	my $tempEvsErrorFile  = $searchDir.'/'.$AppConfig::evsErrorFile;
 
 	if($isDedup eq 'off'){
 		$strReplace = $backupLocation."/speedTestFile.txt";
@@ -139,8 +135,9 @@ sub checkItemStatus {
 		$strReplace = "/speedTestFile.txt";
 	}
 
-	Helpers::createUTF8File(['SEARCHALL', $tempSearchUTFpath], $tempEvsOutputFile, $tempEvsErrorFile, $remoteFolder);
-	my @responseData = Helpers::runEVS('item', 1, 1, $tempSearchUTFpath);
+START:
+	Common::createUTF8File(['SEARCHALL', $tempSearchUTFpath], $tempEvsOutputFile, $tempEvsErrorFile, $remoteFolder);
+	my @responseData = Common::runEVS('item', 1, 1, $tempSearchUTFpath);
 
 	while(1){
 		if((-e $tempEvsOutputFile and -s $tempEvsOutputFile) or  (-e $tempEvsErrorFile and -s $tempEvsErrorFile)){
@@ -149,9 +146,15 @@ sub checkItemStatus {
 		sleep(2);
 		next;
 	}
-
-	print "\n\n Search Error \n\n" if(-s $tempEvsOutputFile == 0 and -s $tempEvsErrorFile > 0);
-
+	if((-z $tempEvsOutputFile) and (!-z $tempEvsErrorFile)) {
+		my $buffer = Common::getFileContents($tempEvsErrorFile);
+		if(Common::checkErrorAndUpdateEVSDomainStat($buffer)) {
+			Common::loadServerAddress();
+			unlink($tempEvsErrorFile);
+			goto START;
+		}
+		print "\n\n Search Error \n\n";
+	}
 	unlink($tempSearchUTFpath) if(-f $tempSearchUTFpath);
 
 	my @fileList =();
@@ -168,10 +171,10 @@ sub checkItemStatus {
 
 		my @resultList = split /\n/, $buffer;
 		foreach my $tmpLine (@resultList){
-			my %fileName = Helpers::parseXMLOutput(\$tmpLine);
+			my %fileName = Common::parseXMLOutput(\$tmpLine);
 			if($tmpLine =~ /fname/) {
 				my $temp = $fileName{'fname'};
-				print "\nfile name:: $temp\n";
+				# print "\nfile name:: $temp\n";
 				$temp =~ s/$strReplace//g;
 				if ($temp =~ /^\d+?$/) {
 					$count = $temp if ($count < $temp);
@@ -195,17 +198,18 @@ sub checkItemStatus {
 #********************************************************************************
 sub generateFileForBackup {
 	my $testFile  = $_[0];
-	my $tempBackupsetFilePath  = Helpers::getUserProfilePath()."/tempBackupsetFile.txt";
+	my $tempBackupsetFilePath  = Common::getUserProfilePath()."/tempBackupsetFile.txt";
 
 	# need to update size to 200 MB for production release.
 	my $cmdToCreateFile = "dd if=/dev/urandom of='$testFile' bs=".SPEED_TEST_FILE_SIZE." count=1 2>/dev/null";
+	$cmdToCreateFile = Common::updateLocaleCmd($cmdToCreateFile);
 	`$cmdToCreateFile`;
 
 	if(open(my $fh, ">", $tempBackupsetFilePath)){
 		print $fh $testFileName;
 		close($fh);
 	} else {
-		Helpers::retreat(['failed_to_open_file',":$tempBackupsetFilePath","\n\n"]);
+		Common::retreat(['failed_to_open_file',":$tempBackupsetFilePath","\n\n"]);
 	}
 	return $tempBackupsetFilePath;
 }
@@ -214,10 +218,18 @@ sub generateFileForBackup {
 # Subroutine			: getUserTicketID
 # Objective				: Get user's Ticket ID
 # Added By				: Senthil Pandian
+# Modified By			: Sabin Cheruvattil
 #********************************************************************************
 sub getUserTicketID {
-	my $returnUserTicket = Helpers::getAndValidate(['Enter the ticket number:', " "], "ticket_no", 1, $Configuration::inputMandetory);
-	return $returnUserTicket;
+	Common::display(["\n", 'do_you_want_to_send_the_speed_test_summary', "\n"], 0);
+	my $displayChoice = Common::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+
+	if(lc($displayChoice) eq 'y'){
+		# my $ticketno = Common::getAndValidate(['Please enter the ticket number here', ' ', '_optional_', ': '], 'ticket_no', 1, 0);
+		my $ticketno = Common::getAndValidate(["\n", 'please_enter_ticket_number_here', ': ',"\n\t"], 'ticket_no', 1, 0, 1);
+		return $ticketno;
+	}
+	return 0;
 }
 
 #*****************************************************************************************************
@@ -226,76 +238,81 @@ sub getUserTicketID {
 # Added By				: Senthil Pandian
 #****************************************************************************************************/
 sub speedTestViaEVS {
-	my $backupUTFpath  			= Helpers::getUserProfilePath()."/".$Configuration::utf8File."_speed";
-	my $evsOutputFile  			= Helpers::getUserProfilePath()."/".$Configuration::evsOutputFile;
-	my $evsErrorFile   			= Helpers::getUserProfilePath()."/".$Configuration::evsErrorFile;
-	my $isDedup  	   			= Helpers::getUserConfiguration('DEDUP');
-	my $bwPath     	   			= Helpers::getUserProfilePath()."/bw.txt";
+	my $backupUTFpath  			= Common::getUserProfilePath()."/".$AppConfig::utf8File."_speed";
+	my $evsOutputFile  			= Common::getUserProfilePath()."/".$AppConfig::evsOutputFile;
+	my $evsErrorFile   			= Common::getUserProfilePath()."/".$AppConfig::evsErrorFile;
+	my $isDedup  	   			= Common::getUserConfiguration('DEDUP');
+	my $bwPath     	   			= Common::getUserProfilePath()."/bw.txt";
 	my $backupLocation 			= "";
 
 	my $tempBackupsetFilePath   = $_[0];
 	my ($fh,$buffer,$fileSize);
 
-	Helpers::createUpdateBWFile();
-	Helpers::display(["\n",'starting_backup'], 1);
+	Common::createUpdateBWFile();
+	Common::display(["\n",'starting_backup'], 1);
 	if($isDedup eq 'off'){
-		$backupLocation 	= Helpers::getUserConfiguration('BACKUPLOCATION');
+		$backupLocation 	= Common::getUserConfiguration('BACKUPLOCATION');
 	}
 
-	Helpers::createUTF8File(['BACKUP',$backupUTFpath],$tempBackupsetFilePath,$bwPath,Helpers::getUserProfilePath()."/",$evsOutputFile,$evsErrorFile,
-			'/'.Helpers::getUserProfilePath()."/",$backupLocation) or Helpers::retreat('failed_to_create_utf8_file');
+	Common::createUTF8File(['BACKUP',$backupUTFpath],$tempBackupsetFilePath,$bwPath,Common::getUserProfilePath()."/",$evsOutputFile,$evsErrorFile,
+			'/'.Common::getUserProfilePath()."/",$backupLocation) or Common::retreat('failed_to_create_utf8_file');
 
-	my $reportMsg .= "Bandwidth Throttle:\n===================\n";
+	# my $reportMsg = "Bandwidth Throttle:\n===================\n";
+
 	if(-e $bwPath){
 		$fileSize = -s $bwPath;
 		if(open($fh, "<", $bwPath) and read($fh, $buffer, $fileSize)) {
 			close($fh);
-			$reportMsg .= "\t".$buffer."\n\n";
+			# $reportMsg .= "Bandwidth throttle:".$buffer."\n";
         }
 	}
 
-	$reportMsg .= "Backup Start Time:\n==================\n";
 	my $backupStartTimeSec = time();
 	my $backupStartTime = localtime $backupStartTimeSec;
-	$reportMsg .= "\t".$backupStartTime." \n\n";
+	# $reportMsg .= "\t".$backupStartTime." \n\n";
 
-	Helpers::display(['backup_in_progress'], 1);
-	my @responseData = Helpers::runEVS('item');
+	Common::display(['backup_in_progress'], 1);
+	my @responseData = Common::runEVS('item');
 
-	$reportMsg .= "Backup End Time:\n================\n";
 	my $backupEndTimeSec = time();
 	my $backupEndTime = localtime $backupEndTimeSec;
-	$reportMsg .= "\t".$backupEndTime." \n\n";
 
-	$reportMsg .= "Backup Output:\n==============\n";
+=beg
 	if(-e $evsOutputFile){
 		$fileSize =  -s $evsOutputFile;
         if(open($fh, "<", $evsOutputFile) and read($fh, $buffer, $fileSize)) {
 			close($fh);
-			$reportMsg .= "\t$buffer\n\n";
+			$reportMsg .= "Backup Output:".$buffer."\n\n";
         }
 		unlink($evsOutputFile);
 	}
-	Helpers::display(['backup_has_been_completed'], 1);
+=cut
 
+	Common::display(['backup_has_been_completed'], 1);
+	my $idriveRes = '';
 	if(-e $evsErrorFile and -s $evsErrorFile){
 		$fileSize =  -s $evsErrorFile;
         if(open($fh, "<", $evsErrorFile) and read($fh, $buffer, $fileSize)) {
 			close($fh);
-			$reportMsg .= "Backup Error:\n============\n";
-			$reportMsg .= "\t$buffer\n\n";
+			# $reportMsg .= "Backup Error:".$buffer."\n";
         }
-	}
-
-	$reportMsg .= "Speed test result from IDrive:\n============================\n";
-	my $time = $backupEndTimeSec - $backupStartTimeSec;
-	my $size = 10485760/1048576;
-	my $res = ($size/$time)*8;
-	$res = substr($res,0,4);
-	$reportMsg .= "\tUpload: ".$res." Mbit/s\n\n";
-
+	} else {
+        # $reportMsg .= "Speed test result from IDrive:\n============================\n";
+        my $time = $backupEndTimeSec - $backupStartTimeSec;
+        my $size = 10485760/1048576;
+        $idriveRes = ($size/$time)*8;
+        $idriveRes = substr($idriveRes,0,4);
+        # $reportMsg .= "Upload speed: ".$res." Mbit/s\n\n";
+    }
 	unlink($evsErrorFile);
 	unlink($evsOutputFile);
+
+	my $reportMsg = "Speed Test Summary:\n===================\n";
+	$reportMsg   .= "Speed test result with IDrive: [Upload speed: ".$idriveRes." Mbit/s]\n";
+	$reportMsg   .= "[Settings used:]\n";
+	$reportMsg   .= "Bandwidth throttle:".$buffer."\n";
+	$reportMsg   .= "Backup Start Time:".$backupStartTime."\n";
+	$reportMsg   .= "Backup End Time:".$backupEndTime."\n";	
 	return $reportMsg;
 }
 
@@ -305,33 +322,35 @@ sub speedTestViaEVS {
 # Added By				: Anil Kumar
 #****************************************************************************************************/
 sub deleteTestFileFromIDrive {
-	my $evsOutputFile  			= Helpers::getUserProfilePath()."/".$Configuration::evsOutputFile;
-	my $evsErrorFile   			= Helpers::getUserProfilePath()."/".$Configuration::evsErrorFile;
-	my $isDedup  	   			= Helpers::getUserConfiguration('DEDUP');
-	my $backupLocation 			= Helpers::getUserConfiguration('BACKUPLOCATION');
-	my $tempBackupsetFilePath   = Helpers::getUserProfilePath()."/tempBackupsetFile.txt";
+	my $evsOutputFile  			= Common::getUserProfilePath()."/".$AppConfig::evsOutputFile;
+	my $evsErrorFile   			= Common::getUserProfilePath()."/".$AppConfig::evsErrorFile;
+	my $isDedup  	   			= Common::getUserConfiguration('DEDUP');
+	my $backupLocation 			= Common::getUserConfiguration('BACKUPLOCATION');
+	my $tempBackupsetFilePath   = Common::getUserProfilePath()."/tempBackupsetFile.txt";
 	my $filename = $_[0];
 
-	Helpers::display(["\n",'deleting_speed_test_file_from_your_account'], 1);
+	my $msg = Common::getStringConstant('deleting_speed_test_file_from_your_account');
+	$msg =~ s/SPEED_TEST_FILE/$testFileName/;
+	Common::display(["\n",$msg], 1);
 	if($isDedup eq 'off'){
 		$filename = $backupLocation."/".$filename;
 	}
-	Helpers::createUTF8File('DELETE',$tempBackupsetFilePath,$evsOutputFile,$evsErrorFile)
-		or Helpers::retreat('failed_to_create_utf8_file');
+	Common::createUTF8File('DELETE',$tempBackupsetFilePath,$evsOutputFile,$evsErrorFile)
+		or Common::retreat('failed_to_create_utf8_file');
 
 	if(open(my $fh, ">", $tempBackupsetFilePath)){
 		print $fh $filename;
 		close($fh);
 	}
 	else {
-		Helpers::retreat(['failed_to_open_file',":$tempBackupsetFilePath","\n\n"]);
+		Common::retreat(['failed_to_open_file',":$tempBackupsetFilePath","\n\n"]);
 	}
 
-	my @responseData = Helpers::runEVS('item');
+	my @responseData = Common::runEVS('item');
 
 	# if($isDedup eq 'off'){
-		# Helpers::createUTF8File('DELETEDROMTRASH',$tempBackupsetFilePath) or Helpers::retreat('failed_to_create_utf8_file');
-		# Helpers::runEVS('item');
+		# Common::createUTF8File('DELETEDROMTRASH',$tempBackupsetFilePath) or Common::retreat('failed_to_create_utf8_file');
+		# Common::runEVS('item');
 	 # }
 	unlink($tempBackupsetFilePath);
 	unlink($evsErrorFile);
@@ -344,10 +363,10 @@ sub deleteTestFileFromIDrive {
 # Added By				: Senthil Pandian
 #****************************************************************************************************/
 sub cancelProcess {
-	my $idevsOutputFile 		= Helpers::getUserProfilePath()."/".$Configuration::evsOutputFile;
-	my $idevsErrorFile  		= Helpers::getUserProfilePath()."/".$Configuration::evsErrorFile;
-	my $tempBackupsetFilePath   = Helpers::getUserProfilePath()."/tempBackupsetFile.txt";
-	my $testFile  				= Helpers::getUserProfilePath()."/".$testFileName;
+	my $idevsOutputFile 		= Common::getUserProfilePath()."/".$AppConfig::evsOutputFile;
+	my $idevsErrorFile  		= Common::getUserProfilePath()."/".$AppConfig::evsErrorFile;
+	my $tempBackupsetFilePath   = Common::getUserProfilePath()."/tempBackupsetFile.txt";
+	my $testFile  				= Common::getUserProfilePath()."/".$testFileName;
 
 	#Default Cleanup
 	system('stty','echo');
@@ -362,30 +381,26 @@ sub cancelProcess {
 # Subroutine			: sendReportMail
 # Objective				: Send report email to IDrive support team
 # Added By				: Senthil Pandian
+# Modified By     : Yogesh Kumar
 #****************************************************************************************************/
 sub sendReportMail {
 	my $reportUserTicket = $_[0];
 	my $reportContents   = $_[1];
 	my $reportUserEmail  = $_[2];
-	my $reportSubject 	 = qq($Configuration::appType $Locale::strings{'for_linux_user_feed'});
+	my $reportSubject 	 = qq($AppConfig::appType ).Common::getStringConstant('for_linux_user_feed');
 	   $reportSubject 	.= qq( [#$reportUserTicket]) if($reportUserTicket ne '');
-	my $reportEmailCont	 = qq(Email=) . Helpers::urlEncode($Configuration::IDriveSupportEmail) . qq(&subject=) . Helpers::urlEncode($reportSubject);
-	$reportEmailCont	.= qq(&content=).Helpers::urlEncode($reportContents).qq(&user_email=).Helpers::urlEncode($reportUserEmail);
-
-	my %params = (
-		'host'   => $Configuration::IDriveErrorCGI,
-		'method' => 'GET',
-		'encDATA' => $reportEmailCont,
-	);
-
-	#my $response = Helpers::request(\%params);
-	my $response = Helpers::requestViaUtility(\%params);
+	my $response = Common::makeRequest(3, [
+									$AppConfig::IDriveSupportEmail,
+									$reportSubject,
+									$reportContents,
+									$reportUserEmail
+								], 2);
 	unless($response || $response->{STATUS} eq 'SUCCESS') {
-		Helpers::retreat('failed_to_report_error');
+		Common::retreat('failed_to_report_error');
 		return;
 	}
 
-	Helpers::display(["\n", 'successfully_reported_error', '.', "\n"]);
+	Common::display(["\n", 'successfully_sent_speed_analysis', '.', "\n"]);
 }
 #*****************************************************************************************************
 # Subroutine			: getReportUserEmails
@@ -396,20 +411,20 @@ sub sendReportMail {
 sub getReportUserEmails {
 	# if user is logged in, show the email address and ask if they want to change it
 	my ($askEmailChoice, $reportUserEmail) = ('y', '');
-	my $availableEmails = Helpers::getUserConfiguration('EMAILADDRESS');
+	my $availableEmails = Common::getUserConfiguration('EMAILADDRESS');
 	chomp($availableEmails);
 
 	if($availableEmails ne '') {
-		Helpers::display(["\n", 'configured_email_address_is', ': ', "\n\t", $availableEmails]);
-		Helpers::display(["\n", 'do_you_want_edit_your_email_y_n', "\n\t"], 0);
+		Common::display(["\n", 'configured_email_address_is', ': ', "\n\t", $availableEmails]);
+		Common::display(["\n", 'do_you_want_edit_your_email_y_n', "\n\t"], 0);
 
-		$askEmailChoice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+		$askEmailChoice = Common::getAndValidate(['enter_your_choice'], "YN_choice", 1);
 	}
 
 	$reportUserEmail = $availableEmails;
 	if(lc($askEmailChoice) eq 'y'){
-		my $emailAddresses = Helpers::getAndValidate(['enter_your_email_id_mandatory', " : ", "\n\t"], "single_email_address", 1, $Configuration::inputMandetory);
-		$reportUserEmail = Helpers::formatEmailAddresses($emailAddresses);
+		my $emailAddresses = Common::getAndValidate(['enter_your_email_id_mandatory', " : ", "\n\t"], "single_email_address", 1, $AppConfig::inputMandetory);
+		$reportUserEmail = Common::formatEmailAddresses($emailAddresses);
 	}
 	return $reportUserEmail;
 }
@@ -418,33 +433,133 @@ sub getReportUserEmails {
 # Subroutine			: speedTestViaSpeedtestnet
 # Objective				: This subroutine helps to collect the speed test result from the external python binary
 # Added By				: Anil Kumar
-# Modified By			: Sabin Cheruvattil
+# Modified By			: Sabin Cheruvattil, Yogesh Kumar, Senthil Pandian
 #****************************************************************************************************/
 sub speedTestViaSpeedtestnet {
-	my $pythonbin = `which python`;
-	Helpers::Chomp(\$pythonbin);
-	unless($pythonbin) {
-		Helpers::display(["\n",'python_not_found_no_speedtest'], 1);
-		return "Python not found. Unable to get speedtest.net result.";
-	}
+	my @pybins = ("python3", "python");
+	my $pythonbin   = "";
+	my $speedNetRes = "\n";
 
-	Helpers::display(["\n",'checking_network_speed_via_speedtestnet'], 1);
-	my $proxy = "";
-	my $proxyStr =  Helpers::getUserConfiguration('PROXY');
-	if($proxyStr){
-		my ($uNPword, $ipPort) = split(/\@/, $proxyStr);
-		my @UnP = split(/\:/, $uNPword);
-		if(scalar(@UnP) >1 and $UnP[0] ne "") {
-			$UnP[1] = ($UnP[1] ne '')? Helpers::decryptString($UnP[1]):$UnP[1];
-			foreach ($UnP[0], $UnP[1]) {
-				$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
-			}
-			$uNPword = join ":", @UnP;
-			$proxyStr = "http://$uNPword\@$ipPort";
+	foreach my $pb (@pybins) {
+		my $pythonbinCmd = "which $pb 2>/dev/null";
+		$pythonbin = `$pythonbinCmd`;
+		Common::Chomp(\$pythonbin);
+		if ($pythonbin) {
+			$pythonbin = $pb;
+			last;
 		}
-		$proxy = "--proxy $proxyStr";
 	}
 
-	my $cmdtoGetSpeedInfo = `curl -s $proxy https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py | python -`;
-	return $cmdtoGetSpeedInfo;
+	my $cmdtoGetSpeedInfo = '';
+	if ($pythonbin) {
+		Common::display(["\n",'checking_network_speed_via_speedtestnet'], 1);
+		my $proxy = '';
+		if (Common::getProxyStatus() and Common::getProxyDetails('PROXYIP')) {
+			$proxy = '-x http://';
+			$proxy .= Common::getProxyDetails('PROXYIP');
+
+			if (Common::getProxyDetails('PROXYPORT')) {
+				$proxy .= (':' . Common::getProxyDetails('PROXYPORT'))
+			}
+			if (Common::getProxyDetails('PROXYUSERNAME')) {
+				my $pu = Common::getProxyDetails('PROXYUSERNAME');
+				foreach ($pu) {
+					$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
+				}
+				$proxy .= (' --proxy-user ' . $pu);
+	
+				if (Common::getProxyDetails('PROXYPASSWORD')) {
+					my $ppwd = Common::getProxyDetails('PROXYPASSWORD');
+					$ppwd = ($ppwd ne '')?Common::decryptString($ppwd):$ppwd;
+					foreach ($ppwd) {
+						$_ =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
+					}
+					$proxy .= (':' . $ppwd);
+				}
+			}
+		}
+		my $retryCount = 5;
+RETRY:
+		my $cmdtoGetSpeedInfoCmd = "curl -sk $proxy $speedTestScriptURL | $pythonbin";
+		my $cmd       = "$cmdtoGetSpeedInfoCmd - 2>$speedTestErrorFile";
+		my $speedInfo = `$cmd`;
+
+		if(-f $speedTestErrorFile and !-z $speedTestErrorFile) {
+			$retryCount--;
+			if($retryCount) {
+				Common::display('unable_to_fetch_the_details_trying_again');
+				sleep(5);
+				goto RETRY;
+			}
+			my $speedTestError = Common::getFileContents($speedTestErrorFile);
+			Common::display($speedTestError);
+			$speedInfo .= $speedTestError;
+
+			Common::display('failed_to_fetch_the_speedtest_result');
+			my $userOpt = Common::getAndValidate(['enter_your_choice_',"(y/n): "], "YN_choice", 1);
+			if(lc($userOpt) eq 'y') {
+				my $instruction = Common::getStringConstant('please_follow_instructions_for_speedtest_failure');
+				$speedInfo = getSpeedTestResult($cmdtoGetSpeedInfoCmd, $speedInfo, $instruction);
+			}
+		}
+
+		my $tempSpeedInfo  = $speedInfo;
+		if ($tempSpeedInfo =~ /Upload:(.*?)\n/s) {
+			$tempSpeedInfo = $1 ;
+			Common::Chomp(\$tempSpeedInfo);
+			$speedNetRes   = "[Upload speed: ".$tempSpeedInfo."]\n";
+			$speedInfo = '';
+		} elsif($tempSpeedInfo =~ /Upload:(.*?)$/s) {
+			$tempSpeedInfo = $1;
+			Common::Chomp(\$tempSpeedInfo);
+			$speedNetRes   = "[Upload speed: ".$tempSpeedInfo."]\n";
+			$speedInfo = '';			
+		}
+
+		Common::removeItems($speedTestErrorFile);
+		return $speedNetRes.$speedInfo;
+	}
+	else {
+		# Common::display(["\n",'checking_network_speed_via_speedtestnet'], 1);
+		# $cmdtoGetSpeedInfo = Common::makeRequest('--speedtest');
+        #Modified for Yuvaraj_2.32_13_1: Senthil
+		Common::display(["\n",'python_not_found_no_speedtest'], 1);
+		# return "\n".Common::getStringConstant('python_not_found_no_speedtest')."\n";
+		my $speedInfo = "\n".Common::getStringConstant('python_not_found_no_speedtest')."\n";
+		Common::display(["\n", 'to_continue_speedtest_via_browser']);
+		my $userOpt = Common::getAndValidate(['enter_your_choice_',"(y/n): "], "YN_choice", 1);
+		if(lc($userOpt) eq 'y') {
+			my $instruction = Common::getStringConstant('please_follow_instructions_if_python_not_present');
+			$speedInfo      = getSpeedTestResult('', $speedInfo, $instruction);
+		}
+		return $speedInfo;
+	}
+}
+
+#*****************************************************************************************************
+# Subroutine			: getSpeedTestResult
+# Objective				: This subroutine helps to collect the speed test result from the external python binary
+# Added By				: Senthil Pandian
+# Modified By			: 
+#****************************************************************************************************/
+sub getSpeedTestResult {
+	my $cmdtoGetSpeedInfoCmd = $_[0];
+	my $speedInfo            = $_[1];
+	my $str 				 = $_[2];
+	$str =~ s/CMD/$cmdtoGetSpeedInfoCmd/;
+	$str =~ s/URL/$speedTestWebURL/;
+	Common::display(["\n", $str]);
+
+	my $resultFilePath = Common::getAndValidate(['please_enter_speedtest_result_file_path_here'], 'file_path', 1, 0);
+	if(-f $resultFilePath) {
+		# Exiting if input file size is more than 1KB
+		if(-s $resultFilePath <= 1024) {
+			$speedInfo = Common::getFileContents($resultFilePath);
+			Common::Chomp(\$speedInfo);
+		} else {
+			Common::retreat('speedtest_result_file_is_too_long');
+		}
+	}
+
+	return $speedInfo;
 }

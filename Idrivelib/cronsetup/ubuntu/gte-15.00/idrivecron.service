@@ -1,0 +1,19 @@
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+# Modified By: Senthil Pandian
+
+[Unit]
+Description=Regular background program processing daemon
+After=local-fs.target multi-user.target
+Documentation=man:__APP__cron(8)
+
+[Service]
+Type=simple
+TimeoutSec=10
+ExecStart=__LAUNCHPATH__
+IgnoreSIGPIPE=false
+KillMode=process
+PIDFile=/var/run/__APP__cron.pid
+
+[Install]
+WantedBy=multi-user.target

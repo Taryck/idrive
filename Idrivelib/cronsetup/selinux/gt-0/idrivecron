@@ -1,0 +1,88 @@
+#! /bin/bash
+#
+# __APP__cron          Start/Stop the __APP__cron clock daemon.
+#
+# @IDrive Inc
+# Created By: Sabin Cheruvattil
+# description:  __APP__cron is a perl script which runs sheduled tasks in __APP__ scripts.
+# processname: __APP__cron
+# pidfile: /var/run/__APP__cron.pid
+
+prog="__APP__cron"
+PIDFILE="/var/run/__APP__cron.pid"
+DAEMON="/usr/bin/perl __LAUNCHPATH__"
+LOCKFILE="/var/run/__APP__cron.lock";
+
+get_pid() {
+	cat "$PIDFILE"
+}
+
+is_running() {
+	[ -f "$PIDFILE" ] && ps -p `get_pid` > /dev/null 2>&1
+}
+
+start() {
+	echo -n $"Starting $prog: "
+	if [ -e $PIDFILE ] && [ -e /proc/`get_pid` ]; then
+		echo -n $"cannot start __APP__cron: __APP__cron is already running.";
+		echo
+		return 1
+	fi
+
+	$DAEMON 2>/dev/null 1>/dev/null &
+	echo $! > $PIDFILE
+
+	RETVAL=$?
+	echo
+
+	return $RETVAL
+}
+
+stop() {
+	echo -n $"Stopping $prog: "
+	if [ ! -e $PIDFILE ] || [ ! -e /proc/`get_pid` ]; then
+		echo -n $"cannot stop __APP__cron: __APP__cron is not running."
+		echo
+		return 1;
+	fi
+	
+	kill `get_pid`
+	RETVAL=$?
+	echo
+	[ $RETVAL -eq 0 ] && rm -f $PIDFILE $LOCKFILE;
+
+	return $RETVAL
+}
+
+rhstatus() {
+	if is_running; then
+		echo "Running"
+		echo "PID: "`get_pid`
+	else
+		echo "Stopped"
+		exit 1
+	fi
+}
+
+restart() {
+	stop
+	start
+}
+
+case "$1" in
+	start)
+		start
+	;;
+	stop)
+		stop
+	;;
+	restart)
+		restart
+	;;
+	status)
+		rhstatus
+	;;
+	*)
+		echo $"Usage: $0 {start|stop|status|restart}"
+		exit 1
+esac

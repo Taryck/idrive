@@ -1,0 +1,84 @@
+#! /bin/bash
+#
+# __APP__cron          Start/Stop the __APP__cron clock daemon.
+#
+# chkconfig: 2345 90 60
+#
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+# Modified By : Senthil Pandian
+# description:  __APP__cron is a perl script which runs sheduled tasks in __APP__ scripts.
+# processname: __APP__cron
+# pidfile: /var/run/__APP__cron.pid
+
+# Source function library.
+. /etc/init.d/functions
+
+# See how we were called.
+
+prog="__APP__cron"
+PIDFILE="/var/run/__APP__cron.pid"
+DAEMON="perl __LAUNCHPATH__"
+
+start() {
+	echo -n $"Starting $prog: "
+	if [ -e /var/lock/subsys/__APP__cron ]; then
+		if [ -e $PIDFILE ] && [ -e /proc/`cat $PIDFILE` ]; then
+			echo -n $"cannot start __APP__cron: __APP__cron is already running.";
+			failure $"cannot start __APP__cron: __APP__cron already running.";
+			echo
+			return 1
+		fi
+	fi
+
+	$DAEMON 2>/dev/null 1>/dev/null &
+	echo $! > $PIDFILE
+
+	RETVAL=$?
+	echo
+	[ $RETVAL -eq 0 ] && touch /var/lock/subsys/__APP__cron;
+	return $RETVAL
+}
+
+stop() {
+	echo -n $"Stopping $prog: "
+        if [ ! -e /var/lock/subsys/__APP__cron ]; then
+	    echo -n $"cannot stop __APP__cron: __APP__cron is not running."
+	    failure $"cannot stop __APP__cron: __APP__cron is not running."
+	    echo
+	    return 1;
+	fi
+	
+	killproc $prog
+	RETVAL=$?
+	echo
+        [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/__APP__cron;
+	return $RETVAL
+}
+
+rhstatus() {
+	status -p $PIDFILE $prog
+}
+
+restart() {
+  	stop
+	start
+}
+
+case "$1" in
+  start)
+  	start
+	;;
+  stop)
+  	stop
+	;;
+  restart)
+  	restart
+	;;
+  status)
+  	rhstatus
+	;;
+  *)
+	echo $"Usage: $0 {start|stop|status|restart}"
+	exit 1
+esac
