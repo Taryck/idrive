@@ -1,0 +1,61 @@
+#!/bin/sh
+# Start/stop the __APP__cron daemon.
+#
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+### BEGIN INIT INFO
+# Provides:          __APP__cron
+# Required-Start:    $remote_fs $syslog $time
+# Required-Stop:     $remote_fs $syslog $time
+# Should-Start:      $network $named slapd autofs ypbind nscd nslcd winbind
+# Should-Stop:       $network $named slapd autofs ypbind nscd nslcd winbind
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: Regular background program processing daemon
+# Description:        __APP__cron is a perl script which runs sheduled tasks in __APP__ scripts.
+### END INIT INFO
+
+
+PIDFILE=/var/run/__APP__crond.pid
+DAEMON="perl __LAUNCHPATH__"
+
+. /lib/lsb/init-functions
+
+get_pid() {
+	cat "$PIDFILE"
+}
+
+is_running() {
+	[ -f "$PIDFILE" ] && ps -p `get_pid` > /dev/null 2>&1
+}
+
+case "$1" in
+start)	log_daemon_msg "Starting" "__APP__cron"
+	echo ""
+	$DAEMON 1>/dev/null 2>/dev/null &
+	echo $! > "$PIDFILE"
+	;;
+stop)	log_daemon_msg "Stopping" "__APP__cron"
+	echo ""
+	kill `get_pid`
+	;;
+restart) log_daemon_msg "Restarting" "__APP__cron" 
+	echo ""
+	$0 stop
+	$0 start
+	;;
+status)
+	if is_running; then
+		echo "Running"
+		echo "PID: "`get_pid`
+	else
+		echo "Stopped"
+		exit 1
+	fi
+	;;
+*)	log_action_msg "Usage: /etc/init.d/__APP__cron {start|stop|restart|status}"
+	echo ""
+	exit 2
+	;;
+esac
+exit 0

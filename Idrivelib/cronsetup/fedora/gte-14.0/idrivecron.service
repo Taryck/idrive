@@ -1,0 +1,14 @@
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+
+[Unit]
+Description=__APP__ Scheduler
+After=auditd.service nss-user-lookup.target systemd-user-sessions.service time-sync.target ypbind.service
+
+[Service]
+ExecStart=__LAUNCHPATH__
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

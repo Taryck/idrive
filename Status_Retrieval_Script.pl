@@ -5,12 +5,13 @@
 #########################################################################
 
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
-$incPos = rindex(__FILE__, '/');
-$incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
-unshift (@INC,$incLoc);
+# $incPos = rindex(__FILE__, '/');
+# $incLoc = ($incPos>=0)?substr(__FILE__, 0, $incPos): '.';
+# unshift (@INC,$incLoc);
 
-use Helpers;
-Helpers::initiateMigrate();
+use Common;
+Common::waitForUpdate();
+Common::initiateMigrate();
 
 require 'Header.pl';
 use FileHandle;
@@ -47,7 +48,9 @@ holdScreen2displayMessage(3);
 my $BackupScriptCmd  = "ps $psOption | grep \"".Constants->FILE_NAMES->{backupScript}." SCHEDULED $userName\" | grep -v grep";
 my $RestoreScriptCmd = "ps $psOption | grep \"".Constants->FILE_NAMES->{restoreScript}." SCHEDULED $userName\" | grep -v grep";
 my $ExpressScriptCmd = "ps $psOption | grep \"".Constants->FILE_NAMES->{expressBackupScript}." SCHEDULED $userName\" | grep -v grep";
-
+$BackupScriptCmd = Common::updateLocaleCmd($BackupScriptCmd);
+$RestoreScriptCmd = Common::updateLocaleCmd($RestoreScriptCmd);
+$ExpressScriptCmd = Common::updateLocaleCmd($ExpressScriptCmd);
 $BackupScriptRunning  = `$BackupScriptCmd`;
 $RestoreScriptRunning = `$RestoreScriptCmd`;
 $ExpressScriptRunning = `$ExpressScriptCmd`;
@@ -55,20 +58,21 @@ $ExpressScriptRunning = `$ExpressScriptCmd`;
 
 my (@runningJobs,@runningJobTitle,@runningDir);
 my @jobNameArr = ('backup','localbackup','restore');
-my $userProfilePath = Helpers::getUserProfilePath();
+my $userProfilePath = Common::getUserProfilePath();
 foreach my $job (@jobNameArr) {
-	my $pidFile = Helpers::getCatfile($userProfilePath, $Configuration::userProfilePaths{$job}, $Configuration::pidFile);
-	if (Helpers::isFileLocked($pidFile)) {
-		my $jobRunningDir  = Helpers::getUsersInternalDirPath($job);
+	my $pidFile = Common::getCatfile($userProfilePath, $AppConfig::userProfilePaths{$job}, $AppConfig::pidFile);
+	if (Common::isFileLocked($pidFile)) {
+		my $jobRunningDir  = Common::getJobsPath($job);
 		push @runningJobTitle, $job."_job";
 		push @runningDir, $jobRunningDir;
 	}
 }
 
 if (scalar(@runningJobTitle) > 0) {
-	Helpers::display(""); #To keep empty line
-	Helpers::displayMenu('select_the_job_from_the_above_list',@runningJobTitle);
-	$userSelection = Helpers::getUserMenuChoice(scalar(@runningJobTitle));
+	Common::display('');
+	Common::displayMenu('select_the_job_from_the_above_list',@runningJobTitle);
+	Common::display('');
+	$userSelection = Common::getUserMenuChoice(scalar(@runningJobTitle));
 }
 else
 {
@@ -95,7 +99,7 @@ constructProgressDetailsFilePath();
 =beg
 my $info_file = $jobRunningDir."/info_file";
 my $progressDetailsFilePath = $jobRunningDir.$pathSeparator."PROGRESS_DETAILS";
-my $exec_cores = Helpers::getSystemCpuCores();
+my $exec_cores = Common::getSystemCpuCores();
 my $isProgressStarted = 0;
 for(my $i=1; $i<=$exec_cores; $i++){
 	if(-e $progressDetailsFilePath."_".$i and -e $info_file){
@@ -111,21 +115,21 @@ if($isProgressStarted == 0){
 #system("clear");
 
 #Added to handle the job termination case: Senthil
-unless(-e $jobRunningDir.$pathSeparator.$Configuration::pidFile){
+unless(-e $jobRunningDir.$pathSeparator.$AppConfig::pidFile){
 	print Constants->CONST->{'NoOpRng'}.$lineFeed;
 	exit 0;
 }
 getCursorPos();
 do {
 	displayProgressBar($progressDetailsFilePath);
-	#if( !-e $jobRunningDir.$pathSeparator.$Configuration::pidFile){
+	#if( !-e $jobRunningDir.$pathSeparator.$AppConfig::pidFile){
 	#Modified by Senthil
-	if( !-e $jobRunningDir.$pathSeparator.$Configuration::pidFile and -e $jobRunningDir.'/'.Constants->CONST->{'fileDisplaySummary'}){
+	if(!-e $jobRunningDir.$pathSeparator.$AppConfig::pidFile){
 		$displayProgress = 0;
-		Helpers::removeItems("$progressDetailsFilePath*")
+		Common::removeItems("$progressDetailsFilePath*")
 	}
 	#select undef, undef, undef, 0.005;
-	Helpers::sleepForMilliSec(5); # Sleep for 5 milliseconds
+	Common::sleepForMilliSec(100); # Sleep for 100 milliseconds
 }
 while($displayProgress);
 process_term();

@@ -1,0 +1,15 @@
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+
+[Unit]
+Description=__APP__ Scheduler
+After=ypbind.service nscd.service network.target
+After=postfix.service sendmail.service exim.service
+
+[Service]
+ExecStart=__LAUNCHPATH__
+ExecReload=/usr/bin/kill -s SIGHUP $MAINPID
+Restart=on-abort
+
+[Install]
+WantedBy=multi-user.target

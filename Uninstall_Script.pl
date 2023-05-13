@@ -13,38 +13,46 @@ my $curl  = whichPackage(\"curl");
 chomp(my $currentDir = $userScriptLocation);
 my $crontabFilePath = "/etc/crontab";
 #our @linesCrontab = ();
-my ($isAnyOtherUserProcess, $unlinkPidFile) = (0) x 2;
-my $user = `whoami`;
+my ($isAnyOtherUserProcess, $unlinkPidFile, $noServicePath) = (0) x 3;
+my $userCmd = Common::updateLocaleCmd('whoami');
+my $user = `$userCmd`;
 Chomp(\$user);
 
 my ($pidsToBeKilled, $dashboardPidsToBeKilled) = (' ') x 2;
 my (@linesCrontab, @idriveUsersList, @scheduledJobs, %idriveUserInfo) = () x 4;
-my $sudoprompt = 'please_provide_' . (Helpers::isUbuntu() || Helpers::isGentoo()? 'sudoers' : 'root') . '_pwd_for_uninstall_process';
+my $sudoprompt = "please_provide_" . (Common::isUbuntu() || Common::isGentoo()? 'sudoers' : 'root') . '_pwd_for_uninstall_process';
+$sudoprompt = "\n".Common::getStringConstant($sudoprompt);
+my @fileNames = ('account_setting.pl','Account_Setting.pl','archive_cleanup.pl','check_for_update.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','job_termination.pl','login.pl','Login.pl','logout.pl','Operations.pl','readme.txt','Restore_Script.pl','restore_version.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','edit_supported_files.pl','edit_supported_files.pl','View_Log.pl','logs.pl','Uninstall_Script.pl','.updateVersionInfo','.serviceLocation','freshInstall','.forceupdate','wgetLog.txt','Configuration.pm', 'Helpers.pm','IxHash.pm', 'Strings.pm','express_backup.pl','send_error_report.pl', 'JSON.pm', 'utility.pl', 'view_log.pl','speed_analysis.pl', 'scheduler.pl', 'cron.pl', 'help.pl', 'idrivecron.service', 'idrivecron.conf', 'idrivecron', 'Idrivelib','uninstallcron.pl', 'relinkcron.pl', 'installcron.pl', 'dashboard.pl', 'migrateSuccess', 'migrate.lock', 'ca-certificates.crt', 'perl.core', 'debug.enable');
 
-my @fileNames = ('account_setting.pl','Account_Setting.pl','archive_cleanup.pl','check_for_update.pl','Check_For_Update.pl','Backup_Script.pl','Constants.pm','Header.pl','Job_Termination_Script.pl','job_termination.pl','login.pl','Login.pl','logout.pl','Operations.pl','readme.txt','Restore_Script.pl','restore_version.pl','Restore_Version.pl','Scheduler_Script.pl','Status_Retrieval_Script.pl','edit_supported_files.pl','edit_supported_files.pl','View_Log.pl','Uninstall_Script.pl','.updateVersionInfo','.serviceLocation','freshInstall','.forceupdate','wgetLog.txt','Configuration.pm', 'Helpers.pm','IxHash.pm', 'Strings.pm','express_backup.pl','send_error_report.pl', 'JSON.pm', 'utility.pl', 'view_log.pl','speed_analysis.pl', 'scheduler.pl', 'cron.pl', 'idrivecron.service', 'idrivecron.conf', 'idrivecron', 'Idrivelib','uninstallcron.pl', 'relinkcron.pl', 'installcron.pl', 'dashboard.pl', 'migrateSuccess', 'migrate.lock', 'ca-certificates.crt', 'perl.core', 'debug.enable');
+system(Common::updateLocaleCmd("clear"));
 
-system("clear");
+Common::loadAppPath();
+Common::loadServicePath() or $noServicePath=1;
+Common::displayHeader();
+unless(Common::isLoggedin()){
+	my $uname = Common::getAndValidate(['enter_your', " ", $AppConfig::appType, " ", 'username', ': '], "username", 1);
+	$uname = lc($uname); #Important
+	my $emailID = $uname;
 
-Helpers::loadAppPath();
-Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
-Helpers::displayHeader();
-unless(Helpers::isLoggedin()){
-	my $uname = Helpers::getAndValidate(['enter_your', " ", $Configuration::appType, " ", 'username', ': '], "username", 1);
 	# Get password and validate
-	my $upasswd = Helpers::getAndValidate(['enter_your', " ", $Configuration::appType , " ", 'password', ': '], "password", 0);
+	my $upasswd = Common::getAndValidate(['enter_your', " ", $AppConfig::appType , " ", 'password', ': '], "password", 0);
+
+	Common::setUsername($uname);
+	my $errorKey = Common::loadUserConfiguration();
+
+	# If this account is not configured then prompt for proxy
+	Common::askProxyDetails() if($errorKey != 1);
 
 	#validate user account
-	Helpers::display(['verifying_your_account_info'],1);
-	my @responseData = Helpers::authenticateUser($uname, $upasswd) or Helpers::retreat('failed');
-	if ($responseData[0]->{'STATUS'} eq 'FAILURE') {
-		Helpers::retreat(ucfirst($responseData[0]->{'desc'}).". Please try again.")	if (exists $responseData[0]->{'desc'});
-		if ((exists $responseData[0]->{'MSG'}) and ($responseData[0]->{'MSG'} =~ /Try again/)) {
-			Helpers::retreat(ucfirst($responseData[0]->{'MSG'}));
-		}
-		my $msg = ($responseData[0]->{'MSG'} eq "")?"failed to authenticate":$responseData[0]->{'MSG'};
-		Helpers::retreat(ucfirst($msg).". Please try again.");
-	}
+	Common::display(['verifying_your_account_info'],1);
+
+	# Get IDrive/IBackup username list associated with email address	
+	($uname,$upasswd) = Common::getUsernameList($uname, $upasswd) if(Common::isValidEmailAddress($uname));
+
+	# validate IDrive user details
+	my @responseData = Common::authenticateUser($uname, $upasswd, $emailID, 1) or Common::retreat(['failed_to_authenticate_user',"'$uname'."]);
 }
+goto REMOVESCRIPTS if($noServicePath);
 
 #Getting IDrive user list
 @idriveUsersList = getIDriveUserList();
@@ -80,13 +88,13 @@ elsif($isAnyOtherUserProcess){
 	}
 }
 
-if($noPermission){
+# if($noPermission){
 	#print $lineFeed.$errorReason.$lineFeed;
 	#exit;
-}
+# }
 
 #Get confirmation to uninstall the package.
-print $lineFeed.Constants->CONST->{'AskUninstallConfig'}->($appType).$whiteSpace;
+print $lineFeed.Constants->CONST->{'AskUninstallConfig'}->($AppConfig::appType).$whiteSpace;
 $confirmationChoice = getConfirmationChoice();
 if($confirmationChoice eq "N" || $confirmationChoice eq "n") {
 	exit 0;
@@ -125,33 +133,37 @@ if(scalar @idriveUsersList>0) {
 }
 getUsersInfoToUninstall(); #Getting IDrive users info
 removeCronEntries(); #Removing the cron-entries of scheduled Backup/Restore
-my $sudomsgtoken = (ifUbuntu() || isGentoo())? Constants->CONST->{'uninstallSudoPWDMSG'}->($appType) : Constants->CONST->{'uninstallRootPWDMSG'}->($appType);
-my $sudosucmd = getSudoSuCRONPerlCMD('uninstallcron', $sudomsgtoken);
+my $sudomsgtoken = (ifUbuntu() || isGentoo())? Constants->CONST->{'uninstallSudoPWDMSG'}->($AppConfig::appType) : Constants->CONST->{'uninstallRootPWDMSG'}->($AppConfig::appType);
+my $sudosucmd = getSudoSuCRONPerlCMD('uninstallcron', "\n".$sudomsgtoken);
+$sudosucmd = Common::updateLocaleCmd($sudosucmd);
 if(system($sudosucmd)==0){
-	print $lineFeed.$appType.Constants->CONST->{'cronUninstalled'}.$lineFeed;
+	print $lineFeed.$AppConfig::appType.Constants->CONST->{'cronUninstalled'}.$lineFeed;
 } else {
-	print $lineFeed.Constants->CONST->{'UnableToUninstallCron'}->($appType).$lineFeed;
+	print $lineFeed.Constants->CONST->{'UnableToUninstallCron'}->($AppConfig::appType).$lineFeed;
 	exit(0);
 }
 
-removeServiceDirectory();
+#removeServiceDirectory();
 updateUsersUninstallInfo(); #stat CGI call
+
+REMOVESCRIPTS: #Added to remove script files if there is no '.serviceLocation' file/service directory
 removeScriptFiles();
 removeScriptAndPackageDirectory();
+removeServiceDirectory(); #Added to remove if any trace file exists - fall back
 
 #*****************************************************************************************************
 # Subroutine			: getSudoSuCRONPerlCMD
 # Objective				: This is to get sudo/su command for running the scripts in root mode
-# Modified By			: Sabin Cheruvattil
+# Modified By			: Sabin Cheruvattil, Yogesh Kumar
 #****************************************************************************************************/
 sub getSudoSuCRONPerlCMD {
 	return '' unless(defined($_[0]));
-	return "perl '$userScriptLocation/" . Constants->FILE_NAMES->{utility} . "' " . uc($_[0]) if($mcUser eq 'root');
+	return "perl '$userScriptLocation/" . Constants->FILE_NAMES->{utility} . "' " . uc($_[0]) if ($mcUser eq 'root');
 
-	print "$_[1]\n" if(!ifUbuntu() && !isGentoo());
+	print "$_[1]\n" if (!ifUbuntu() && !isGentoo());
 
 	my $command = "su -c \"perl '" . $userScriptLocation . '/' . Constants->FILE_NAMES->{utility} . "' " . uc($_[0]) . "\" root";
-	$command 	= "sudo -p '" . $_[1] . "' " . $command if(ifUbuntu() || isGentoo());
+	$command 	= "sudo -p '" . $_[1] . "' " . $command if (ifUbuntu() || isGentoo());
 
 	return $command;
 }
@@ -180,6 +192,7 @@ sub killAllJobs
 	}
 	print qq(\nEnter root ) if (!$ifubuntu and $isAnyOtherUserProcess eq 1);
 
+	$scriptTermCmd = Common::updateLocaleCmd($scriptTermCmd);
 	return @scriptTerm = `$scriptTermCmd`;
 }
 #****************************************************************************************************
@@ -238,7 +251,7 @@ sub updateUsersUninstallInfo
 {
 	foreach my $userName (sort keys %idriveUserInfo) {
 		my $password = $idriveUserInfo{$userName};
-		$isUpdated = updateUserDetail($userName,$password,0);
+		$isUpdated = Common::updateUserDetail($userName,$password,0);
 	}
 }
 #****************************************************************************************************
@@ -249,16 +262,17 @@ sub updateUsersUninstallInfo
 sub removeServiceDirectory
 {
 	my $rmCmd = '';
-	my $res   = '';
+	my $res   = 1;
 	if($idriveServicePath and -e $idriveServicePath){
 		if($idriveServicePath ne "/" and $idriveServicePath =~ /\/$appTypeSupport/){	#<Deepak> Minimum validation to make sure it is our path
-			$rmCmd = "rm -rf '$idriveServicePath'";
-			$rmCmd = Helpers::getSudoSuCMD("$rmCmd", $sudoprompt, 1);
-			my $res = system($rmCmd);
+			$rmCmd = "rm -rf '$idriveServicePath' 2>/dev/null";
+			$rmCmd = Common::getSudoSuCMD("$rmCmd", $sudoprompt, 1);
+			$rmCmd = Common::updateLocaleCmd($rmCmd);
+			$res = system($rmCmd);
 		}
 
-		if($rmCmd eq '' or $res ne ''){
-			print $lineFeed.Constants->CONST->{'failedToRemove'}->('directory',$idriveServicePath).$lineFeed."Reason: ".$res.$lineFeed;
+		if($rmCmd eq '' or $res){
+			print $lineFeed.Constants->CONST->{'failedToRemove'}->('directory',$idriveServicePath).$lineFeed."Reason: ".$!.$lineFeed;
 		} else {
 			print $lineFeed.Constants->CONST->{'DirectoryRemoved'}->('Service directory',$idriveServicePath).$lineFeed;
 		}
@@ -273,14 +287,14 @@ sub removeServiceDirectory
 sub removeScriptFiles
 {
 	foreach $file (@fileNames){
-	my $filePath = "$currentDir/$file";
+		my $filePath = "$currentDir/$file";
 		if (-f $filePath) {
 			if (!unlink($filePath)) {
 				print $lineFeed.Constants->CONST->{'failedToRemove'}->('file', $filePath).$lineFeed;
 			}
 		}
 		elsif (-d "$currentDir/$file") {
-			$res = Helpers::removeItems($filePath);
+			$res = Common::removeItems($filePath);
 			if (!$res) {
 				print $lineFeed.Constants->CONST->{'failedToRemove'}->('directory', $filePath).$lineFeed."Reason: ".$res.$lineFeed;
 			}
@@ -291,18 +305,21 @@ sub removeScriptFiles
 #****************************************************************************************************
 # Subroutine Name         : removeScriptAndPackageDirectory.
 # Objective               : Removing the Script/Package directory if it is empty
-# Added By                : Senthil Pandian, Vijay Vinoth
+# Added By                : Senthil Pandian
+# Modified By             : Senthil Pandian, Vijay Vinoth
 #*****************************************************************************************************/
 sub removeScriptAndPackageDirectory
 {
 	$scriptPathRemoved = 0;
-	$pwd = `pwd`;
+	my $pwdCmd = Common::updateLocaleCmd('pwd');
+	$pwd = `$pwdCmd`;
 	chomp($pwd);
 	if(isDirectoryEmpty($currentDir)) {
-		$rmCmd = "rm -rf '$currentDir'";
-		my $previllege    = (Helpers::isUbuntu() || Helpers::isGentoo()? 'sudoers' : 'root');
-		my $sudopromptMsg = "Insufficient permissions for '$user' to remove script directory. Please provide $previllege password to continue.";
-		$rmCmd = Helpers::getSudoSuCMD("$rmCmd", $sudopromptMsg);
+		$rmCmd = "rm -rf '$currentDir' 2>/dev/null";
+		my $previllege    = (Common::isUbuntu() || Common::isGentoo()? 'sudoers' : 'root');
+		my $sudopromptMsg = "\nInsufficient permissions for '$user' to remove script directory. Please provide $previllege password to continue.";
+		$rmCmd = Common::getSudoSuCMD("$rmCmd", $sudopromptMsg);
+		$rmCmd = Common::updateLocaleCmd($rmCmd);
 		my $res = system($rmCmd);
 		if(!$res){
 			$scriptPathRemoved = 1;
@@ -314,13 +331,14 @@ sub removeScriptAndPackageDirectory
 			if($pwd =~ /$packagePath/){
 				chdir("$packagePath/../");
 			}
-			$rmCmd = "rm -rf '$packagePath'";
-			$sudopromptMsg = "Insufficient permissions for '$user' to remove package directory. Please provide $previllege password to continue.";
-			$rmCmd = Helpers::getSudoSuCMD("$rmCmd", $sudopromptMsg, 1);
+			$rmCmd = "rm -rf '$packagePath' 2>/dev/null";
+			$sudopromptMsg = "\nInsufficient permissions for '$user' to remove package directory. Please provide $previllege password to continue.";
+			$rmCmd = Common::getSudoSuCMD("$rmCmd", $sudopromptMsg, 1);
+			$rmCmd = Common::updateLocaleCmd($rmCmd);
 			my $res = system($rmCmd);
 		}
+		print $lineFeed.Constants->CONST->{'scriptRemoved'}->($AppConfig::appType).$lineFeed;
 	}
-	print $lineFeed.Constants->CONST->{'scriptRemoved'}->($appType).$lineFeed;
 }
 
 #****************************************************************************************************
@@ -338,16 +356,19 @@ sub getRunningJobPid
 	unlink($pidPath) if($unlinkPidFile == 1);
 
 	my $evsCmd   = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$utfFile\' | grep -v \'grep\'";
+	$evsCmd = Common::updateLocaleCmd($evsCmd);
 	$evsRunning  = `$evsCmd`;
 
 	my $uninstallScript     = $currentDir."/".Constants->FILE_NAMES->{uninstallScript};
 	my $checkForUpdateScript = $currentDir."/".Constants->FILE_NAMES->{checkForUpdateScript};
-	my $evsCmd   = "ps -elf | grep \"$currentDir\" | grep -v \'grep\' | grep -v \"$uninstallScript\" | grep -v \"$checkForUpdateScript\"";
+	my $evsCmd   = "ps $psOption | grep \"$currentDir\" | grep -v \'grep\' | grep -v \"$uninstallScript\" | grep -v \"$checkForUpdateScript\"";
+	$evsCmd = Common::updateLocaleCmd($evsCmd);
 	$evsRunning .= `$evsCmd`;
 
 	if($jobRunningDir =~ /Restore/) {
 		$searchUtfFile = $jobRunningDir."searchUtf8.txt";
 		$evsCmd = "ps $psOption | grep \"$idevsutilBinaryName\" | grep \'$searchUtfFile\' | grep -v \'grep\'";
+		$evsCmd = Common::updateLocaleCmd($evsCmd);
 		$evsRunning .= `$evsCmd`;
 	}
 
@@ -360,11 +381,13 @@ sub getRunningJobPid
 			next;
 		}
 		my @lines = split(/[\s\t]+/, $_);
-		$evsRunningUserName = $lines[2];
+		my $evsRunningUserName = $lines[2];
+		$evsRunningUserName = $lines[0] if($AppConfig::machineOS =~ /freebsd/i);
 		if(($user ne "root") and ($evsRunningUserName) and ($user ne $evsRunningUserName)){
 			$isAnyOtherUserProcess = 1;
 		}
 		my $pid = $lines[3];
+		$pid = $lines[1] if($AppConfig::machineOS =~ /freebsd/i);
 		$toCheckPid = " $pid ";
 		if($pidsToBeKilled !~ /$toCheckPid/){
 			push(@pids, $pid);
@@ -404,7 +427,7 @@ sub removeCronEntries {
 		removeEntryFromCrontabLines();
 		my $writeFlag = writeToCrontab();
 		if(!$writeFlag) {
-			print $lineFeed.Constants->CONST->{'UnableToRemoveCron'}->$appType.$lineFeed;
+			print $lineFeed.Constants->CONST->{'UnableToRemoveCron'}->$AppConfig::appType.$lineFeed;
 			exit(0);
 		} else {
 			print $lineFeed.Constants->CONST->{'RemovedCronEntries'}.$lineFeed;
@@ -472,7 +495,7 @@ sub writeToCrontab {
 	close TEMP;
 	chmod $filePermission, $temp;
 	my $operationsScript = qq($userScriptLocation/).Constants->FILE_NAMES->{operationsScript};
-
+	#my $execString = Common::getStringConstant('support_file_exec_string');
 	if($isAnyOtherUserProcess) {
 		$command = "su -c \"perl '$operationsScript' '$usrProfilePath' \" root";
 		if (ifUbuntu()){
@@ -481,9 +504,10 @@ sub writeToCrontab {
 			print Constants->CONST->{'CronQuery'};
 		}
 	} else {
-		$command = qq{perl '$operationsScript' '$usrProfilePath'};
+		$command = qq{perl '$operationsScript'  '$execString' '$usrProfilePath'};
 	}
 
+	$command = Common::updateLocaleCmd($command);
 	my $res = system($command);
 	if($res ne "0") {
 		return 0;
@@ -497,6 +521,7 @@ sub writeToCrontab {
 #*****************************************************************************************************/
 sub checkUser {
 	my $checkUserCmd = "whoami";
+	$checkUserCmd = Common::updateLocaleCmd($checkUserCmd);
 	$user = `$checkUserCmd`;
 	chomp($user);
 }
@@ -534,8 +559,8 @@ sub getIDriveUserList
 				if(-d $mcUserProfileDir) {
 					push @mcUsersList,$mcUserProfileDir;
 					#Get process id of all dashboard belongs to current script path
-					if(-f "$mcUserProfileDir/$Configuration::dashboardpid"){
-						if (open(my $fileHandle, '<', "$mcUserProfileDir/$Configuration::dashboardpid")) {
+					if(-f "$mcUserProfileDir/$AppConfig::dashboardpid"){
+						if (open(my $fileHandle, '<', "$mcUserProfileDir/$AppConfig::dashboardpid")) {
 							my $pid = <$fileHandle>;
 							close($fileHandle);
 							chomp($pid);
@@ -557,58 +582,4 @@ sub getIDriveUserList
 	}
 	Chomp(\$dashboardPidsToBeKilled);
 	return @idriveUsersList;
-}
-#****************************************************************************************************
-# Subroutine Name         : validateLinuxUser
-# Objective               : Validating the linux user
-# Added By                : Senthil Pandian
-#*****************************************************************************************************/
-sub validateLinuxUser
-{
-	print $lineFeed.Constants->CONST->{'ToUninstall'}.$lineFeed;
-	my $inputCount=0;
-	while(1){
-		print $lineFeed.Constants->CONST->{'AskLinuxPword'}->($user);
-		system('stty','-echo');
-		my $pwd = getInput();
-		checkInput(\$pwd,$lineFeed);
-		system('stty','echo');
-
-		my @pwent = getpwnam($user);
-		$passwordHash = $pwent[1];
-		if($passwordHash eq ""){
-			print "Can't read password DB or Ur not permitted to read from it \n";
-		}
-		else{
-			$password = $pwd;
-			my $checking_hash = crypt($password, $passwordHash);
-			if ($checking_hash eq $passwordHash) {
-				print $lineFeed.$lineFeed.Constants->CONST->{'YourAuthSuccess'}.$lineFeed;
-				last;
-			}
-			if($inputCount eq 3) {
-				print $lineFeed.Constants->CONST->{'YourAuthFailed'}.$lineFeed.Constants->CONST->{'YourMaxAttemptReached'}.$lineFeed.$lineFeed;
-				exit(0);
-			}
-			print $lineFeed.Constants->CONST->{'YourAuthFailed'}.$whiteSpace.Constants->CONST->{'pleaseTryAgain'}.$lineFeed;
-			$inputCount++;
-		}
-	}
-}
-#****************************************************************************************************
-# Subroutine Name         : validatePassword
-# Objective               : Validate the linux password
-# Added By                : Senthil Pandian
-#*****************************************************************************************************/
-sub validatePassword
-{
-	my $password = shift;
-	$enc_pass = `echo "$password" | password_encryptor`;
-	chomp($enc_pass);
-	open(SHADOW, '</etc/shadow');
-	foreach my $Line (<SHADOW>)
-	{
-		return 1 if ($Line =~ m/^$user:$enc_pass/); #check if the encrypted password is on the same line as the username with only one colon between them (follows format of the shadow file)
-	}
-	close(SHADOW);
 }

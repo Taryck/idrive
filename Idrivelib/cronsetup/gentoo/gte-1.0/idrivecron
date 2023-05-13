@@ -1,0 +1,8 @@
+#!/sbin/openrc-run
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+# Modified By: Senthil Pandian
+
+command="perl __LAUNCHPATH__"
+pidfile=/var/run/__APP__cron.pid
+command_background=true

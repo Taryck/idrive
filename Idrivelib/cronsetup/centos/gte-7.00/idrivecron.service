@@ -1,0 +1,17 @@
+# @IDrive Inc
+# Created By  : Sabin Cheruvattil
+# Modified By : Senthil Pandian
+
+[Unit]
+Description=__APP__ Scheduler
+After=auditd.service systemd-user-sessions.service time-sync.target
+
+[Service]
+ExecStart=__LAUNCHPATH__
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=always
+PIDFile=/var/run/__APP__cron.pid
+
+[Install]
+WantedBy=multi-user.target

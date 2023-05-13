@@ -3,13 +3,17 @@
 #
 # Created By : Yogesh Kumar @ IDrive Inc
 # Reviewed By: Deepak Chaurasia
+#
+# IMPORTANT  : Please do not run this script manually. Run dashboard using account_setting.pl
 #*****************************************************************************************************
 
+package DashboardClient;
 use strict;
 use warnings;
 
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
+use Idrivelib;
 use Sys::Hostname;
 use POSIX ":sys_wait_h";
 use IO::Socket;
@@ -17,9 +21,9 @@ use Scalar::Util qw(reftype);
 use POSIX;
 use Data::Dumper;
 
-use Helpers qw(getUserConfiguration getUsername getServicePath getParentRemoteManageIP getRemoteManageIP getRemoteAccessToken getMachineUser getCatfile getUserProfilePath);
-use Configuration;
-use Idrivelib;
+use Common qw(getUserConfiguration setUserConfiguration saveUserConfiguration getUsername getServicePath getParentRemoteManageIP getRemoteManageIP getRemoteAccessToken getMachineUser getCatfile getUserProfilePath loadNotifications setNotification saveNotifications loadNS getNS saveNS deleteNS getFileContents);
+use AppConfig;
+
 use JSON qw(from_json to_json);
 use PropSchema;
 use IO::Zlib;
@@ -27,32 +31,22 @@ use MIME::Base64;
 use File::stat;
 use WWW::Curl;
 use WWW::Curl::Easy;
+use Encode qw(encode decode);
+use Fcntl qw(:flock);
 
-$Configuration::callerEnv = 'BACKGROUND';
-$Configuration::traceLogFile = 'dashboard.log';
-
-my $cmdNumOfArgs = $#ARGV;
+#Common::checkAndAvoidExecution($ARGV[0]);
 
 #my @browsers;   # Assign forked pid's for watching browser activities.
-my $dashboardPID = sprintf("%d%d", getppid(), $$);
+my $dashboardPID;
 my @systemids;
 my @activities;   # Assign dashboard activity pid's.
 my @progressPIDs; # Assign all progress pid's.
 my @others;
 
-my %notifications;
 my $selfPIDFile;
 my $at;
 
-$SIG{INT}  = \&end;
-$SIG{TERM} = \&end;
-$SIG{TSTP} = \&end;
-$SIG{QUIT} = \&end;
-$SIG{PWR}  = \&end;
-$SIG{KILL} = \&end;
-$SIG{USR1} = \&end;
-
-init();
+#init();
 
 #*****************************************************************************************************
 # Subroutine			: init
@@ -60,67 +54,180 @@ init();
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub init {
-	$0 = 'IDrive:dashboard';
-	$Configuration::displayHeader = 0;
+	$0 = 'IDrive:dashboard:HT';
 
-	Helpers::loadAppPath();
-	exit(1) unless Helpers::loadServicePath();
+	$dashboardPID = sprintf("%d%d", getppid(), $$);
 
-	$selfPIDFile = getCatfile(getServicePath(), $Configuration::userProfilePath, $Configuration::mcUser);
+	$AppConfig::callerEnv = 'BACKGROUND';
+	$AppConfig::traceLogFile = 'dashboard.log';
+	$AppConfig::displayHeader = 0;
+
+
+	Common::loadAppPath();
+	exit(1) unless Common::loadServicePath();
+
+	$selfPIDFile = getCatfile(getServicePath(), $AppConfig::userProfilePath, $AppConfig::mcUser);
 	exit(1) unless (-d $selfPIDFile);
 
 	$selfPIDFile = getCatfile($selfPIDFile, 'dashboard.pid');
-	exit(1) if Helpers::isFileLocked($selfPIDFile);
-	exit(1) unless Helpers::fileLock($selfPIDFile);
 
+	my $firstTime = 1;
 	my $selfPID;
+	my $retryAttempts = 1;
 	while(1) {
-		$selfPID = (-f $selfPIDFile and Helpers::getFileContents($selfPIDFile)) || -1;
+		$selfPID = (-f $selfPIDFile and getFileContents($selfPIDFile)) || -1;
 		end() if ($$ != $selfPID);
 
-		if (-f Helpers::getCatfile(Helpers::getAppPath(), 'debug.enable')) {
-			unless ($Configuration::debug) {
-				$Configuration::debug = 1;
-				Helpers::traceLog('enabling debug mode');
+		if (-f Common::getCatfile(Common::getAppPath(), 'debug.enable')) {
+			unless ($AppConfig::debug) {
+				$AppConfig::debug = 1;
+				Common::traceLog('enabling debug mode');
 			}
 		}
-		elsif ($Configuration::debug) {
-			$Configuration::debug = 0;
-			Helpers::traceLog('disabling debug mode');
+		elsif ($AppConfig::debug) {
+			$AppConfig::debug = 0;
+			Common::traceLog('disabling debug mode');
 		}
 
-		unless (Helpers::loadServicePath() and Helpers::loadUsername() and
-			(Helpers::loadUserConfiguration() == 1)) {
-			Helpers::traceLog('failed to load service path/username/userconfig');
+		unless (Common::loadServicePath() and Common::loadUsername()) {
+			Common::traceLog('failed to load service path/username');
 			stopDashboardRoutines();
 			sleep(3);
 			next;
 		}
-		Helpers::traceLog('initDashboardRoutines');
+
+		if ($Idrivelib::VERSION ne $AppConfig::staticPerlVersion) {
+			Common::traceLog('Dashboard version mismatch, please update to latest');
+			unlink($selfPIDFile);
+			exit 1;
+		}
+
+		unless (Common::loadUserConfiguration() == 1) {
+			Common::traceLog('failed to load userconfig');
+			stopDashboardRoutines();
+			sleep(3);
+			next;
+		}
+
+		if (getUserConfiguration('RMWS') eq 'yes') {
+			Common::traceLog('Switch to RMWS');
+			last;
+		}
+
+		if (getUserConfiguration('UPTIME') eq '') {
+			my $uptimeCmd = Common::updateLocaleCmd('who -b');
+			my $uptime = `$uptimeCmd`;
+			chomp($uptime);
+			$uptime =~ s/system boot//;
+			$uptime =~ s/^\s+//;
+			setUserConfiguration('UPTIME', $uptime);
+			saveUserConfiguration(0);
+		}
+		elsif ($firstTime and (getUserConfiguration('DEDUP') eq 'on')) {
+			my $uptimeCmd = Common::updateLocaleCmd('who -b');
+			my $uptime = `$uptimeCmd`;
+			chomp($uptime);
+			$uptime =~ s/system boot//;
+			$uptime =~ s/^\s+//;
+			if (getUserConfiguration('UPTIME') ne $uptime) {
+				my $uie = sprintf("date -d'%s' +%%s", $uptime);
+				$uie = Common::updateLocaleCmd($uie);
+				$uie = `$uie`;
+				chomp($uie);
+				if ((time() - $uie) >= 604800) {
+					my @devices = Common::fetchAllDevices();
+					unless (Common::findMyDevice(\@devices)) {
+						Common::traceLog('backup_location_is_adopted_by_another_machine');
+						setUserConfiguration('BACKUPLOCATION', '');
+						Common::loadCrontab();
+						Common::setCrontab('otherInfo', 'settings', {'status' => 'INACTIVE'}, ' ');
+						Common::saveCrontab(0);
+						end();
+					}
+				}
+
+				setUserConfiguration('UPTIME', $uptime);
+				saveUserConfiguration(0, 1);
+				my $cmd = sprintf("%s %s 1 0", $AppConfig::perlBin, Common::getScript('logout', 1));
+				$cmd = Common::updateLocaleCmd($cmd);
+				`$cmd`;
+			}
+		}
+
+		my $today = (localtime())[3];
+		my %data  = ();
+
+		unless (getRemoteManageIP()) {
+debug('notify update remote manage ip ' . __LINE__);
+			%data = (
+				'content' => {
+					'channel' => 'update_remote_manage_ip',
+					'notification_value' => ''
+				}
+			);
+			my $ipStatus = startActivity(\%data, undef, 1);
+			if ($ipStatus == 1) {
+				Common::traceLog('Updated remote manage ip, re-loading dashboard');
+				stopDashboardRoutines();
+				next;
+			}
+			else {
+				Common::traceLog('Failed to load remote manage ip');
+				end();
+			}
+		}
+
+		Common::traceLog('initDashboardRoutines');
 
 		unless (loadAccessToken()) {
-			Helpers::traceLog('failed to load access token');
-			stopDashboardRoutines();
-			exit(1);
+			Common::traceLog('failed to load access token');
+			if ($retryAttempts < 5) {
+				$retryAttempts += 1;
+				sleep(60);
+				next;
+			}
+			else {
+				stopDashboardRoutines();
+				end();
+			}
 		}
 
 		unless (register()) {
-			Helpers::traceLog('failed to register this machine');
+			Common::traceLog('failed to register this machine');
 			stopDashboardRoutines();
 			sleep(3);
 			next;
 		}
 
-		Helpers::fileWrite(getCatfile(getUserProfilePath(), 'stage.txt'), '0');
+		unless(loadNS()) {
+			Common::traceLog('Failed to load notifications');
+			stopDashboardRoutines();
+			sleep(3);
+			next;
+		}
 
-		Helpers::fileWrite(getCatfile(getUserProfilePath(), 'browsers.txt'), '0');
+		if (getNS('update_device_info')) {
+			%data = (
+				'content' => {
+					'channel' => 'update_device_info',
+					'notification_value' => getNS('update_device_info')
+				}
+			);
+			if (startActivity(\%data, undef, 1) > 0) {
+				deleteNS('get_backupset_content');
+				deleteNS('get_localbackupset_content');
+				deleteNS('get_scheduler');
+				deleteNS('get_user_settings');
+				deleteNS('get_settings');
+				deleteNS('update_device_info');
+			}
+		}
+
+		Common::fileWrite2(getCatfile(getUserProfilePath(), 'stage.txt'), '0');
+
+		Common::fileWrite2(getCatfile(getUserProfilePath(), 'browsers.txt'), '0');
 
 		updateSystemIsAlive();
-
-		map{$notifications{$_} = ''} keys %Configuration::notificationsSchema;
-		Helpers::loadNotifications();
-
-		my %data = ();
 
 		if (getDDAStatus()) {
 			%data = (
@@ -130,89 +237,90 @@ sub init {
 				}
 			);
 			startActivity(\%data, undef, 1);
-			last if (Helpers::getUserConfiguration('DDA'));
+			last if (getUserConfiguration('DDA'));
+		}
+		elsif (getUserConfiguration('DDA')) {
+			stopDashboardRoutines();
+			Common::traceLog('service stopping. DDA is enabled.');
+			last;
 		}
 
 		unless (fetchPropSettings()) {
-			Helpers::traceLog('failed to fetch prop settings');
+			Common::traceLog('failed to fetch prop settings');
 			stopDashboardRoutines();
 			sleep(3);
 			next;
 		}
 		watchDeltaPropSettings();
 		watchDashboardLoginActivity();
+		$firstTime = 0 if ($firstTime);
 
-		my $nv;                # Stores notification values
 		my $sc = 0;
 		my $pushNotifications;
-		my $today;
 		my $uname = getUsername();
+		my ($startTime, $timeDiff);
 		while(scalar @systemids == 3) {
 debug('All system ps OK. c: ' . scalar @systemids);
-			$selfPID = (-f $selfPIDFile and Helpers::getFileContents($selfPIDFile)) || -1;
-			end() if ($$ != $selfPID);
+			$startTime = time();
+			$selfPID = (-f $selfPIDFile and getFileContents($selfPIDFile)) || -1;
+			if ($$ != $selfPID) {
+				end();
+				updateSystemIsOffline($uname);
+			}
 
 			$today = (localtime())[3];
 			$pushNotifications = 0;
 
 			if (open(my $s, '<', getCatfile(getUserProfilePath(), 'stage.txt'))) {
-				$sc = <$s>;
+				$sc = <$s> || 0;
 				chomp($sc);
 				close($s);
 			}
 debug("stage $sc " . __LINE__);
 
-			Helpers::killPIDs(\@progressPIDs, 0);
+			Common::killPIDs(\@progressPIDs, 0);
 
-			Helpers::loadNotifications();
-			if ($sc > 0) {
-				foreach my $n (keys %notifications) {
-					$nv = Helpers::getNotifications($n);
-
-					next if ($nv eq $notifications{$n});
-
-debug("notify $n " . __LINE__);
-					%data = (
-						'content' => {
-							'channel' => $n,
-							'notification_value' => $nv
-						}
-					);
-					if (startActivity(\%data, undef, 1)) {
-						$notifications{$n} = $nv;
-						$pushNotifications = 1 if (exists $Configuration::notificationsForDashboard{$n});
+			if (getNS('update_device_info')) {
+debug('notify device info change ' . __LINE__);
+				%data = (
+					'content' => {
+						'channel' => 'update_device_info',
+						'notification_value' => getNS('update_device_info')
 					}
-				}
-			}
-			else {
-				if (Helpers::getNotifications('update_backup_progress') ne $notifications{'update_backup_progress'}) {
-debug('notify backup progress ' . __LINE__);
-					%data = (
-						'content' => {
-							'channel' => 'update_backup_activity',
-							'notification_value' => Helpers::getNotifications('update_backup_progress')
-						}
-					);
-					startActivity(\%data, undef, 1);
-					$notifications{'update_backup_progress'} = Helpers::getNotifications('update_backup_progress');
-				}
-
-				if (Helpers::getNotifications('update_remote_manage_ip') ne $today) {
-					Helpers::loadNotifications() and Helpers::setNotification('update_remote_manage_ip', "$today") and Helpers::saveNotifications();
-debug('notify update remote manage ip ' . __LINE__);
-					%data = (
-						'content' => {
-							'channel' => 'update_remote_manage_ip',
-							'notification_value' => ''
-						}
-					);
-					if (startActivity(\%data, undef, 1)) {
-						$notifications{'update_remote_manage_ip'} = "$today";
-					}
+				);
+				if (startActivity(\%data, undef, 1) > 0) {
+					deleteNS('get_backupset_content');
+					deleteNS('get_localbackupset_content');
+					deleteNS('get_scheduler');
+					deleteNS('get_user_settings');
+					deleteNS('get_settings');
 				}
 			}
 
-			if ($pushNotifications) {
+# TODO: Fix
+#			if (getNS('update_remote_manage_ip') ne $today) {
+#debug('notify update remote manage ip ' . __LINE__);
+#				%data = (
+#					'content' => {
+#						'channel' => 'update_remote_manage_ip',
+#						'notification_value' => ''
+#					}
+#				);
+#				my $ipStatus = startActivity(\%data, undef, 1);
+#				if ($ipStatus > 0) {
+#					loadNotifications() and setNotification('update_remote_manage_ip', "$today") and saveNotifications();
+#					$notifications{'update_remote_manage_ip'} = "$today";
+#					if ($ipStatus == 1) {
+#						stopDashboardRoutines();
+#						last;
+#					}
+#				}
+#				else {
+#					$notifications{'update_remote_manage_ip'} = Common::getNotifications('update_remote_manage_ip');
+#				}
+#			}
+
+			if (syncUpdates()) {
 debug('sync notifications ' . __LINE__);
 				%data = (
 					'content' => {
@@ -222,40 +330,42 @@ debug('sync notifications ' . __LINE__);
 				startActivity(\%data, undef, 1);
 			}
 
-			unless (Helpers::loadServicePath() and Helpers::loadUsername() and
-				(Helpers::loadUserConfiguration() == 1)) {
-				Helpers::traceLog('service stopping. failed to load service path/username/userconfig.');
+			unless (Common::loadServicePath() and Common::loadUsername() and
+				(Common::loadUserConfiguration() == 1)) {
+				Common::traceLog('service stopping. failed to load service path/username/userconfig.');
 				last;
 			}
-			if (Helpers::getUserConfiguration('DDA') or (('' ne getUsername()) and ($uname ne getUsername()))) {
-				Helpers::traceLog('service stopping. failed to load username/user switched/DDA is enabled.');
+			if (getUserConfiguration('DDA') or (('' ne getUsername()) and ($uname ne getUsername()))) {
+				Common::traceLog('service stopping. failed to load username/user switched/DDA is enabled.');
 				last;
 			}
 
-			Helpers::killPIDs(\@systemids, 0);
-			Helpers::killPIDs(\@others, 0);
+			Common::killPIDs(\@systemids, 0);
+			Common::killPIDs(\@others, 0);
 
-			if (-f Helpers::getCatfile(Helpers::getAppPath(), 'debug.enable')) {
-				unless ($Configuration::debug) {
-					$Configuration::debug = 1;
-					Helpers::traceLog('enabling debug mode');
+			if (-f Common::getCatfile(Common::getAppPath(), 'debug.enable')) {
+				unless ($AppConfig::debug) {
+					$AppConfig::debug = 1;
+					Common::traceLog('enabling debug mode');
 					stopDashboardRoutines();
 					updateSystemIsOffline($uname);
 					last;
 				}
 			}
-			elsif ($Configuration::debug) {
-				$Configuration::debug = 0;
-				Helpers::traceLog('disabling debug mode');
+			elsif ($AppConfig::debug) {
+				$AppConfig::debug = 0;
+				Common::traceLog('disabling debug mode');
 				stopDashboardRoutines();
 				updateSystemIsOffline($uname);
 				last;
 			}
 
-			sleep(8);
+			if (($timeDiff = (time() - $startTime)) <= 8) {
+				sleep(8 - $timeDiff);
+			}
 		}
 
-		if (Helpers::getUserConfiguration('DDA')) {
+		if (getUserConfiguration('DDA')) {
 			%data = (
 				'content' => {
 					'channel' => 'update_acc_status',
@@ -263,22 +373,75 @@ debug('sync notifications ' . __LINE__);
 				}
 			);
 			startActivity(\%data, undef, 1);
-			Helpers::traceLog('DDA is enabled, going stop myself');
+			Common::traceLog('DDA is enabled, going stop myself');
 			stopDashboardRoutines();
 			updateSystemIsOffline($uname);
 			last;
 		}
 		elsif (('' ne getUsername()) and ($uname ne getUsername())) {
-			Helpers::traceLog('username might be changed');
+			Common::traceLog('username might be changed');
 			stopDashboardRoutines();
 			updateSystemIsOffline($uname);
 		}
 		else {
-			Helpers::traceLog('deconstruct');
+			Common::traceLog('deconstruct');
 			stopDashboardRoutines();
 			sleep(5);
 		}
 	}
+
+	return 1;
+}
+
+#*****************************************************************************************************
+# Subroutine			: syncUpdates
+# Objective				: Push local changes to dashboard
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub syncUpdates {
+	loadNS();
+	my $nsFile = Common::getNSFile();
+	my $pn = 0;
+	my $nsfh;
+	if (open($nsfh, '+<', $nsFile)) {
+#		unless (flock($nsfh, LOCK_EX)) {
+#traceLog("Cannot lock file $nsFile $!\n");
+#			close($nsfh);
+#			sleep(3);
+#			return 0;
+#		}
+	}
+	else {
+		traceLog("Cannot open file $nsFile $!\n");
+		sleep(3);
+		return 0;
+	}
+
+	my %data;
+	unless (defined $_[0]) {
+		foreach my $n (keys %{getNS()->{'nsq'}}) {
+			%data = (
+			content => {
+				channel => $n,
+				notification_value => getNS($n)
+			});
+debug("notify $n " . __LINE__);
+			if (startActivity(\%data, undef, 1)) {
+debug("notify $n S" . __LINE__);
+				deleteNS($n);
+				unless ($pn) {
+					$pn = 1 if (exists $AppConfig::notificationsForDashboard{$n});
+				}
+			}
+		}
+	}
+	else {
+	}
+
+	saveNS($nsfh) if ($pn);
+
+	close($nsfh);
+	return $pn;
 }
 
 #*****************************************************************************************************
@@ -293,11 +456,11 @@ sub headerCallback {
 
 #*****************************************************************************************************
 # Subroutine			: request
-# Objective				: Wrapper for Helpers::request
+# Objective				: Wrapper for Common::request
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub request {
-	my $rc = $Configuration::rRetryTimes;
+	my $rc = $AppConfig::rRetryTimes;
 
 	my $curl = WWW::Curl::Easy->new;
 	$curl->setopt(CURLOPT_HEADERFUNCTION, \&headerCallback);
@@ -309,15 +472,15 @@ sub request {
 	$curl->setopt(CURLOPT_WRITEDATA,\$response);
 	$curl->setopt(CURLOPT_POST, 1);
 	$curl->setopt(CURLOPT_SSL_VERIFYHOST, 0);
-	$curl->setopt(CURLOPT_CAINFO, getCatfile(Helpers::getAppPath(), './ca-certificates.crt'));
+	$curl->setopt(CURLOPT_CAINFO, getCatfile(Common::getAppPath(), './ca-certificates.crt'));
 #	$curl->setopt(CURLOPT_VERBOSE, 1);
-	$curl->setopt(CURLOPT_POSTFIELDS, Helpers::buildQuery($_[0]->{'data'}));
+	$curl->setopt(CURLOPT_POSTFIELDS, Common::buildQuery($_[0]->{'data'}));
 
-	if(getUserConfiguration('PROXY') ne '') {
-		my $proxyuser = getUserConfiguration('PROXYUSERNAME') ne ''? Helpers::urlEncode(getUserConfiguration('PROXYUSERNAME')) : '';
-		my $proxypwd = getUserConfiguration('PROXYPASSWORD') ne ''? Helpers::decryptString(getUserConfiguration('PROXYPASSWORD')) : '';
+	if (getUserConfiguration('PROXY') ne '') {
+		my $proxyuser = getUserConfiguration('PROXYUSERNAME') ne ''? Common::urlEncode(getUserConfiguration('PROXYUSERNAME')) : '';
+		my $proxypwd = getUserConfiguration('PROXYPASSWORD') ne ''? Common::decryptString(getUserConfiguration('PROXYPASSWORD')) : '';
 		$curl->setopt(CURLOPT_PROXY, "http://" . getUserConfiguration('PROXYIP') . ":" . getUserConfiguration('PROXYPORT'));
-		$curl->setopt(CURLOPT_PROXYUSERPWD, $proxyuser . (($proxypwd ne '')? ":$proxypwd" : '')) if($proxyuser ne '');
+		$curl->setopt(CURLOPT_PROXYUSERPWD, $proxyuser . (($proxypwd ne '')? ":$proxypwd" : '')) if ($proxyuser ne '');
 	}
 	my ($retcode, $responseCode, $jd);
 	while($rc) {
@@ -326,48 +489,57 @@ debug(Dumper($_[0], $retcode, $response));
 		if ($retcode == 0) {
 			my $responseCode = $curl->getinfo(CURLINFO_HTTP_CODE);
 
-			if ($response =~ /404 Not Found/g) {
-				Helpers::traceLog("An error occured: $retcode, $response");
+			if (not $response) {
+				Common::traceLog("Empty response: $retcode");
 				if ($rc--) {
-					Helpers::traceLog("Retrying for $rc times");
+					Common::traceLog("Retrying for $rc times");
 					sleep(2);
 					next;
 				}
-				return {STATUS => Configuration::FAILURE, Configuration::DATA => $response};
+				return {STATUS => AppConfig::FAILURE, AppConfig::DATA => ''};
+			}
+			elsif (($response =~ /404 Not Found/g) or ($response =~ /502 Bad Gateway/g) or ($response =~ /500 Internal Server Error/g)) {
+				Common::traceLog("An error occured: $retcode, $response");
+				if ($rc--) {
+					Common::traceLog("Retrying for $rc times");
+					sleep(2);
+					next;
+				}
+				return {STATUS => AppConfig::FAILURE, AppConfig::DATA => $response};
 			}
 			elsif ($response =~ /^{|^\[/g) {
 				$jd = from_json($response);
 				if ((reftype($jd) eq 'HASH') and  exists $jd->{'type'} and
 						$jd->{'type'} eq 'user authentication failed') {
-					return {STATUS => Configuration::FAILURE, Configuration::DATA => $jd};
+					return {STATUS => AppConfig::FAILURE, AppConfig::DATA => $jd};
 				}
-				return {STATUS => Configuration::SUCCESS, Configuration::DATA => $jd};
+				return {STATUS => AppConfig::SUCCESS, AppConfig::DATA => $jd};
 			}
 
-			return {STATUS => Configuration::SUCCESS, Configuration::DATA => $response};
+			return {STATUS => AppConfig::SUCCESS, AppConfig::DATA => $response};
 		}
 		else {
-			Helpers::traceLog("An error occured: $retcode ".$curl->strerror($retcode).' - '.$curl->errbuf);
+			Common::traceLog("An error occured: $retcode ".$curl->strerror($retcode).' - '.$curl->errbuf);
 			if ($rc--) {
-				Helpers::traceLog("Retrying for $rc times");
+				Common::traceLog("Retrying for $rc times");
 				sleep(2);
 				next;
 			}
 		}
 	}
-	return {STATUS => Configuration::FAILURE, Configuration::DATA => $response};
+	return {STATUS => AppConfig::FAILURE, AppConfig::DATA => $response};
 }
 
 #*****************************************************************************************************
 # Subroutine			: debug
-# Objective				: Wrapper for Helpers::traceLog
+# Objective				: Wrapper for Common::traceLog
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub debug {
-	if ($Configuration::debug) {
+	if ($AppConfig::debug) {
 		my $msg = "DA:DEBUG: ";
 		$msg .= join('', @_);
-		Helpers::traceLog($msg);
+		Common::traceLog($msg);
 	}
 	return 1;
 }
@@ -380,24 +552,24 @@ sub debug {
 sub getDDAStatus {
 	my $params = Idrivelib::get_dashboard_params({
 		'0'   => '11',
-		'1000'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-		'111' => $Configuration::evsVersion,
-		'113' => lc($Configuration::deviceType),
+		'1000'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
 		'116' => 1,
 		#'119' => 1,
 		'101' => $at
 	}, 1, 0);
 	$params->{host} = getRemoteManageIP();
-	#$params->{port} = $Configuration::NSPort;
+	#$params->{port} = $AppConfig::NSPort;
 	$params->{method} = 'POST';
 	$params->{json} = 1;
 	my $response = request($params);
 	if (($response->{'STATUS'} eq 'SUCCESS') and (reftype($response->{'DATA'}) eq 'HASH')) {
 		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
-		if (exists $response->{'queryString'}->{'type'} and $response->{'queryString'}->{'type'} ne 'file') {
+		if (exists $response->{'data'}->{'type'} and $response->{'data'}->{'type'} ne 'file') {
 			return 0;
 		}
-		my @acStatus = Helpers::parseEVSCmdOutput($response->{'queryString'}->{'content'}, 'item');
+		my @acStatus = Common::parseEVSCmdOutput($response->{'data'}->{'content'}, 'item');
 		if (exists $acStatus[0]->{'disable'} and (int($acStatus[0]->{'disable'}) ne int(getUserConfiguration('DDA')))) {
 			return 1;
 		}
@@ -411,8 +583,8 @@ sub getDDAStatus {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub zlibRead {
-	my $gzipFilename = ('gzipfc' . time() . $$);
-	Helpers::fileWrite($gzipFilename, decode_base64($_[0]));
+	my $gzipFilename = getCatfile(getServicePath(), ('gzipfc' . time() . $$));
+	Common::fileWrite($gzipFilename, decode_base64($_[0]));
 	my $fh = new IO::Zlib;
 	my $fc = '';
 
@@ -424,7 +596,7 @@ sub zlibRead {
 		$fh->close;
 	}
 	else {
-		Helpers::traceLog("failed to open zip file $gzipFilename $!");
+		Common::traceLog("failed to open zip file $gzipFilename $!");
 	}
 	unlink($gzipFilename);
 	return $fc;
@@ -441,12 +613,14 @@ sub zlibCompress {
 	my $fc = '';
 	my $benc = '';
 
+	utf8::downgrade($_[0]);
+	encode("utf-8", $_[0]);
 	if ($fh->open($gzipFilename, "wb")) {
 		print $fh $_[0];
 		$fh->close;
 	}
 	else {
-		Helpers::traceLog("failed to open compress zip file $gzipFilename $!");
+		Common::traceLog("failed to open compress zip file $gzipFilename $!");
 	}
 
 	if (open(my $fileHandle, '<', $gzipFilename)) {
@@ -468,17 +642,17 @@ sub zlibCompress {
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub stopDashboardRoutines {
-	Helpers::traceLog('stopDashboardRoutines');
+	Common::traceLog('stopDashboardRoutines');
 	while(scalar @systemids > 0) {
-		Helpers::killPIDs(\@systemids);
+		Common::killPIDs(\@systemids);
 		sleep(1);
 	}
 	while(scalar @progressPIDs > 0) {
-		Helpers::killPIDs(\@progressPIDs);
+		Common::killPIDs(\@progressPIDs);
 		sleep(1);
 	}
 	while(scalar @others > 0) {
-		Helpers::killPIDs(\@others);
+		Common::killPIDs(\@others);
 		sleep(1);
 	}
 }
@@ -505,8 +679,8 @@ debug('loadAccessToken');
 #****************************************************************************************************/
 sub register {
 	my $host = getRemoteManageIP();
-	my $isDedup = Helpers::getUserConfiguration('DEDUP');
-	my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
+	my $isDedup = getUserConfiguration('DEDUP');
+	my $backupLocation = getUserConfiguration('BACKUPLOCATION');
 
 	if ($isDedup eq "on") {
 		$backupLocation = (split("#", $backupLocation))[1];
@@ -516,21 +690,21 @@ sub register {
 		'0'   => '3',
 		'109' => getUsername(),
 		'106' => getUsername(),
-		'112' => Helpers::getMachineUID(0),
+		'112' => Common::getMachineUID(0),
 		'108' => hostname,
 		'107' => getMachineUser(),
 		'110' => $backupLocation,
-		'111' => $Configuration::evsVersion,
-		'113' => lc($Configuration::deviceType),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
 		#'119' => 1,
 		'101' => $at
 	}, 1, 0);
 	$params->{host} = $host;
-	$params->{port} = $Configuration::NSPort;
+	$params->{port} = $AppConfig::NSPort;
 	$params->{method} = 'POST';
 	$params->{json} = 1;
 	my $response = request($params);
-	return 0 if ($response->{STATUS} eq Configuration::FAILURE);
+	return 0 if ($response->{STATUS} eq AppConfig::FAILURE);
 debug('register S' . __LINE__);
 
 	if (getUserConfiguration('ADDITIONALACCOUNT') eq 'true') {
@@ -539,21 +713,21 @@ debug('register S' . __LINE__);
 			'0'   => '3',
 			'109' => (getUserConfiguration('PARENTACCOUNT')),
 			'106' => getUsername(),
-			'112' => Helpers::getMachineUID(0),
+			'112' => Common::getMachineUID(0),
 			'108' => hostname,
 			'107' => getMachineUser(),
 			'110' => $backupLocation,
-			'111' => $Configuration::evsVersion,
-			'113' => lc($Configuration::deviceType),
+			'111' => $AppConfig::evsVersion,
+			'113' => lc($AppConfig::deviceType),
 			#'119' => 1,
 			'101' => $at
 		}, 1, 0);
 		$params->{host} = $host;
-		#$params->{port} = $Configuration::NSPort;
+		#$params->{port} = $AppConfig::NSPort;
 		$params->{method} = 'POST';
 		$params->{json} = 1;
 		my $response = request($params);
-		return 0 if ($response->{STATUS} eq Configuration::FAILURE);
+		return 0 if ($response->{STATUS} eq AppConfig::FAILURE);
 debug('register A' . __LINE__);
 	}
 
@@ -570,7 +744,7 @@ debug('ping heart beat' . __LINE__);
 	my $pid = fork();
 
 	unless (defined $pid) {
-		Helpers::retreat('Unable to fork');
+		Common::retreat('Unable to fork');
 	}
 
 	unless ($pid) {
@@ -578,22 +752,22 @@ debug('ping heart beat' . __LINE__);
 		my $content;
 		my $params;
 		my $response;
-		my $UCMTS         = stat(Helpers::getUserConfigurationFile())->mtime;
+		my $UCMTS         = stat(Common::getUserConfigurationFile())->mtime;
 		my $userConfigMTS = $UCMTS;
 		my $pingTime      = time();
 
 		while(1) {
-			end() if ((getppid() == 1) or (!Helpers::isFileLocked($selfPIDFile)));
-			$UCMTS = stat(Helpers::getUserConfigurationFile())->mtime;
+			end() if ((getppid() == 1) or (!Common::isFileLocked($selfPIDFile)));
+			$UCMTS = stat(Common::getUserConfigurationFile())->mtime if (-f Common::getUserConfigurationFile());
 			if ($userConfigMTS != $UCMTS) {
-				$userConfigMTS = stat(Helpers::getUserConfigurationFile())->mtime;
-				Helpers::loadUserConfiguration();
+				$userConfigMTS = $UCMTS;
+				Common::loadUserConfiguration();
 debug('userconfig has changed.');
 				register();
 			}
-			my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
+			my $backupLocation = getUserConfiguration('BACKUPLOCATION');
 
-			if (Helpers::getUserConfiguration('DEDUP') eq "on") {
+			if (getUserConfiguration('DEDUP') eq "on") {
 				$backupLocation = (split("#", $backupLocation))[1];
 			}
 
@@ -606,40 +780,40 @@ debug('userconfig has changed.');
 						($entAC =~ /business/) ? getUsername() : getUserConfiguration('PARENTACCOUNT')
 					),
 					'106' => getUsername(),
-					'112' => Helpers::getMachineUID(0),
+					'112' => Common::getMachineUID(0),
 					'108' => hostname,
 					'107' => getMachineUser(),
 					'110' => $backupLocation,
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
-					'121' => (time() + $at) . '_' . int(Helpers::getUserConfiguration('DDA')),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
+					'121' => (time() + $at) . '_' . int(getUserConfiguration('DDA')),
 					'124' => '',
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getParentRemoteManageIP();
 				$params->{host} = getRemoteManageIP() if ($entAC =~ /business/);
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				$response = request($params);
 debug('ping heart beat A' . __LINE__);
 			}
 
-			if (int(Helpers::getFileContents(getCatfile(getUserProfilePath(), 'stage.txt'))) > 0) {
+			if (int(getFileContents(getCatfile(getUserProfilePath(), 'stage.txt'))) > 0) {
 				$content = '<item alivetime="' . (time() + $at)  . '"/>';
 
 				$params = Idrivelib::get_dashboard_params({
 					'0'   => '2',
-					'1001'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					'1001'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					'130' => $content,
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getRemoteManageIP();
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				$response = request($params);
@@ -666,15 +840,15 @@ debug('ping heart beat S' . __LINE__);
 #****************************************************************************************************/
 sub updateSystemIsOffline {
 debug('ping heart beat' . __LINE__);
-	Helpers::setUsername($_[0]);
-	if (Helpers::loadUserConfiguration() == 1) {
+	Common::setUsername($_[0]);
+	if (Common::loadUserConfiguration() == 1) {
 		my $content;
 		my $params;
 		my $response;
 
-		my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
+		my $backupLocation = getUserConfiguration('BACKUPLOCATION');
 
-		if (Helpers::getUserConfiguration('DEDUP') eq "on") {
+		if (getUserConfiguration('DEDUP') eq "on") {
 			$backupLocation = (split("#", $backupLocation))[1];
 		}
 
@@ -686,20 +860,20 @@ debug('ping heart beat' . __LINE__);
 					($entAC =~ /business/) ? getUsername() : getUserConfiguration('PARENTACCOUNT')
 				),
 				'106' => getUsername(),
-				'112' => Helpers::getMachineUID(0),
+				'112' => Common::getMachineUID(0),
 				'108' => hostname,
 				'107' => getMachineUser(),
 				'110' => $backupLocation,
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
-				'121' => ('0_' . int(Helpers::getUserConfiguration('DDA'))),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
+				'121' => ('0_' . int(getUserConfiguration('DDA'))),
 				'124' => '',
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getParentRemoteManageIP();
 			$params->{host} = getRemoteManageIP() if ($entAC =~ /business/);
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			$response = request($params);
@@ -710,15 +884,15 @@ debug('stop heart beat A' . __LINE__);
 
 		$params = Idrivelib::get_dashboard_params({
 			'0'   => '2',
-			'1001'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-			'111' => $Configuration::evsVersion,
-			'113' => lc($Configuration::deviceType),
+			'1001'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+			'111' => $AppConfig::evsVersion,
+			'113' => lc($AppConfig::deviceType),
 			'130' => $content,
 			#'119' => 1,
 			'101' => $at
 		}, 1, 0);
 		$params->{host} = getRemoteManageIP();
-		#$params->{port} = $Configuration::NSPort;
+		#$params->{port} = $AppConfig::NSPort;
 		$params->{method} = 'POST';
 		$params->{json} = 1;
 		$response = request($params);
@@ -735,8 +909,8 @@ debug('stop heart beat S' . __LINE__);
 # Added By				: Yogesh Kumar
 #****************************************************************************************************/
 sub applyChangedFields {
-debug('applyChangedFields');
-	my $ps = Helpers::getPropSettings($_[1]);
+debug('applyChangedFields ' . Dumper($_[0]));
+	my $ps = Common::getPropSettings($_[1]);
 	my $isModified = 0;
 	my @z = @{$_[0]};
 	my $lockSettings;
@@ -821,7 +995,7 @@ debug('applyChangedFields');
 		startActivity(PropSchema::parse($z[$_], getUsername()), undef, 1, 1);
 		delete $z[$_]->{'oldvalue'};
 	}
-	Helpers::fileWrite(Helpers::getPropSettingsFile($_[1]), to_json($ps)) if ($isModified);
+	Common::fileWrite(Common::getPropSettingsFile($_[1]), to_json($ps)) if ($isModified);
 
 	return 1;
 }
@@ -835,23 +1009,29 @@ sub fetchPropSettings {
 	my $params = Idrivelib::get_dashboard_params({
 		'0'   => '11',
 		'1002'=> getUsername(),
-		'111' => $Configuration::evsVersion,
+		'111' => $AppConfig::evsVersion,
 		'102' => 1,
-		'113' => lc($Configuration::deviceType),
+		'113' => lc($AppConfig::deviceType),
 		'116' => 1,
 		#'119' => 1,
 		'101' => $at
 	}, 1, 0);
 	$params->{host} = getRemoteManageIP();
-	#$params->{port} = $Configuration::NSPort;
+	#$params->{port} = $AppConfig::NSPort;
 	$params->{method} = 'POST';
 	$params->{json} = 1;
 	my $response = request($params);
-	return 0 if ($response->{STATUS} eq Configuration::FAILURE);
+	return 0 if ($response->{STATUS} eq AppConfig::FAILURE);
 
 debug('fetch prop settings S ' . __LINE__);
 	$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
-	my @z = Helpers::parseEVSCmdOutput($response->{'queryString'}->{'content'}, 'item');
+	$response->{'data'}->{'content'} = Common::urlDecode($response->{'data'}->{'content'});
+	if (utf8::is_utf8($response->{'data'}->{'content'})) {
+		utf8::downgrade($response->{'data'}->{'content'});
+	}
+	my @z = Common::parseEVSCmdOutput($response->{'data'}->{'content'}, 'item');
+debug(__LINE__ . ' ' . $response->{'data'}->{'content'});
+debug(__LINE__ . ' ' . Dumper(\@z));
 	applyChangedFields(\@z);
 
 	my $entAC = lc(getUserConfiguration('PLANTYPE') . getUserConfiguration('PLANSPECIAL'));
@@ -861,40 +1041,42 @@ debug('fetch prop settings S ' . __LINE__);
 			'1003'=> (
 				($entAC =~ /business/) ? getUsername() : getUserConfiguration('PARENTACCOUNT')
 			),
-			'111' => $Configuration::evsVersion,
+			'111' => $AppConfig::evsVersion,
 			'102' => 1,
-			'113' => lc($Configuration::deviceType),
+			'113' => lc($AppConfig::deviceType),
 			'116' => 1,
 			#'119' => 1,
 			'101' => $at
 		}, 1, 0);
 		$params->{host} = getParentRemoteManageIP();
 		$params->{host} = getRemoteManageIP() if ($entAC =~ /business/);
-		#$params->{port} = $Configuration::NSPort;
+		#$params->{port} = $AppConfig::NSPort;
 		$params->{method} = 'POST';
 		$params->{json} = 1;
 		$response = request($params);
-		return 0 if ($response->{STATUS} eq Configuration::FAILURE);
+		return 0 if ($response->{STATUS} eq AppConfig::FAILURE);
 
 debug('fetch prop settings A ' . __LINE__);
 		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
-		return 1 unless (exists $response->{'queryString'}->{'content'});
-		my $d = zlibRead($response->{'queryString'}->{'content'});
+		return 1 unless (exists $response->{'data'}->{'content'});
+		my $d = zlibRead($response->{'data'}->{'content'});
+debug(__LINE__ . " $d");
 		my $index = index($d, sprintf("<User id=\"%s\">", getUsername()));
 		$d = substr($d, $index);
 		$index = index($d, '</User>');
 		$d = substr($d, 0, ($index + 7));
-debug("data: $d");
+debug(__LINE__ . " $d");
 		my (@z, @t);
 		foreach (@PropSchema::propFields) {
-			@t = Helpers::parseEVSCmdOutput($d, $_, 1);
+			@t = Common::parseEVSCmdOutput($d, $_, 1);
 			if ($t[0]->{'STATUS'} eq 'SUCCESS') {
 				$_ = 'Default BackupSet' if ($_ eq 'DefaultBackupSet');
 				$t[0]->{'key'} = $_;
 				push(@z, $t[0]);
 			}
 		}
-		@t = Helpers::parseEVSCmdOutput($d, 'lock', 1);
+		@t = Common::parseEVSCmdOutput($d, 'lock', 1);
+debug(__LINE__ . Dumper(\@t));
 		if ($t[0]->{'STATUS'} eq 'SUCCESS') {
 			my $keyid = 0;
 			foreach (split //, $t[0]->{'value'}) {
@@ -904,6 +1086,7 @@ debug("data: $d");
 				$keyid++;
 			}
 		}
+debug(__LINE__ . Dumper(\@z));
 		applyChangedFields(\@z, 'master');
 	}
 
@@ -920,7 +1103,7 @@ sub watchDeltaPropSettings {
 	my $pid = fork();
 
 	unless (defined $pid) {
-		Helpers::retreat('Unable to fork');
+		Common::retreat('Unable to fork');
 	}
 
 	unless ($pid) {
@@ -932,30 +1115,34 @@ sub watchDeltaPropSettings {
 		my $sleepTime = 10;
 		my ($params, $response);
 		while(1) {
-			end() if ((getppid() == 1) or (!Helpers::isFileLocked($selfPIDFile)));
-			if (int(Helpers::getFileContents(getCatfile(getUserProfilePath(), 'stage.txt'))) > 0) {
+			end() if ((getppid() == 1) or (!Common::isFileLocked($selfPIDFile)));
+			if (int(getFileContents(getCatfile(getUserProfilePath(), 'stage.txt'))) > 0) {
 				$params = Idrivelib::get_dashboard_params({
 					'0'   => '11',
 					'1004'=> getUsername(),
-					'111' => $Configuration::evsVersion,
+					'111' => $AppConfig::evsVersion,
 					'102' => 1,
-					'113' => lc($Configuration::deviceType),
+					'113' => lc($AppConfig::deviceType),
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getRemoteManageIP();
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				$response = request($params);
 debug('get delta prop settings S ' . __FILE__);
 				if (($response->{'DATA'}) and (reftype($response->{'DATA'}) eq 'ARRAY')) {
 					$response = Idrivelib::get_dashboard_params($response->{'DATA'}[0], 0, 0);
-					$curData = $response->{'queryString'}->{'content'};
+					$curData = $response->{'data'}->{'content'};
 
 					if ($curData ne $prevData) {
+						$curData = Common::urlDecode($curData);
+						if (utf8::is_utf8($curData)) {
+							utf8::downgrade($curData);
+						}
 debug("delta prop settings S data: $curData");
-						my @z = Helpers::parseEVSCmdOutput($curData, 'item');
+						my @z = Common::parseEVSCmdOutput($curData, 'item');
 						applyChangedFields(\@z);
 						$prevData = $curData;
 					}
@@ -975,7 +1162,7 @@ debug("delta prop settings S data: $curData");
 			}
 
 			sleep($sleepTime);
-			end() if ((getppid() == 1) or (!Helpers::isFileLocked($selfPIDFile)));
+			end() if ((getppid() == 1) or (!Common::isFileLocked($selfPIDFile)));
 
 			if ((getUserConfiguration('ADDITIONALACCOUNT') eq 'true') or ($entAC =~ /business/)) {
 				$hasUpdates = 0;
@@ -985,25 +1172,29 @@ debug("delta prop settings S data: $curData");
 						($entAC =~ /business/) ? getUsername() : getUserConfiguration('PARENTACCOUNT')
 					),
 					'102' => 1,
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getParentRemoteManageIP();
 				$params->{host} = getRemoteManageIP() if ($entAC =~ /business/);
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				$response = request($params);
 debug('get delta prop settings A' . __FILE__);
 				if (($response->{'DATA'}) and (reftype($response->{'DATA'}) eq 'ARRAY')) {
 					$response = Idrivelib::get_dashboard_params($response->{'DATA'}[0], 0, 0);
-					$curData = zlibRead($response->{'queryString'}->{'content'});
+					$curData = zlibRead($response->{'data'}->{'content'});
 
+					$curData = Common::urlDecode($curData);
+					if (utf8::is_utf8($curData)) {
+						utf8::downgrade($curData);
+					}
 debug("delta prop settins A data: $curData");
 					if ($curData ne $prevData) {
-						my @z = Helpers::parseEVSCmdOutput($curData, 'item');
+						my @z = Common::parseEVSCmdOutput($curData, 'item');
 						for (0 .. $#z) {
 							if (exists $z[$_]->{'pusers'} and (($z[$_]->{'pusers'} eq 'all') or ($z[$_]->{'pusers'} =~ getUsername()))) {
 								$hasUpdates = 1;
@@ -1039,6 +1230,165 @@ debug("delta prop settins A data: $curData");
 }
 
 #*****************************************************************************************************
+# Subroutine			: restoreBackupset
+# Objective				: Adopt restorebackupset from previous device
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub restoreBackupset {
+	my $params = Idrivelib::get_dashboard_params({
+		'0'   => '11',
+		'1007'=> (getUsername() . $_[0] . $_[1]),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
+		'116' => 1,
+		'101' => $at
+	}, 1, 0);
+	$params->{host} = getRemoteManageIP();
+	$params->{method} = 'POST';
+	$params->{json} = 1;
+	my $response = request($params);
+	if (exists $response->{'DATA'} and exists $response->{'DATA'}{'content'}) {
+		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
+		$response = from_json(zlibRead($response->{'data'}->{'content'}));
+		my %data = ();
+		$data{'content'}{'channel'} = 'save_backupset_content';
+		$data{'content'}{'files'} = $response->{'files'};
+		startActivity(\%data, undef, 1, -1);
+	}
+}
+
+#*****************************************************************************************************
+# Subroutine			: restoreLocalBackupset
+# Objective				: Adopt localbackupset from previous device
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub restoreLocalBackupset {
+	my $params = Idrivelib::get_dashboard_params({
+		'0'   => '11',
+		'1008'=> (getUsername() . $_[0] . $_[1]),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
+		'116' => 1,
+		'101' => $at
+	}, 1, 0);
+	$params->{host} = getRemoteManageIP();
+	$params->{method} = 'POST';
+	$params->{json} = 1;
+	my $response = request($params);
+	if (exists $response->{'DATA'} and exists $response->{'DATA'}{'content'}) {
+		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
+		$response = from_json(zlibRead($response->{'data'}->{'content'}));
+		my %data = ();
+		$data{'content'}{'channel'} = 'save_localbackupset_content';
+		$data{'content'}{'files'} = $response->{'files'};
+		startActivity(\%data, undef, 1, -1);
+	}
+}
+
+#*****************************************************************************************************
+# Subroutine			: restoreSchduledJobs
+# Objective				: Adopt scheduled settings from previous device
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub restoreSchduledJobs {
+	my $params = Idrivelib::get_dashboard_params({
+		'0'   => '11',
+		'1016'=> (getUsername() . $_[0] . $_[1]),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
+		'116' => 1,
+		'101' => $at
+	}, 1, 0);
+	$params->{host} = getRemoteManageIP();
+	$params->{method} = 'POST';
+	$params->{json} = 1;
+	my $response = request($params);
+	if (exists $response->{'DATA'} and exists $response->{'DATA'}{'content'}) {
+		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
+		$response = from_json(zlibRead($response->{'data'}->{'content'}));
+		my %data = ();
+		$data{'content'}{'channel'} = 'save_scheduler';
+		foreach my $uname (keys %{$response}) {
+			delete $response->{$uname}{'dashboard'} if (exists $response->{$uname}{'dashboard'});
+			delete $response->{$uname}{'otherInfo'} if (exists $response->{$uname}{'otherInfo'});
+			if (exists $response->{$uname}{'archive'}) {
+				foreach my $name (keys %{$response->{$uname}{'archive'}}) {
+					if (exists $response->{$uname}{'archive'}{$name}{'cmd'} and
+						($response->{$uname}{'archive'}{$name}{'cmd'} =~ getUsername())) {
+						my $tmp = (split((getUsername() . ' '), $response->{$uname}{'archive'}{$name}{'cmd'}))[1];
+						my @tmp2= split(' ', $tmp);
+						$response->{$uname}{'archive'}{$name}{'cmd'} = ($tmp2[0] . ' ' . $tmp2[1]);
+					}
+				}
+			}
+			$data{'content'}{'crontab'}{$uname} = $response->{$uname};
+		}
+		startActivity(\%data, undef, 1, 1);
+	}
+}
+
+#*****************************************************************************************************
+# Subroutine			: restoreUserSettings
+# Objective				: Adopt user settings from previous device
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub restoreUserSettings {
+	my $params = Idrivelib::get_dashboard_params({
+		'0'   => '11',
+		'1013'=> (getUsername() . $_[0] . $_[1]),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
+		'116' => 1,
+		'101' => $at
+	}, 1, 0);
+	$params->{host} = getRemoteManageIP();
+	$params->{method} = 'POST';
+	$params->{json} = 1;
+	my $response = request($params);
+	if (exists $response->{'DATA'} and exists $response->{'DATA'}{'content'}) {
+		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
+		$response = from_json(zlibRead($response->{'data'}->{'content'}));
+		delete $response->{'BACKUPLOCATION'} if (exists $response->{'BACKUPLOCATION'});
+		delete $response->{'RESTORELOCATION'} if (exists $response->{'RESTORELOCATION'});
+		delete $response->{'RESTOREFROM'} if (exists $response->{'RESTOREFROM'});
+		delete $response->{'LOCALMOUNTPOINT'} if (exists $response->{'LOCALMOUNTPOINT'});
+
+		my %data = ();
+		$data{'content'}{'channel'} = 'save_user_settings';
+		$data{'content'}{'user_settings'} = $response;
+		startActivity(\%data, undef, 1, -1);
+	}
+}
+
+#*****************************************************************************************************
+# Subroutine			: restoreSettings
+# Objective				: Adopt settings from previous device
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub restoreSettings {
+	my $params = Idrivelib::get_dashboard_params({
+		'0'   => '11',
+		'1015'=> (getUsername() . $_[0] . $_[1]),
+		'111' => $AppConfig::evsVersion,
+		'113' => lc($AppConfig::deviceType),
+		'116' => 1,
+		'101' => $at
+	}, 1, 0);
+	$params->{host} = getRemoteManageIP();
+	$params->{method} = 'POST';
+	$params->{json} = 1;
+	my $response = request($params);
+	if (exists $response->{'DATA'} and exists $response->{'DATA'}{'content'}) {
+		$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
+		$response = from_json(zlibRead($response->{'data'}->{'content'}));
+		my %data = ();
+		$data{'content'}{'channel'} = 'save_settings';
+		$data{'content'}{'settings'} = $response;
+		startActivity(\%data, undef, 1, -1);
+	}
+}
+
+#*****************************************************************************************************
 # Subroutine			: startActivity
 # Objective				: Start an user activity
 # Added By				: Yogesh Kumar
@@ -1050,7 +1400,7 @@ sub startActivity {
 	my $ic = 0;
 	$ic = $_[3] if (defined $_[3]);
 
-	$Configuration::errorMsg = undef;
+	$AppConfig::errorMsg = undef;
 
 debug("ic $ic " . __LINE__);
 	if (defined($_[2]) and $_[2]) {
@@ -1063,23 +1413,22 @@ debug("ic $ic " . __LINE__);
 			1;
 		} or do {
 			if ($@) {
-				Helpers::traceLog("Exception: $@");
+				Common::traceLog("Exception: $@");
 			}
 			else {
-				Helpers::traceLog("Uncaught exception");
+				Common::traceLog("Uncaught exception");
 			}
 			return 0;
 		};
 	}
-debug(Dumper("Activity content", $content));
 
 	my %activity = (
 		'register_dashboard' => \&register,
 
 		'connect' => sub {
 			my %d = (
-				'ip'     => Helpers::getIPAddr(),
-				'version'=> $Configuration::version,
+				'ip'     => Common::getIPAddr(),
+				'version'=> $AppConfig::version,
 			);
 			if (getUserConfiguration('DEDUP') eq 'off') {
 				$d{'backuplocation'} = getUserConfiguration('BACKUPLOCATION');
@@ -1088,7 +1437,7 @@ debug(Dumper("Activity content", $content));
 				$d{'backuplocation'} = (split("#", getUserConfiguration('BACKUPLOCATION')))[1];
 			}
 
-			my $uvf = getCatfile(Helpers::getAppPath(), $Configuration::updateVersionInfo);
+			my $uvf = getCatfile(Common::getAppPath(), $AppConfig::updateVersionInfo);
 			if (-f $uvf and !-z $uvf) {
 				$d{'hasupdate'} = 1;
 			}
@@ -1098,20 +1447,19 @@ debug(Dumper("Activity content", $content));
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%d)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 
 			my $response = request($params);
-debug('connect res');
 
 			updateFileSetSize('backup');
 			updateFileSetSize('localbackup');
@@ -1120,28 +1468,41 @@ debug('connect res');
 		},
 
 		'get_fileset_size' => sub {
-			my $backupsizefile = getCatfile(Helpers::getUsersInternalDirPath($content->{'jobtype'}), $Configuration::backupsizefile);
-			my $backupsizelock = Helpers::getBackupsetSizeLockFile($content->{'jobtype'});
-			unlink($backupsizefile) if (defined($content->{'ondemand'}) && $content->{'ondemand'} == 1 && -f $backupsizefile && !Helpers::isFileLocked($backupsizelock));
+			my $bsf = Common::getJobsPath($content->{'jobtype'}, 'file');
+			my $backupsizelock = Common::getBackupsetSizeLockFile($content->{'jobtype'});
+			if (defined($content->{'ondemand'}) and $content->{'ondemand'} == 1 and
+				-f "$bsf.json" and !Common::isFileLocked($backupsizelock)) {
+				my %backupsetsizes = (-f "$bsf.json")? %{JSON::from_json(getFileContents("$bsf.json"))} : ();
+				my %backupSetInfo;
+				foreach my $filename (keys %backupsetsizes) {
+					$backupSetInfo{$filename} = {
+						'size' => -1,
+						'ts'   => '',
+						'filecount' => 'NA',
+						'type' => $backupsetsizes{$filename}->{'type'}
+					}
+				}
+				Common::fileWrite2("$bsf.json", JSON::to_json(\%backupSetInfo));
+			}
 
 			sendInitialFilesetUpdate($content->{'jobtype'});
 
-			my $status = Configuration::FAILURE;
+			my $status = AppConfig::FAILURE;
 
-			$status = Configuration::SUCCESS if (updateFileSetSize($content->{'jobtype'}));
+			$status = AppConfig::SUCCESS if (updateFileSetSize($content->{'jobtype'}));
 			my %d = ('status' => $status);
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%d)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1151,35 +1512,37 @@ debug('get file size');
 		},
 
 		'update_remote_manage_ip' => sub {
-			my @responseData = Helpers::authenticateUser(getUsername(), &Helpers::getPdata(getUsername())) or return 0;
+			my @responseData = Common::authenticateUser(getUsername(), &Common::getPdata(getUsername())) or return 0;
 			return 0 if ($responseData[0]->{'STATUS'} eq 'FAILURE');
 
 			return 0 if ((exists $responseData[0]->{'plan_type'}) and ($responseData[0]->{'plan_type'} eq 'Mobile-Only') and
 				(exists $responseData[0]->{'accstat'}) and ($responseData[0]->{'accstat'} eq 'M'));
-			Helpers::setUserConfiguration(@responseData);
-			Helpers::saveUserConfiguration() or return 0;
+			my $rmip = getRemoteManageIP();
+			my $prmip= getParentRemoteManageIP();
 
-			return 1;
+			setUserConfiguration(@responseData);
+			saveUserConfiguration() or return 0;
+
+			if (($rmip ne getRemoteManageIP()) or ($prmip ne getParentRemoteManageIP())) {
+				return 1;
+			}
+
+			return 2;
 		},
 
 		'push_notifications' => sub {
-			my %n;
-			foreach (keys %Configuration::notificationsForDashboard) {
-				$n{$_} = Helpers::getNotifications($_);
-			}
-
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1006'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
-				'130' => zlibCompress(to_json(\%n)),
+				'1006'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
+				'130' => zlibCompress(to_json(getNS()->{'nsd'})),
 				#'119' => 1,
 				'116' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1189,24 +1552,27 @@ debug('get file size');
 
 		'get_file_lists' => sub {
 			my $dirname = $content->{'path'};
+			if (utf8::is_utf8($dirname)) {
+				utf8::downgrade($dirname);
+			}
 			my %files;
 			unless (-e $dirname) {
-				$files{'status'} = Configuration::FAILURE;
+				$files{'status'} = AppConfig::FAILURE;
 				$files{'errmsg'} = 'directory does not exists';
 			}
 			else {
 				$dirname .= '/' unless (substr($dirname, -1) eq '/');
 				opendir(my $dh, $dirname) or
-					Helpers::retreat(['can not open', ":$dirname: $!"]);
+					Common::retreat(['can not open', ":$dirname: $!"]);
 
-				$files{'status'} = Configuration::SUCCESS;
+				$files{'status'} = AppConfig::SUCCESS;
 				# $files{'dir'} = $dirname;
 
 				my $filename = '';
 				my $totalFileNameLength=0;
 				my $maxFileNameLength  = 8192; # 8KB
 				while ($filename = readdir $dh) {
-					next if (($filename =~ /^\.\.?$/) || (-l "$dirname$filename") || (!getUserConfiguration('SHOWHIDDEN') && "$dirname$filename" =~ /\/\./));
+					next if (($filename =~ /^\.\.?$/) || (-l "$dirname$filename") || (!getUserConfiguration('SHOWHIDDEN') and "$dirname$filename" =~ /\/\./));
 
 					$totalFileNameLength += (length("$filename")+13); #Restricting if file name's length is more than 4K
 					# last if ($totalFileNameLength > $maxFileNameLength);
@@ -1224,15 +1590,15 @@ debug('get file size');
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%files)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1241,33 +1607,67 @@ debug('get file size');
 		},
 
 		'save_fileset_content' => sub {
-			my $jobName= 'backup';
+			my $jobName = 'backup';
 			$jobName   = $_[0] if (defined $_[0]);
 			my $localSaveOnly = 0;
 			$localSaveOnly = $_[1] if (defined $_[1] and $_[1]);
 
+			$localSaveOnly = $ic if ($ic);
+
 			# $content->{'files'} = zlibRead($content);
 
-			my $bsf = Helpers::getJobsPath($jobName, 'file');
-			my $newkey = '';
+			my $bsf = Common::getJobsPath($jobName, 'file');
 			open(my $bsContents, '>', $bsf) or return 0;
-			if (open(my $bsContentsInfo, '>', ("$bsf.info"))) {
-				for my $key (keys %{$content->{'files'}}) {
-					$newkey = $key;
-					if($content->{'files'}{$key}{'type'} eq 'd'){
-						$newkey .= '/' unless $key =~ m(\/$);
-					}
 
-					print $bsContents "$newkey\n";
-					print $bsContentsInfo "$newkey\n";
-					print $bsContentsInfo "$content->{'files'}{$key}{'type'}\n";
+			my $realkey = '';
+			my %backupSet;
+			if ($jobName =~ /backup/) {
+				my @itemsarr = ();
+				foreach my $key (keys %{$content->{'files'}}) {
+					if (utf8::is_utf8($key)) {
+						utf8::downgrade($key);
+					}
+					push @itemsarr, $key;
 				}
-				close($bsContentsInfo);
+				@itemsarr = Common::verifyEditedFileContent(\@itemsarr);
+				if (scalar(@itemsarr) > 0) {
+					%backupSet = Common::getLocalDataWithType(\@itemsarr, 'backup');
+					%backupSet = Common::skipChildIfParentDirExists(\%backupSet);
+				}
+				else {
+					%backupSet= ();
+				}
 			}
+			else {
+				%backupSet = %{$content->{'files'}};
+			}
+
+			my %backupSetInfo;
+			my %backupsetsizes = (-f "$bsf.json")? %{JSON::from_json(getFileContents("$bsf.json"))} : ();
+			foreach my $key (keys %backupSet) {
+				$realkey = $key;
+				$realkey =~ s/\/$// unless(exists($content->{'files'}{$realkey}));
+
+				print $bsContents "$key\n";
+				if (exists $backupsetsizes{$key}) {
+					$backupSetInfo{$key} = $backupsetsizes{$key};
+				}
+				else {
+					$backupSetInfo{$key} = {
+						'size' => -1,
+						'ts'   => '',
+						'filecount' => 'NA',
+						'type' => $content->{'files'}{$realkey}{'type'}
+					}
+				}
+			}
+			Common::fileWrite2("$bsf.json", JSON::to_json(\%backupSetInfo));
+
 			close($bsContents);
 
 			if ($ic) {
-				Helpers::loadNotifications() and Helpers::setNotification(sprintf("get_%sset_content", $jobName)) and Helpers::saveNotifications();
+				return 1 if ($ic < 0);
+				loadNotifications() and setNotification(sprintf("get_%sset_content", $jobName)) and saveNotifications();
 				return 1;
 			}
 
@@ -1275,32 +1675,31 @@ debug('get file size');
 			my $processingreq;
 			my %notifsizes;
 			if ($jobName ne 'restore') {
-				my $backupsetdata = Helpers::getFileContents($bsf, 'array');
-				($processingreq, %notifsizes) = Helpers::getBackupsetFileSize($backupsetdata);
-				my $backupsizefile = getCatfile(Helpers::getUsersInternalDirPath($jobName), $Configuration::backupsizefile);
-				my %backupsetsizes = (-f $backupsizefile)? %{JSON::from_json(Helpers::getFileContents($backupsizefile))} : ();
-				Helpers::updateDirSizes(\%backupsetsizes, \%notifsizes, 0);
+				my $backupsetdata = getFileContents($bsf, 'array');
+				($processingreq, %notifsizes) = Common::getBackupsetFileSize($backupsetdata);
+				%backupsetsizes = (-f "$bsf.json")? %{JSON::from_json(getFileContents("$bsf.json"))} : ();
+				Common::updateDirSizes(\%backupsetsizes, \%notifsizes, 0);
 				my $rid = '1007';
 				$rid = '1008' if ($jobName eq 'localbackup');
 
 				my %syncdata;
-				$syncdata{'status'} = Configuration::SUCCESS;
+				$syncdata{'status'} = AppConfig::SUCCESS;
 				$syncdata{'ts'} = mktime(localtime);
 				$syncdata{'files'} = {%notifsizes};
 
 				my $scontent = to_json(\%syncdata);
 				my $params = Idrivelib::get_dashboard_params({
 					'0'   => '2',
-					$rid  => (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					$rid  => (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					'130' => zlibCompress($scontent),
 					'116' => 1,
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getRemoteManageIP();
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 
@@ -1309,19 +1708,19 @@ debug('get file size');
 
 			unless ($localSaveOnly) {
 				my %d = (
-					'status' => Configuration::SUCCESS
+					'status' => AppConfig::SUCCESS
 				);
 				my $params = Idrivelib::get_dashboard_params({
 					'0'   => '2',
-					'1019'=> $data->{1019},
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					'1017'=> $data->{1017},
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					'130' => zlibCompress(to_json(\%d)),
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getRemoteManageIP();
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				my $response = request($params);
@@ -1342,60 +1741,33 @@ debug('get file size');
 				$rid = $_[1];
 			}
 
-			my $bsf = Helpers::getJobsPath($jobName, 'file');
+			my $bsf = Common::getJobsPath($jobName, 'file');
 			my %backupSet;
 			my %backupsetsizes;
-			my $backupsetdata = Helpers::getFileContents($bsf, 'array');
-			my ($processingreq, %notifsizes) = Helpers::getBackupsetFileSize($backupsetdata);
-			my $backupsizefile = getCatfile(Helpers::getUsersInternalDirPath($jobName), $Configuration::backupsizefile);
-			if (-f $backupsizefile && -s $backupsizefile > 0) {
-				%backupsetsizes = %{JSON::from_json(Helpers::getFileContents($backupsizefile))};
-			} else {
-				%backupsetsizes = %notifsizes;
-			}
-
-			unless (-e "$bsf.info") {
-					$backupSet{'status'} = Configuration::SUCCESS;
-					$backupSet{'files'} = '';
+			my $backupsetdata = getFileContents($bsf, 'array');
+			my ($processingreq, %notifsizes) = Common::getBackupsetFileSize($backupsetdata);
+			if (-f "$bsf.json" and -s "$bsf.json" > 0) {
+				$backupSet{'files'} = getFileContents("$bsf.json");
 			}
 			else {
-				if (open(my $bsContents, '<', ("$bsf.info"))) {
-					$backupSet{'status'} = Configuration::SUCCESS;
-					while(my $filename = <$bsContents>) {
-						chomp($filename);
-						my $fileType = <$bsContents>;
-						chomp($fileType);
-						$backupSet{'files'}{$filename}{'type'} = $fileType;
-						if (exists $backupsetsizes{$filename}) {
-							$backupSet{'files'}{$filename}{'size'} = $backupsetsizes{$filename}{'size'};
-							$backupSet{'files'}{$filename}{'filecount'} = $backupsetsizes{$filename}{'filecount'};
-						} else {
-							$backupSet{'files'}{$filename}{'size'} = (exists $notifsizes{$filename})? $notifsizes{$filename}{'size'} : '-1';
-							$backupSet{'files'}{$filename}{'filecount'} = (exists $notifsizes{$filename})? $notifsizes{$filename}{'filecount'} : 'NA';
-						}
-					}
-
-					$backupSet{'files'} = '' unless ($backupSet{'files'});
-					close($bsContents);
-				}
-				else {
-					Helpers::traceLog("failed to open file $bsf.info $!");
-				}
+				$backupSet{'status'} = AppConfig::SUCCESS;
+				$backupSet{'files'} = '';
 			}
+
 			$backupSet{'ts'} = mktime(localtime);
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				$rid  => (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				$rid  => (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%backupSet)),
 				#'119' => 1,
 				'116' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1406,20 +1778,20 @@ debug('get file size');
 
 		'get_mount_points' => sub {
 			my %d = (
-				'files' => Helpers::getMountPoints('Writeable'),
-				'status' => Configuration::SUCCESS
+				'files' => Common::getMountPoints('Writeable'),
+				'status' => AppConfig::SUCCESS
 			);
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%d)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1437,36 +1809,37 @@ debug('get file size');
 				$scriptArgs = $_[1];
 			}
 			else {
-				Helpers::tracelog('atleast_script_name_is_required');
+				Common::tracelog('atleast_script_name_is_required');
 				return 0;
 			}
 
 			if ($errmsg eq '') {
-				my $cmd = ("$Configuration::perlBin " . Helpers::getScript($scriptName, 1));
+				my $cmd = ("$AppConfig::perlBin " . Common::getScript($scriptName, 1));
 				$cmd   .= (" $scriptArgs " . getUsername() .  ' 1> /dev/null 2> /dev/null &');
+				$cmd = Common::updateLocaleCmd($cmd);
 				unless (system($cmd) == 0) {
-					$status{'status'} = Configuration::FAILURE
+					$status{'status'} = AppConfig::FAILURE
 				}
 				else {
-					$status{'status'} = Configuration::SUCCESS
+					$status{'status'} = AppConfig::SUCCESS
 				}
 			}
 			else {
-					$status{'errmsg'} = $errmsg;
-					$status{'status'} = Configuration::FAILURE
+				$status{'errmsg'} = $errmsg;
+				$status{'status'} = AppConfig::FAILURE
 			}
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%status)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1477,38 +1850,39 @@ debug('get file size');
 		'stop_job' => sub {
 			my %status;
 			if (defined $_[0]) {
-				if (!Helpers::isFileLocked(getCatfile(Helpers::getJobsPath($_[0]), 'pid.txt')) and
-						(Helpers::getNotifications(sprintf("update_%s_progress", $_[0])) =~ /_Running_/)) {
-					my $nv = Helpers::getNotifications(sprintf("update_%s_progress", $_[0]));
+				if (!Common::isFileLocked(getCatfile(Common::getJobsPath($_[0]), 'pid.txt')) and
+						(getNS(sprintf("update_%s_progress", $_[0])) =~ /_Running_/)) {
+					my $nv = getNS(sprintf("update_%s_progress", $_[0]));
 					$nv =~ s/_Running_/_Aborted_/g;
-					Helpers::loadNotifications() and Helpers::setNotification(sprintf("update_%s_progress", $_[0]), $nv) and Helpers::saveNotifications();
+					loadNotifications() and setNotification(sprintf("update_%s_progress", $_[0]), $nv) and saveNotifications();
 				}
 
-				my $cmd = ("$Configuration::perlBin " . Helpers::getScript('job_termination', 1));
+				my $cmd = ("$AppConfig::perlBin " . Common::getScript('job_termination', 1));
 				$cmd   .= (" $_[0] " . getUsername() . ' 1>/dev/null 2>/dev/null &');
+				$cmd = Common::updateLocaleCmd($cmd);
 				unless (system($cmd) == 0) {
-					$status{'status'} = Configuration::FAILURE
+					$status{'status'} = AppConfig::FAILURE
 				}
 				else {
-					$status{'status'} = Configuration::SUCCESS
+					$status{'status'} = AppConfig::SUCCESS
 				}
 			}
 			else {
-				Helpers::tracelog('job_name_is_required');
-				$status{'status'} = Configuration::FAILURE
+				Common::tracelog('job_name_is_required');
+				$status{'status'} = AppConfig::FAILURE
 			}
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%status)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1527,7 +1901,7 @@ debug('get file size');
 				$rid = $_[1];
 			}
 			else {
-				Helpers::traceLog('job name is required');
+				Common::traceLog('job name is required');
 				return 1;
 			}
 
@@ -1539,14 +1913,14 @@ debug('get file size');
 				$backupActivityOnly = $_[3];
 			}
 
-			unless ($Configuration::availableJobsSchema{$jobName}) {
-				Helpers::traceLog('job name ' . $jobName . ' does not exsits');
+			unless ($AppConfig::availableJobsSchema{$jobName}) {
+				Common::traceLog('job name ' . $jobName . ' does not exsits');
 				return 1;
 			}
 
-			my $progressDetailsFile = getCatfile(Helpers::getJobsPath($jobName), $Configuration::progressDetailsFilePath);
-			my $pidFile             = getCatfile(Helpers::getJobsPath($jobName), 'pid.txt');
-			my $progressPidFile     = getCatfile(Helpers::getJobsPath($jobName), 'dashboardupdate.pid');
+			my $progressDetailsFile = getCatfile(Common::getJobsPath($jobName), $AppConfig::progressDetailsFilePath);
+			my $pidFile             = getCatfile(Common::getJobsPath($jobName), 'pid.txt');
+			my $progressPidFile     = getCatfile(Common::getJobsPath($jobName), 'dashboardupdate.pid');
 
 			my ($pdfHandle, @pdfContent, $pdfc, @progressData,
 					$response, %params, %progressInfo, $p);
@@ -1564,16 +1938,16 @@ debug('get file size');
 			unless ($backupActivityOnly) {
 				$params = Idrivelib::get_dashboard_params({
 					'0'   => '2',
-					$rid  => (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					$rid  => (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					'130' => zlibCompress(to_json(\%progressInfo)),
 					#'119' => 1,
 					'116' => 1,
 					'101' => $at
 				}, 1, 0);
 				$params->{host} = getRemoteManageIP();
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				$response = request($params);
@@ -1587,7 +1961,6 @@ debug('get file size');
 				if ($fn[1] eq 'Running') {
 					$inProgress = 1;
 					$progressStatus = 0;
-					$backupTime = $fn[0];
 				}
 				else {
 					$inProgress = 0;
@@ -1600,25 +1973,24 @@ debug('get file size');
 					elsif ($fn[1] eq 'Aborted') {
 						$progressStatus = 2;
 					}
-
-					$fn[0] = 0 if ($fn[0] eq '');
-					$backupTime = $fn[0];
 				}
-				$backupTime = ($backupTime + $at);
+				$fn[0] = 0 if ($fn[0] eq '');
+				$backupTime = $fn[0];
+				$backupTime = ($backupTime + $at) if ($backupTime);
 				my $s = sprintf("<item inprogress=\"%d\" status=\"%d\" time=\"%d\"/>", $inProgress, $progressStatus, $backupTime);
 
 				my $p = Idrivelib::get_dashboard_params({
 					'0'   => '2',
-					'1012'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					'1012'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					'130' => $s,
 					#'119' => 1,
 					'116' => 1,
 					'101' => $at
 				}, 1, 0);
 				$p->{host} = getRemoteManageIP();
-				$p->{port} = $Configuration::NSPort;
+				$p->{port} = $AppConfig::NSPort;
 				$p->{method} = 'POST';
 				$p->{json} = 1;
 				my $response = request($p);
@@ -1626,8 +1998,8 @@ debug('get file size');
 				my $entAC = lc(getUserConfiguration('PLANTYPE') . getUserConfiguration('PLANSPECIAL'));
 				if ((getUserConfiguration('ADDITIONALACCOUNT') eq 'true') or ($entAC =~ /business/)) {
 					$progressStatus = 3 if ($inProgress);
-					my $isDedup = Helpers::getUserConfiguration('DEDUP');
-					my $backupLocation = Helpers::getUserConfiguration('BACKUPLOCATION');
+					my $isDedup = getUserConfiguration('DEDUP');
+					my $backupLocation = getUserConfiguration('BACKUPLOCATION');
 
 					if ($isDedup eq "on") {
 						$backupLocation = (split("#", $backupLocation))[1];
@@ -1639,12 +2011,12 @@ debug('get file size');
 						),
 						'110' => $backupLocation,
 						'106' => getUsername(),
-						'112' => Helpers::getMachineUID(0),
-						'113' => lc($Configuration::deviceType),
+						'112' => Common::getMachineUID(0),
+						'113' => lc($AppConfig::deviceType),
 						'108' => hostname,
 						'107' => getMachineUser(),
-						'111' => $Configuration::evsVersion,
-						'113' => lc($Configuration::deviceType),
+						'111' => $AppConfig::evsVersion,
+						'113' => lc($AppConfig::deviceType),
 						'123' => sprintf("%s_%d_%d", ($backupTime + $at), $progressStatus, 0),
 						'124' => '',
 						'125' => ($backupTime + $at),
@@ -1653,7 +2025,7 @@ debug('get file size');
 					}, 1, 0);
 					$params->{host} = getParentRemoteManageIP();
 					$params->{host} = getRemoteManageIP() if ($entAC =~ /business/);
-					#$params->{port} = $Configuration::NSPort;
+					#$params->{port} = $AppConfig::NSPort;
 					$params->{method} = 'POST';
 					$params->{json} = 1;
 					$response = request($params);
@@ -1662,53 +2034,63 @@ debug('get file size');
 				#return 1 if ($backupActivityOnly);
 			}
 
-			unless (Helpers::isFileLocked($pidFile)) {
-				#Helpers::traceLog("No $jobName is running. It could be from notification");
-				unlink($pidFile);
-				# TODO:LOG $jobName isn't running
+			unless (Common::isFileLocked($pidFile, undef, 1)) {
+				if (getNS(sprintf("update_%s_progress", $_[0])) =~ /_Running_/) {
+					if (-f getCatfile(Common::getJobsPath($jobName), $AppConfig::logPidFile)) {
+						my $logStatus = Common::checkAndRenameFileWithStatus(Common::getJobsPath($jobName), $jobName);
+						return 1;
+					}
+
+					my $nv = Common::getNotifications(sprintf("update_%s_progress", $jobName));
+					$nv =~ s/_Running_/_Aborted_/g;
+
+					loadNotifications() and setNotification(sprintf("update_%s_progress", $jobName), $nv) and saveNotifications();
+					unlink($pidFile);
+				}
 				return 1;
 			}
 
-			if (Helpers::isFileLocked($progressPidFile)) {
+			if (Common::isFileLocked($progressPidFile)) {
 				return 1;
-			}
-			else {
-				if (open(my $fh, ">>", $progressPidFile)) {
-					unless (flock($fh, 2|4)) {
-						close($fh);
-						Helpers::traceLog(['unable_to_lock_file', $progressPidFile]);
-						return 1;
-					}
-					close($fh);
-				}
-				else {
-					Helpers::traceLog(['unable_to_open_file', $progressPidFile]);
-					return 1;
-				}
 			}
 
 			my $pid = fork();
 
 			unless (defined $pid) {
-				Helpers::retreat('Unable to fork');
+				Common::retreat('Unable to fork');
 			}
 
 			unless ($pid) {
 				$0 = 'IDrive:dashboard:pd';
 				my $previouspdfc = '';
 				my $readTillEOF = 1;
+				my $fh;
+
+				if (open(my $fh, ">>", $progressPidFile)) {
+					unless (flock($fh, 2|4)) {
+						close($fh);
+						Common::traceLog(['unable_to_lock_file', $progressPidFile]);
+						return 1;
+					}
+				}
+				else {
+					Common::traceLog(['unable_to_open_file', $progressPidFile]);
+					return 1;
+				}
 
 				do {{
-					unless (int(Helpers::getFileContents(getCatfile(getUserProfilePath(), 'browsers.txt'))) > 0) {
-						unless (Helpers::isFileLocked($pidFile)) {
+					unless (int(getFileContents(getCatfile(getUserProfilePath(), 'browsers.txt'))) > 0) {
+						if (-f $pidFile and !Common::isFileLocked($pidFile, undef, 1)) {
+							if (-f getCatfile(Common::getJobsPath($jobName), $AppConfig::logPidFile)) {
+								my $logStatus = Common::checkAndRenameFileWithStatus(Common::getJobsPath($jobName), $jobName);
+							}
+							close($fh);
 							exit(0);
 						}
-						#Helpers::traceLog("Sleeping");
 						sleep(5);
 						next;
 					}
-					#Helpers::traceLog("GOING FORWARD");
-					@progressData = Helpers::getProgressDetails($progressDetailsFile);
+					@progressData = Common::getProgressDetails($progressDetailsFile);
 
 					%progressInfo = (
 						'status' => $content->{'notification_value'},
@@ -1721,35 +2103,46 @@ debug('get file size');
 					);
 					$params = Idrivelib::get_dashboard_params({
 						'0'   => '2',
-						$rid  => (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-						'111' => $Configuration::evsVersion,
-						'113' => lc($Configuration::deviceType),
+						$rid  => (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+						'111' => $AppConfig::evsVersion,
+						'113' => lc($AppConfig::deviceType),
 						'130' => zlibCompress(to_json(\%progressInfo)),
 						#'119' => 1,
 						'116' => 1,
 						'101' => $at
 					}, 1, 0);
 					$params->{host} = getRemoteManageIP();
-					#$params->{port} = $Configuration::NSPort;
+					#$params->{port} = $AppConfig::NSPort;
 					$params->{method} = 'POST';
 					$params->{json} = 1;
 					$response = request($params);
 
-					unless (Helpers::isFileLocked($pidFile)) {
+					unless (Common::isFileLocked($pidFile, undef, 1)) {
 						if ($readTillEOF) {
 							$readTillEOF = 0;
 						}
 						else {
-							unlink($pidFile);
-							# TODO:LOG $jobName isn't running
+							if (-f $pidFile and loadNotifications() and (Common::getNotifications(sprintf("update_%s_progress", $_[0])) =~ /_Running_/)) {
+								if (-f getCatfile(Common::getJobsPath($jobName), $AppConfig::logPidFile)) {
+									my $logStatus = Common::checkAndRenameFileWithStatus(Common::getJobsPath($jobName), $jobName);
+									close($fh);
+									exit(0);
+								}
+
+								my $nv = Common::getNotifications(sprintf("update_%s_progress", $jobName));
+								$nv =~ s/_Running_/_Aborted_/g;
+								setNotification(sprintf("update_%s_progress", $jobName), $nv) and saveNotifications();
+								unlink($pidFile);
+							}
+							close($fh);
 							exit(0);
 						}
 					}
 
 					sleep(8);
 				}} while(1);
-				#Helpers::traceLog('Reading progress file completed');
 
+				close($fh);
 				exit(0);
 			}
 
@@ -1762,16 +2155,16 @@ debug('get file size');
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1013'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1013'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%userConfig)),
 				#'119' => 1,
 				'116' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1783,7 +2176,7 @@ debug('get file size');
 			my @userConfig = ($content->{'user_settings'});
 			my $errMsg = '';
 			my %status;
-			$status{'status'} = Configuration::FAILURE;
+			$status{'status'} = AppConfig::FAILURE;
 
 			if (exists $userConfig[0]->{'BACKUPLOCATION'} and (getUserConfiguration('DEDUP') eq 'on') and
 			($userConfig[0]->{'BACKUPLOCATION'} ne getUserConfiguration('BACKUPLOCATION'))) {
@@ -1795,32 +2188,42 @@ debug('get file size');
 				$rl[0] = substr($rl[0], 0, -4);
 
 				my %deviceDetails = ('device_id' => $bl[0]);
-				unless (Helpers::renameDevice(\%deviceDetails, $bl[1], $Configuration::dashbtask)) {
+				unless (Common::renameDevice(\%deviceDetails, $bl[1], $AppConfig::dashbtask)) {
 					$errMsg = 'failed_to_rename_backup_location';
 				}
 				elsif ($bl[0] eq $rl[0]) {
-					$userConfig[0]->{'RESTOREFROM'} = ($Configuration::deviceIDPrefix .
-						$deviceDetails{'device_id'} .$Configuration::deviceIDSuffix ."#" . $bl[1]);
-					Helpers::loadNotifications() and Helpers::setNotification('register_dashboard') and Helpers::saveNotifications();
+					$userConfig[0]->{'RESTOREFROM'} = ($AppConfig::deviceIDPrefix .
+						$deviceDetails{'device_id'} .$AppConfig::deviceIDSuffix ."#" . $bl[1]);
+					loadNotifications() and setNotification('register_dashboard') and saveNotifications();
 				}
 			}
-			elsif (exists $userConfig[0]->{'BDA'} and int($userConfig[0]->{'BDA'}) and Helpers::isLoggedin()) {
-				my $cmd = sprintf("%s %s 1 1 1>/dev/null 2>/dev/null &", $Configuration::perlBin, Helpers::getScript('logout', 1));
+			elsif (exists $userConfig[0]->{'BDA'} and int($userConfig[0]->{'BDA'}) and Common::isLoggedin()) {
+				my $cmd = sprintf("%s %s 1 1 1>/dev/null 2>/dev/null &", $AppConfig::perlBin, Common::getScript('logout', 1));
+				$cmd = Common::updateLocaleCmd($cmd);
 				`$cmd`;
 			}
 
-			if (($errMsg eq '') and Helpers::setUserConfiguration(@userConfig) and
-				Helpers::saveUserConfiguration($ic? 1 : 0)) {
-				$status{'status'} = Configuration::SUCCESS;
+			if (!$ic && $userConfig[0]->{'SHOWHIDDEN'} ne getUserConfiguration('SHOWHIDDEN')) {
+				Common::removeBKPSetSizeCache('backup');
+				Common::removeBKPSetSizeCache('localbackup');
+				sendInitialFilesetUpdate('backup');
+				sendInitialFilesetUpdate('localbackup');
+				updateFileSetSize('backup');
+				updateFileSetSize('localbackup');
 			}
-			elsif ($Configuration::errorMsg ne '') {
-				if ($Configuration::errorMsg eq 'settings_were_not_changed') {
-					$status{'warnings'} = $Configuration::errorMsg;
+
+			if (($errMsg eq '') and setUserConfiguration(@userConfig) and
+				saveUserConfiguration(($ic > -1) ? $ic : 0)) {
+				$status{'status'} = AppConfig::SUCCESS;
+			}
+			elsif ($AppConfig::errorMsg ne '') {
+				if ($AppConfig::errorMsg eq 'settings_were_not_changed') {
+					$status{'warnings'} = $AppConfig::errorMsg;
 				}
 				else {
-					$status{'errmsg'} = $Configuration::errorMsg;
+					$status{'errmsg'} = $AppConfig::errorMsg;
 				}
-				$Configuration::errorMsg = undef;
+				$AppConfig::errorMsg = undef;
 			}
 			else {
 				$status{'errmsg'} = $errMsg;
@@ -1830,15 +2233,15 @@ debug('get file size');
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%status)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1849,32 +2252,32 @@ debug('get file size');
 		'get_logs' => sub {
 			my %data = ();
 			my $l = ();
-			my ($startDate, $endDate) = Helpers::getStartAndEndEpochTime(1);
-			foreach my $job (keys %Configuration::availableJobsSchema) {
-				$l = Helpers::selectLogsBetween(undef,
+			my ($startDate, $endDate) = Common::getStartAndEndEpochTime(1);
+			foreach my $job (keys %AppConfig::availableJobsSchema) {
+				$l = Common::selectLogsBetween(undef,
 				 	$startDate,
 					$endDate,
-					(Helpers::getJobsPath($job) . "/$Configuration::logStatFile"));
+					(Common::getJobsPath($job) . "/$AppConfig::logStatFile"));
 				foreach($l->Keys) {
 					$data{'logs'}{$_} = $l->FETCH($_);
 					$data{'logs'}{$_}{'type'} = $job;
 				}
 			}
 
-			$data{'status'} = Configuration::SUCCESS;
+			$data{'status'} = AppConfig::SUCCESS;
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1014'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1014'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%data)),
 				#'119' => 1,
 				'116' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1884,15 +2287,16 @@ debug('get file size');
 
 		'get_log' => sub {
 			my %logData = ();
-			my $logFile = getCatfile(Helpers::getJobsPath($content->{'type'}, 'logs'), $content->{'filename'});
+			my $logFile = getCatfile(Common::getJobsPath($content->{'type'}, 'logs'), $content->{'filename'});
 
 			if (-f $logFile) {
-				my @logContent = `tail -n30 '$logFile'`;
+				my $logContentCmd = Common::updateLocaleCmd("tail -n30 '$logFile'");
+				my @logContent = `$logContentCmd`;
 
 				my $copyFileLists = 0;
 				my $copySummary   = 0;
 
-				$logData{'status'} = Configuration::SUCCESS;
+				$logData{'status'} = AppConfig::SUCCESS;
 
 				foreach (@logContent) {
 					if (!$copySummary and substr($_, 0, 8) eq 'Summary:') {
@@ -1906,7 +2310,7 @@ debug('get file size');
 						if ($_ =~ m/^Backup End Time/) {
 							my @startTime = localtime((split('_', $content->{'filename'}))[0]);
 							my $et = localtime(mktime(@startTime));
-							$logData{'summary'} .= sprintf("Backup Start Time TBE: %s\n", $et);
+							$logData{'summary'} .= sprintf("Backup Start Time: %s\n", $et);
 						}
 						elsif ($_ =~ m/Restore End Time/) {
 							my @startTime = localtime((split('_', $content->{'filename'}))[0]);
@@ -1925,34 +2329,35 @@ debug('get file size');
 						# $logData{'details'} .= $_;
 					}
 				}
-				
-				# my $notemsg = Helpers::getLocaleString('files_in_trash_may_get_restored_notice');
+
+				# my $notemsg = Common::getLocaleString('files_in_trash_may_get_restored_notice');
 				# $logData{'summary'} =~ s/$notemsg//gs;
-				
-				my @loghead = `head -n20 '$logFile'`;
-				$logData{'details'}	= Helpers::getLocaleString('version_cc_label') . $Configuration::version . "\n";
-				$logData{'details'} .= Helpers::getLocaleString('release_date_cc_label') . $Configuration::releasedate . "\n";
+
+				my $logheadCmd = Common::updateLocaleCmd("head -n20 '$logFile'");
+				my @loghead = `$logheadCmd`;
+				$logData{'details'}	= Common::getLocaleString('version_cc_label') . $AppConfig::version . "\n";
+				$logData{'details'} .= Common::getLocaleString('release_date_cc_label') . $AppConfig::releasedate . "\n";
 				foreach(@loghead) {
-					last if(substr($_, 0, 8) eq 'Summary:');
+					last if (substr($_, 0, 8) eq 'Summary:');
 					$logData{'details'} .= $_;
 				}
 			}
 			else {
-				$logData{'status'} = Configuration::FAILURE;
+				$logData{'status'} = AppConfig::FAILURE;
 				$logData{'errmsg'} = ($content->{'filename'} . ' not_found');
 			}
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%logData)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -1962,55 +2367,24 @@ debug('get file size');
 
 		'delete_log' => sub {
 			my %logData = ();
-			if (Helpers::deleteLog($content->{'type'}, $content->{'filename'}, $content->{'status'})) {
-				$logData{'status'} = Configuration::SUCCESS;
+			if (Common::deleteLog($content->{'type'}, $content->{'filename'}, $content->{'status'})) {
+				$logData{'status'} = AppConfig::SUCCESS;
 			}
 			else {
-				$logData{'status'} = Configuration::FAILURE;
+				$logData{'status'} = AppConfig::FAILURE;
 			}
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%logData)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
-			$params->{method} = 'POST';
-			$params->{json} = 1;
-			my $response = request($params);
-
-			return 1;
-		},
-
-		'save_archive_settings' => sub {
-			my $archiveSettingsFile = getCatfile(
-				Helpers::getJobsPath('periodic_archive'),
-				$Configuration::archiveSettingsFile
-			);
-
-			my %status = (
-				'status' => Configuration::FAILURE
-			);
-			if (Helpers::fileWrite($archiveSettingsFile, to_json($content->{'settings'}))) {
-				$status{'status'} = Configuration::SUCCESS;
-			}
-
-			my $params = Idrivelib::get_dashboard_params({
-				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
-				'130' => zlibCompress(to_json(\%status)),
-				#'119' => 1,
-				'101' => $at
-			}, 1, 0);
-			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -2020,30 +2394,30 @@ debug('get file size');
 
 		'get_settings' => sub {
 			my %settings = ();
-			my $fullExcludeListFile = getCatfile(getUserProfilePath(), $Configuration::fullExcludeListFile);
+			my $fullExcludeListFile = getCatfile(getUserProfilePath(), $AppConfig::fullExcludeListFile);
 			$settings{'fullExclude'} = '';
-			$settings{'fullExclude'} = Helpers::getFileContents("$fullExcludeListFile.info") if (-f "$fullExcludeListFile.info");
+			$settings{'fullExclude'} = getFileContents("$fullExcludeListFile.info") if (-f "$fullExcludeListFile.info");
 
-			my $partialExcludeListFile = getCatfile(getUserProfilePath(), $Configuration::partialExcludeListFile);
+			my $partialExcludeListFile = getCatfile(getUserProfilePath(), $AppConfig::partialExcludeListFile);
 			$settings{'partialExclude'} = '';
-			$settings{'partialExclude'} = Helpers::getFileContents("$partialExcludeListFile.info") if (-f "$partialExcludeListFile.info");
+			$settings{'partialExclude'} = getFileContents("$partialExcludeListFile.info") if (-f "$partialExcludeListFile.info");
 
-			my $regexExcludeListFile = getCatfile(getUserProfilePath(), $Configuration::regexExcludeListFile);
+			my $regexExcludeListFile = getCatfile(getUserProfilePath(), $AppConfig::regexExcludeListFile);
 			$settings{'regexExclude'} = '';
-			$settings{'regexExclude'} = Helpers::getFileContents("$regexExcludeListFile.info") if (-f "$regexExcludeListFile.info");
+			$settings{'regexExclude'} = getFileContents("$regexExcludeListFile.info") if (-f "$regexExcludeListFile.info");
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1015'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1015'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%settings)),
 				#'119' => 1,
 				'116' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -2054,64 +2428,65 @@ debug('get file size');
 		},
 
 		'save_settings' => sub {
-			my $fullExcludeListFile = getCatfile(getUserProfilePath(), $Configuration::fullExcludeListFile);
-			my $partialExcludeListFile = getCatfile(getUserProfilePath(), $Configuration::partialExcludeListFile);
-			my $regexExcludeListFile = getCatfile(getUserProfilePath(), $Configuration::regexExcludeListFile);
+			my $fullExcludeListFile = getCatfile(getUserProfilePath(), $AppConfig::fullExcludeListFile);
+			my $partialExcludeListFile = getCatfile(getUserProfilePath(), $AppConfig::partialExcludeListFile);
+			my $regexExcludeListFile = getCatfile(getUserProfilePath(), $AppConfig::regexExcludeListFile);
 			my $fileContent = '';
 
 			if (defined $content->{'settings'}{'fullExclude'}) {
-				Helpers::fileWrite("$fullExcludeListFile.info", $content->{'settings'}{'fullExclude'});
+				Common::fileWrite("$fullExcludeListFile.info", $content->{'settings'}{'fullExclude'});
 				foreach (split(/\n/, $content->{'settings'}{'fullExclude'})) {
 					next if ($_ eq 'enabled' or $_ eq 'disabled');
 					$fileContent .= "$_\n";
 				}
-				Helpers::fileWrite($fullExcludeListFile, $fileContent);
+				Common::fileWrite($fullExcludeListFile, $fileContent);
 			}
 			if (defined $content->{'settings'}{'partialExclude'}) {
 				$fileContent = '';
-				Helpers::fileWrite("$partialExcludeListFile.info", $content->{'settings'}{'partialExclude'});
+				Common::fileWrite("$partialExcludeListFile.info", $content->{'settings'}{'partialExclude'});
 				foreach (split(/\n/, $content->{'settings'}{'partialExclude'})) {
 					next if ($_ eq 'enabled' or $_ eq 'disabled');
 					$fileContent .= "$_\n";
 				}
-				Helpers::fileWrite($partialExcludeListFile, $fileContent);
+				Common::fileWrite($partialExcludeListFile, $fileContent);
 			}
 			if (defined $content->{'settings'}{'regexExclude'}) {
 				$fileContent = '';
-				Helpers::fileWrite("$regexExcludeListFile.info", $content->{'settings'}{'regexExclude'});
+				Common::fileWrite("$regexExcludeListFile.info", $content->{'settings'}{'regexExclude'});
 				foreach (split(/\n/, $content->{'settings'}{'regexExclude'})) {
 					next if ($_ eq 'enabled' or $_ eq 'disabled');
 					$fileContent .= "$_\n";
 				}
-				Helpers::fileWrite($regexExcludeListFile, $fileContent);
+				Common::fileWrite($regexExcludeListFile, $fileContent);
 			}
 
-			Helpers::removeBKPSetSizeCache('backup');
-			Helpers::removeBKPSetSizeCache('localbackup');
+			Common::removeBKPSetSizeCache('backup');
+			Common::removeBKPSetSizeCache('localbackup');
 			sendInitialFilesetUpdate('backup');
 			sendInitialFilesetUpdate('localbackup');
 			updateFileSetSize('backup');
 			updateFileSetSize('localbackup');
 
 			if ($ic) {
-				Helpers::loadNotifications() and Helpers::setNotification('get_settings') and Helpers::saveNotifications();
+				return 1 if ($ic < 0);
+				loadNotifications() and setNotification('get_settings') and saveNotifications();
 				return 1;
 			}
 
 			my %status = (
-				'status' => Configuration::SUCCESS,
+				'status' => AppConfig::SUCCESS,
 			);
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%status)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -2120,29 +2495,30 @@ debug('get file size');
 		},
 
 		'send_error_report' => sub {
-			my $cmd = ("$Configuration::perlBin " . Helpers::getScript('send_error_report', 1));
+			my $cmd = ("$AppConfig::perlBin " . Common::getScript('send_error_report', 1));
 			$cmd   .= (' \'' . $content->{"username"} . '\' \'' . $content->{"emailids"} . '\' \'' . $content->{"phone"} . '\'');
 			$cmd   .= (' \'' . $content->{'ticketid'} . '\' \'' . $content->{"message"} . '\'');
 
 			my %status;
+			$cmd = Common::updateLocaleCmd($cmd);
 			unless (system($cmd) == 0) {
-				$status{'status'} = Configuration::FAILURE
+				$status{'status'} = AppConfig::FAILURE
 			}
 			else {
-				$status{'status'} = Configuration::SUCCESS
+				$status{'status'} = AppConfig::SUCCESS
 			}
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%status)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -2151,27 +2527,28 @@ debug('get file size');
 		},
 
 		'remote_install' => sub {
-			my $cmd = sprintf("%s %s silent &", $Configuration::perlBin, Helpers::getScript('check_for_update', 1));
+			my $cmd = sprintf("%s %s silent &", $AppConfig::perlBin, Common::getScript('check_for_update', 1));
+			$cmd = Common::updateLocaleCmd($cmd);
 
 			my %status;
 			unless (system($cmd) == 0) {
-			$status{'status'} = Configuration::FAILURE;
+			$status{'status'} = AppConfig::FAILURE;
 			}
 			else {
-				$status{'status'} = Configuration::SUCCESS;
+				$status{'status'} = AppConfig::SUCCESS;
 			}
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%status)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -2181,11 +2558,11 @@ debug('get file size');
 
 		'get_scheduler' => sub {
 			my %scheduler = ();
-			if (Helpers::loadCrontab(getUsername())) {
-				%scheduler = %{Helpers::getCrontab()};
-				if (exists $scheduler{$Configuration::mcUser} and exists $scheduler{$Configuration::mcUser}{getUsername()}) {
+			if (Common::loadCrontab(getUsername())) {
+				%scheduler = %{Common::getCrontab()};
+				if (exists $scheduler{$AppConfig::mcUser} and exists $scheduler{$AppConfig::mcUser}{getUsername()}) {
 					%scheduler = (
-						getUsername() => $scheduler{$Configuration::mcUser}{getUsername()}
+						getUsername() => $scheduler{$AppConfig::mcUser}{getUsername()}
 					);
 				}
 				else {
@@ -2195,16 +2572,16 @@ debug('get file size');
 
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1016'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1016'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%scheduler)),
 				#'119' => 1,
 				'116' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
@@ -2213,20 +2590,20 @@ debug('get file size');
 		},
 
 		'save_scheduler' => sub {
-			my $status = Configuration::FAILURE;
+			my $status = AppConfig::FAILURE;
 			my $jt;
 			my $fileset;
 			my $errmsg = '';
 			my $warnings = '';
 			my %e;
-			if (Helpers::checkCRONServiceStatus() != Helpers::CRON_RUNNING) {
+			if (Common::checkCRONServiceStatus() != Common::CRON_RUNNING) {
 				$errmsg = 'IDrive_cron_service_is_stopped';
 			}
-			elsif (exists $content->{'crontab'}{getUsername()} and Helpers::loadCrontab()) {
+			elsif (exists $content->{'crontab'}{getUsername()} and Common::loadCrontab()) {
 				foreach my $jobType (keys %{$content->{'crontab'}{getUsername()}}) {
 					last if ($errmsg ne '');
 
-					if($jobType eq 'archive' && getUserConfiguration('DEDUP') eq 'off' && Helpers::getUserConfiguration('BACKUPTYPE') =~ /relative/) {
+					if ($jobType eq 'archive' and getUserConfiguration('DEDUP') eq 'off' and getUserConfiguration('BACKUPTYPE') =~ /relative/) {
 						$warnings = 'no_archive_for_relative_backup_type';
 						next;
 					}
@@ -2236,37 +2613,37 @@ debug('get file size');
 						$jt = $jobType;
 						$jt = 'localbackup' if ($jobName eq 'local_backupset');
 						$jt = 'backup' if ($jt eq 'archive');
-						if (exists $Configuration::availableJobsSchema{$jt}) {
-							$fileset = Helpers::getJobsPath($jt, 'file');
+						if (exists $AppConfig::availableJobsSchema{$jt}) {
+							$fileset = Common::getJobsPath($jt, 'file');
 							unless (-f $fileset and !-z $fileset) {
 								$warnings = "$jobName: backup set is empty\n";
-								if(exists $content->{'crontab'}{getUsername()}{$jobType}{$jobName}{'settings'} &&
-								exists $content->{'crontab'}{getUsername()}{$jobType}{$jobName}{'settings'}{'frequency'} &&
+								if (exists $content->{'crontab'}{getUsername()}{$jobType}{$jobName}{'settings'} and
+								exists $content->{'crontab'}{getUsername()}{$jobType}{$jobName}{'settings'}{'frequency'} and
 								$content->{'crontab'}{getUsername()}{$jobType}{$jobName}{'settings'}{'frequency'} eq 'immediate') {
 									next;
 								}
 							}
 						}
 
-						unless (Helpers::setCrontab($jobType, $jobName, $content->{'crontab'}{getUsername()}{$jobType}{$jobName})) {
-							Helpers::createCrontab($jobType, $jobName);
-							Helpers::setCrontab($jobType, $jobName, $content->{'crontab'}{getUsername()}{$jobType}{$jobName});
+						unless (Common::setCrontab($jobType, $jobName, $content->{'crontab'}{getUsername()}{$jobType}{$jobName})) {
+							Common::createCrontab($jobType, $jobName);
+							Common::setCrontab($jobType, $jobName, $content->{'crontab'}{getUsername()}{$jobType}{$jobName});
 						}
 
 						#Checking if another job is already in progress
-						if (Helpers::getCrontab($jobType, $jobName, '{settings}{frequency}') eq 'immediate') {
-							my $isJobRunning = Helpers::isJobRunning($jobName);
-							if($isJobRunning) {
+						if (Common::getCrontab($jobType, $jobName, '{settings}{frequency}') eq 'immediate') {
+							my $isJobRunning = Common::isJobRunning($jobName);
+							if ($isJobRunning) {
 								# need to return error message to dashboard.
 debug('backup_job_is_already_in_progress_try_again');
-								$status = Configuration::FAILURE;
+								$status = AppConfig::FAILURE;
 								$errmsg = 'Job_is_already_in_progress_Please_try_again';
 								last;
 							}
 						}
-						%e = Helpers::setCronCMD($jobType, $jobName);
-						if ($e{'status'} eq Configuration::FAILURE) {
-							$status = Configuration::FAILURE;
+						%e = Common::setCronCMD($jobType, $jobName);
+						if ($e{'status'} eq AppConfig::FAILURE) {
+							$status = AppConfig::FAILURE;
 							$errmsg = $e{'errmsg'} || '';
 							last;
 						}
@@ -2274,8 +2651,8 @@ debug('backup_job_is_already_in_progress_try_again');
 				}
 
 				if ($errmsg eq '') {
-					$status = Configuration::SUCCESS;
-					Helpers::saveCrontab(($ic ? 1 : 0));
+					$status = AppConfig::SUCCESS;
+					Common::saveCrontab((($ic > -1) ? $ic : 0));
 				}
 			}
 			return 1 if ($ic);
@@ -2287,39 +2664,103 @@ debug('backup_job_is_already_in_progress_try_again');
 			);
 			my $params = Idrivelib::get_dashboard_params({
 				'0'   => '2',
-				'1019'=> $data->{1019},
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'1017'=> $data->{1017},
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
 				'130' => zlibCompress(to_json(\%s)),
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
 			return 1;
 		},
+
+		'alert_status_update' => sub {
+			my $entAC = lc(getUserConfiguration('PLANTYPE') . getUserConfiguration('PLANSPECIAL'));
+			if ((getUserConfiguration('ADDITIONALACCOUNT') eq 'true') or ($entAC =~ /business/)) {
+				my $backupLocation = getUserConfiguration('BACKUPLOCATION');
+				if (getUserConfiguration('DEDUP') eq "on") {
+					$backupLocation = (split("#", $backupLocation))[1];
+				}
+
+				my $params = Idrivelib::get_dashboard_params({
+					'0'   => '3',
+					'109' => (
+						($entAC =~ /business/) ? getUsername() : getUserConfiguration('PARENTACCOUNT')
+					),
+					'106' => getUsername(),
+					'112' => Common::getMachineUID(0),
+					'108' => hostname,
+					'107' => getMachineUser(),
+					'110' => $backupLocation,
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
+					'121' => (time() + $at) . '_' . int(getUserConfiguration('DDA')),
+					'124' => sprintf("<item type=\"%d\" errcode=\"%s\"/>", (split('', $content->{'notification_value'}))[0], $content->{'notification_value'}),
+					#'119' => 1,
+					'101' => $at
+				}, 1, 0);
+				$params->{host} = getParentRemoteManageIP();
+				$params->{host} = getRemoteManageIP() if ($entAC =~ /business/);
+				$params->{method} = 'POST';
+				$params->{json} = 1;
+				my $response = request($params);
+debug('update alert status' . __LINE__);
+			}
+			return 1;
+		},
+
+		'update_device_info' => sub {
+			my @deviceInfo = split('-', $content->{'notification_value'});
+			my $params = Idrivelib::get_dashboard_params({
+				'0'   => '15',
+				'1018'=> getUsername(),
+				'107' => $deviceInfo[2],
+				'112' => $deviceInfo[0],
+				'147' => $deviceInfo[1],
+				'148' => (time() + $at),
+				'101' => $at
+			}, 1, 0);
+			$params->{host} = getRemoteManageIP();
+			$params->{method} = 'POST';
+			$params->{json} = 1;
+			my $response = request($params);
+			unless ($deviceInfo[3] eq 'n') {
+				$deviceInfo[0] =~ s/$AppConfig::deviceUIDPrefix//g;
+				restoreBackupset($deviceInfo[0], $deviceInfo[2]);
+				restoreLocalBackupset($deviceInfo[0], $deviceInfo[2]);
+				restoreSchduledJobs($deviceInfo[0], $deviceInfo[2]);
+				restoreUserSettings($deviceInfo[0], $deviceInfo[2]);
+				restoreSettings($deviceInfo[0], $deviceInfo[2]);
+
+				return 1;
+			}
+
+			return -1;
+		}
 	);
 
 	$activity{'send_error_msg'} = sub {
 		my %s = (
-			'status' => Configuration::FAILURE,
+			'status' => AppConfig::FAILURE,
 			'errmsg' => ("unable_to_" . $content->{'channel'}),
 			'warnings' => $_[0],
 		);
 		my $params = Idrivelib::get_dashboard_params({
 			'0'   => '2',
-			'1019'=> $data->{1019},
-			'111' => $Configuration::evsVersion,
-			'113' => lc($Configuration::deviceType),
+			'1017'=> $data->{1017},
+			'111' => $AppConfig::evsVersion,
+			'113' => lc($AppConfig::deviceType),
 			'130' => zlibCompress(to_json(\%s)),
 			#'119' => 1,
 			'101' => $at
 		}, 1, 0);
 		$params->{host} = getRemoteManageIP();
-		#$params->{port} = $Configuration::NSPort;
+		#$params->{port} = $AppConfig::NSPort;
 		$params->{method} = 'POST';
 		$params->{json} = 1;
 		my $response = request($params);
@@ -2327,19 +2768,19 @@ debug('backup_job_is_already_in_progress_try_again');
 	};
 
 	$activity{'update_acc_status'} = sub {
-		my $c = sprintf("<item disable=\"%d\" block=\"%d\" hiddenFlag=\"0\"/>", Helpers::getUserConfiguration('DDA'), Helpers::getUserConfiguration('BDA'));
+		my $c = sprintf("<item disable=\"%d\" block=\"%d\" hiddenFlag=\"0\"/>", getUserConfiguration('DDA'), getUserConfiguration('BDA'));
 		my $params = Idrivelib::get_dashboard_params({
 			'0'   => '2',
-			'1000'=> (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-			'111' => $Configuration::evsVersion,
-			'113' => lc($Configuration::deviceType),
+			'1000'=> (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+			'111' => $AppConfig::evsVersion,
+			'113' => lc($AppConfig::deviceType),
 			'130' => $c,
 			'116' => 1,
 			#'119' => 1,
 			'101' => $at
 		}, 1, 0);
 		$params->{host} = getRemoteManageIP();
-		#$params->{port} = $Configuration::NSPort;
+		#$params->{port} = $AppConfig::NSPort;
 		$params->{method} = 'POST';
 		$params->{json} = 1;
 		my $response = request($params);
@@ -2364,7 +2805,7 @@ debug('backup_job_is_already_in_progress_try_again');
 
 	$activity{'start_backup'} = sub {
 		my $errmsg = '';
-		my %ArchJobDetails = Helpers::getRunningJobs('archive');
+		my %ArchJobDetails = Common::getRunningJobs('archive');
 		$errmsg = 'archive_cleanup_is_in_progress_please_try_again_later' if (%ArchJobDetails);
 		return $activity{'start_job'}('backup_scripts', 'dashboard', $errmsg);
 	};
@@ -2383,8 +2824,8 @@ debug('backup_job_is_already_in_progress_try_again');
 
 	$activity{'start_restore'} = sub {
 		my @userConfig = ($content->{'user_settings'});
-		if (exists $content->{'user_settings'} and Helpers::setUserConfiguration(@userConfig)
-				and Helpers::saveUserConfiguration(0)) {
+		if (exists $content->{'user_settings'} and setUserConfiguration(@userConfig)
+				and saveUserConfiguration(0)) {
 		}
 		$activity{'save_fileset_content'}('restore', 1);
 		return $activity{'start_job'}('restore_script', 'dashboard');
@@ -2413,11 +2854,11 @@ debug('backup_job_is_already_in_progress_try_again');
 	if ($content->{'channel'} and $activity{$content->{'channel'}}) {
 debug("CHANNEL: $content->{'channel'}");
 
-		my $uConfStatus = Helpers::loadUserConfiguration();
+		my $uConfStatus = Common::loadUserConfiguration();
 		if (defined($_[1]) and $_[1]) {
 			if (($uConfStatus != 1) and ($content->{'channel'} ne 'connect')) {
 				my $errMsg = '';
-				$errMsg = $Configuration::errorDetails{$uConfStatus} if (exists $Configuration::errorDetails{$uConfStatus});
+				$errMsg = $AppConfig::errorDetails{$uConfStatus} if (exists $AppConfig::errorDetails{$uConfStatus});
 debug("error msg $errMsg ");
 				return $activity{'send_error_msg'}($errMsg);
 			}
@@ -2429,10 +2870,10 @@ debug("error msg $errMsg ");
 		} or do {
 			$actStatus = 0;
 			if ($@) {
-				Helpers::traceLog("Exception: $@");
+				Common::traceLog("Exception: $@");
 			}
 			else {
-				Helpers::traceLog("Uncaught exception");
+				Common::traceLog("Uncaught exception");
 			}
 		};
 		return $actStatus;
@@ -2441,7 +2882,7 @@ debug("error msg $errMsg ");
 		return 1;
 	}
 
-	Helpers::traceLog('CHANNEL: ' . ($content->{'channel'} || '') . ' not defined');
+	Common::traceLog('CHANNEL: ' . ($content->{'channel'} || '') . ' not defined');
 	return 0;
 }
 
@@ -2454,10 +2895,10 @@ sub syncFilesetSizeWithFork {
 	my $backuptype = $_[0];
 	return 0 unless ($backuptype);
 
-	my $backupsetfile = getCatfile(Helpers::getUsersInternalDirPath($backuptype), $Configuration::backupsetFile);
-	return 0 if (!-f $backupsetfile || !-s $backupsetfile);
-	my $backupsizesynclock = Helpers::getBackupsetSizeSycnLockFile($backuptype);
-	return 0 if (Helpers::isFileLocked($backupsizesynclock));
+	my $bsf = Common::getJobsPath($backuptype, 'file');
+	return 0 if (!-f $bsf || !-s $bsf);
+	my $backupsizesynclock = Common::getBackupsetSizeSycnLockFile($backuptype);
+	return 0 if (Common::isFileLocked($backupsizesynclock));
 
 	my $syncforkid = fork();
 	if ($syncforkid == 0) {
@@ -2481,58 +2922,57 @@ sub syncFilesetSizeOnIntervals {
 	my $backuptype = $_[0];
 	exit(0) unless ($backuptype);
 
-	my $backupsetfile = Helpers::getJobsPath($backuptype, 'file');
-	exit(0) if (!-f $backupsetfile || -s $backupsetfile == 0);
+	my $bsf = Common::getJobsPath($backuptype, 'file');
+	exit(0) if (!-f $bsf || -s $bsf == 0);
 
-	my $backupsizesynclock = Helpers::getBackupsetSizeSycnLockFile($backuptype);
-	exit(0) if (Helpers::isFileLocked($backupsizesynclock));
+	my $backupsizesynclock = Common::getBackupsetSizeSycnLockFile($backuptype);
+	exit(0) if (Common::isFileLocked($backupsizesynclock));
 
-	Helpers::fileLock($backupsizesynclock);
+	Common::fileLock($backupsizesynclock);
 
-	my $lastts = $Configuration::sizepollintvl;
+	my $lastts = $AppConfig::sizepollintvl;
 	my %backupsetsizes = ();
 	my %syncdata;
 	my $rid = '1007';
 	$rid = '1008' if ($backuptype eq 'localbackup');
 
-	my $backupsetdata = Helpers::getFileContents($backupsetfile, 'array');
-	my ($processingreq, %notifsizes) = Helpers::getBackupsetFileSize($backupsetdata);
-	my $itemCount = Helpers::getBackupsetItemCount($backupsetfile);
-	my $processeditemcount = Helpers::getBackupsetFileAndMissingCount($backupsetfile);
+	my $backupsetdata = getFileContents($bsf, 'array');
+	my ($processingreq, %notifsizes) = Common::getBackupsetFileSize($backupsetdata);
+	my $itemCount = Common::getBackupsetItemCount($bsf);
+	my $processeditemcount = Common::getBackupsetFileAndMissingCount($bsf);
 	my ($prevprocessedcount, $prepolltime) = (0, 0);
-	my $backupsizefile = getCatfile(Helpers::getUsersInternalDirPath($backuptype), $Configuration::backupsizefile);
 
 	while(1) {
-		end() unless(Helpers::isFileLocked($selfPIDFile));
-		if (!-f $backupsizefile) {
+		end() unless(Common::isFileLocked($selfPIDFile));
+		if (!-f "$bsf.json") {
 			sleep(2);
 			next;
 		}
 
-		%backupsetsizes = (-f $backupsizefile)? %{JSON::from_json(Helpers::getFileContents($backupsizefile))} : ();
-		$processeditemcount = Helpers::updateDirSizes(\%backupsetsizes, \%notifsizes, $processeditemcount);
+		%backupsetsizes = (-f "$bsf.json")? %{JSON::from_json(getFileContents("$bsf.json"))} : ();
+		$processeditemcount = Common::updateDirSizes(\%backupsetsizes, \%notifsizes, $processeditemcount);
 
-		$syncdata{'status'} = Configuration::SUCCESS;
+		$syncdata{'status'} = AppConfig::SUCCESS;
 		$syncdata{'ts'} = mktime(localtime);
 		$syncdata{'files'} = {%notifsizes};
 		if ($prepolltime < 60) {
-			$Configuration::sizepollintvl = 3;
+			$AppConfig::sizepollintvl = 3;
 			$prepolltime += 0.1;
 		}
 		elsif ($prepolltime < 120) {
-			$Configuration::sizepollintvl = 5;
+			$AppConfig::sizepollintvl = 5;
 			$prepolltime += 0.1;
 		}
 
-		if ($prevprocessedcount != $processeditemcount && ($lastts >= $Configuration::sizepollintvl || $itemCount <= $processeditemcount)) {
+		if ($prevprocessedcount != $processeditemcount and ($lastts >= $AppConfig::sizepollintvl || $itemCount <= $processeditemcount)) {
 			$prevprocessedcount = $processeditemcount;
 			if ($prepolltime < 120) {
 				my $scontent = to_json(\%syncdata);
 				my $params = Idrivelib::get_dashboard_params({
 					'0'   => '2',
-					$rid  => (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					$rid  => (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					'130' => zlibCompress($scontent),
 					'116' => 1,
 					#'119' => 1,
@@ -2540,13 +2980,13 @@ sub syncFilesetSizeOnIntervals {
 				}, 1, 0);
 
 				$params->{host} = getRemoteManageIP();
-				#$params->{port} = $Configuration::NSPort;
+				#$params->{port} = $AppConfig::NSPort;
 				$params->{method} = 'POST';
 				$params->{json} = 1;
 				my $response = request($params);
 			}
 			else {
-				Helpers::loadNotifications() and Helpers::setNotification(sprintf("get_%sset_content", $backuptype)) and Helpers::saveNotifications();
+				loadNotifications() and setNotification(sprintf("get_%sset_content", $backuptype)) and saveNotifications();
 			}
 
 			$lastts = 0;
@@ -2555,16 +2995,16 @@ sub syncFilesetSizeOnIntervals {
 		if ($itemCount <= $processeditemcount) {
 			# other browsers will not come to know about the changes
 			if ($prepolltime < 120) {
-				Helpers::loadNotifications() and Helpers::setNotification(sprintf("get_%sset_content", $backuptype)) and Helpers::saveNotifications();
+#				loadNotifications() and setNotification(sprintf("get_%sset_content", $backuptype)) and saveNotifications();
 			}
 
-			$Configuration::sizepollintvl = 5;
+			$AppConfig::sizepollintvl = 5;
 			unlink($backupsizesynclock);
 			exit(0);
 		}
 
 		#select(undef, undef, undef, 0.1);
-		Helpers::sleepForMilliSec(100); # Sleep for 100 milliseconds
+		Common::sleepForMilliSec(500); # Sleep for 100 milliseconds
 		$lastts += 0.1;
 	}
 }
@@ -2575,26 +3015,26 @@ sub syncFilesetSizeOnIntervals {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub sendInitialFilesetUpdate {
-	my $backupsetfile = getCatfile(Helpers::getUsersInternalDirPath($_[0]), $Configuration::backupsetFile);
+	my $bsf = getCatfile(Common::getJobsPath($_[0]), $AppConfig::backupsetFile);
 	my $processingreq = 0;
 	my %notifsizes;
-	if (-f $backupsetfile && -s $backupsetfile > 0) {
-		my $backupsetdata = Helpers::getFileContents($backupsetfile, 'array');
-		($processingreq, %notifsizes) = Helpers::getBackupsetFileSize($backupsetdata);
+	if (-f $bsf and -s $bsf > 0) {
+		my $backupsetdata = getFileContents($bsf, 'array');
+		($processingreq, %notifsizes) = Common::getBackupsetFileSize($backupsetdata);
 
 		my $rid = '1007';
 		$rid = '1008' if ($_[0] eq 'localbackup');
 
 		my %syncdata;
-		$syncdata{'status'} = Configuration::SUCCESS;
+		$syncdata{'status'} = AppConfig::SUCCESS;
 		$syncdata{'ts'} = mktime(localtime);
 		$syncdata{'files'} = {%notifsizes};
 		my $scontent = to_json(\%syncdata);
 		my $params = Idrivelib::get_dashboard_params({
 			'0'   => '2',
-			$rid  => (getUsername() . Helpers::getMachineUID(0) . getMachineUser()),
-			'111' => $Configuration::evsVersion,
-			'113' => lc($Configuration::deviceType),
+			$rid  => (getUsername() . Common::getMachineUID(0) . getMachineUser()),
+			'111' => $AppConfig::evsVersion,
+			'113' => lc($AppConfig::deviceType),
 			'130' => zlibCompress($scontent),
 			'116' => 1,
 			#'119' => 1,
@@ -2602,7 +3042,7 @@ sub sendInitialFilesetUpdate {
 		}, 1, 0);
 
 		$params->{host} = getRemoteManageIP();
-		#$params->{port} = $Configuration::NSPort;
+		#$params->{port} = $AppConfig::NSPort;
 		$params->{method} = 'POST';
 		$params->{json} = 1;
 
@@ -2621,10 +3061,10 @@ sub updateFileSetSize {
 	my $backuptype = $_[0];
 	return 0 unless ($backuptype);
 
-	my $backupsizelock = Helpers::getBackupsetSizeLockFile($backuptype);
+	my $backupsizelock = Common::getBackupsetSizeLockFile($backuptype);
 
-	my $backupsetfile = getCatfile(Helpers::getUsersInternalDirPath($backuptype), $Configuration::backupsetFile);
-	return 0 if (!-f $backupsetfile || !-s $backupsetfile);
+	my $bsf = Common::getJobsPath($backuptype, 'file');
+	return 0 if (!-f $bsf || !-s $bsf);
 
 	my $forkpid = fork();
 	if ($forkpid == 0) {
@@ -2633,7 +3073,7 @@ sub updateFileSetSize {
 		my $calcforkpid = fork();
 		if ($calcforkpid == 0) {
 			$0 = 'IDrive:dashboard:cc';
-			Helpers::calculateBackupsetDirectorySize($backuptype, $selfPIDFile) unless (Helpers::isFileLocked($backupsizelock, 1));
+			Common::calculateBackupsetSize($backuptype, $selfPIDFile) unless (Common::isFileLocked($backupsizelock, 1));
 			exit(0);
 		}
 
@@ -2655,7 +3095,7 @@ sub watchDashboardActivities {
 	my $pid = fork();
 
 	unless (defined $pid) {
-		Helpers::retreat('Unable to fork');
+		Common::retreat('Unable to fork');
 	}
 
 	unless ($pid) {
@@ -2665,30 +3105,30 @@ sub watchDashboardActivities {
 		my $subscribe = 1;
 		my ($response, $param);
 
-	  my $c   = (getUsername() . Helpers::getMachineUID(0) . getMachineUser() . $_[0]);
+	  my $c   = (getUsername() . Common::getMachineUID(0) . getMachineUser() . $_[0]);
 		my $rmip= getRemoteManageIP();
 		while(1) {
-			end() if ((getppid() == 1) or (!Helpers::isFileLocked($selfPIDFile)));
+			end() if ((getppid() == 1) or (!Common::isFileLocked($selfPIDFile)));
 debug('watchDashboardActivities');
 			if ($subscribe) {
 				$param = Idrivelib::get_dashboard_params({
 					'0'   => '11',
-					'1019'=> $c,
+					'1017'=> $c,
 					'102' => 1,
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$param->{host} = $rmip;
-				$param->{port} = $Configuration::NSPort;
+				$param->{port} = $AppConfig::NSPort;
 				$param->{method} = 'POST';
 				$param->{json} = 1;
 				$response = request($param);
 				if (($response->{'DATA'}) and (reftype($response->{'DATA'}) eq 'ARRAY')) {
 					$response->{'DATA'}[0] = Idrivelib::get_dashboard_params($response->{'DATA'}[0], 0, 0);
-					$response->{'DATA'}[0] = $response->{'DATA'}[0]{'queryString'};
-					$response->{'DATA'}[0]{1019} = (getUsername() . Helpers::getMachineUID(0) . getMachineUser() . $_[0]);
+					$response->{'DATA'}[0] = $response->{'DATA'}[0]{'data'};
+					$response->{'DATA'}[0]{1017} = (getUsername() . Common::getMachineUID(0) . getMachineUser() . $_[0]);
 
 					if ($response->{'DATA'}[0]{'type'} eq 'data') {
 						if (startActivity($response->{'DATA'}[0], 1)) {
@@ -2700,35 +3140,56 @@ debug('watchDashboardActivities');
 			else {
 				$param = Idrivelib::get_dashboard_params({
 					'0'   => '14',
-					'1019'=> $c,
+					'1017'=> $c,
 					'102' => 1,
-					'111' => $Configuration::evsVersion,
-					'113' => lc($Configuration::deviceType),
+					'111' => $AppConfig::evsVersion,
+					'113' => lc($AppConfig::deviceType),
 					#'119' => 1,
 					'101' => $at
 				}, 1, 0);
 				$param->{host} = $rmip;
-				$param->{port} = $Configuration::NSPort;
+				$param->{port} = $AppConfig::NSPort;
 				$param->{method} = 'POST';
 				$param->{json} = 1;
 				$response = request($param);
-#debug(Helpers::encryptString(zlibCompress(Dumper($response))));
+#debug(Common::encryptString(zlibCompress(Dumper($response))));
 				if (($response->{'DATA'}) and (reftype($response->{'DATA'}) eq 'HASH')) {
 					$response = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 0);
-					$response = $response->{'queryString'};
-					$response->{1019} = (getUsername() . Helpers::getMachineUID(0) . getMachineUser() . $_[0]);
+					$response = $response->{'data'};
+					$response->{1017} = (getUsername() . Common::getMachineUID(0) . getMachineUser() . $_[0]);
 					startActivity($response, 1);
 					$subscribe = 0;
 				}
 		}
 
-			Helpers::killPIDs(\@others, 0);
+			Common::killPIDs(\@others, 0);
 		}
 
 		exit(0);
 	}
 
 	return $pid;
+}
+#*****************************************************************************************************
+# Subroutine			: removeDeviceInfo
+# Objective				: Remove the given device info from browsers section
+# Added By				: Yogesh Kumar
+#****************************************************************************************************/
+sub removeDeviceInfo {
+	my $params = Idrivelib::get_dashboard_params({
+		'0'   => '15',
+		'1018'=> getUsername(),
+		'107' => $_[0]->{'pname'},
+		'112' => $_[0]->{'mid'},
+		'120' => 1,
+		'147' => $_[0]->{'did'},
+		'148' => (time() + $at),
+		'101' => $at
+	}, 1, 0);
+	$params->{host} = getRemoteManageIP();
+	$params->{method} = 'POST';
+	$params->{json} = 1;
+	return request($params);
 }
 
 #*****************************************************************************************************
@@ -2740,7 +3201,7 @@ sub watchDashboardLoginActivity {
 	my $pid = fork();
 
 	unless (defined $pid) {
-		Helpers::retreat('Unable to fork');
+		Common::retreat('Unable to fork');
 	}
 
 	unless ($pid) {
@@ -2751,74 +3212,80 @@ sub watchDashboardLoginActivity {
 		my %data;
 		my (@temp);
 		my (%activeBrowsers, %bt);
-		my ($res, $td);
+		my ($res, $td, $did);
 		my $browsersCount = -1;
+		my $muname = getMachineUser();
+		my $UCMTS  = stat(Common::getUserConfigurationFile())->mtime;
+		my $userConfigMTS = $UCMTS;
 		while(1) {
-			end() if ((getppid() == 1) or (!Helpers::isFileLocked($selfPIDFile)));
+			end() if ((getppid() == 1) or (!Common::isFileLocked($selfPIDFile)));
+			$UCMTS = stat(Common::getUserConfigurationFile())->mtime if (-f Common::getUserConfigurationFile());
+			if ($userConfigMTS != $UCMTS) {
+				$userConfigMTS = $UCMTS;
+				Common::loadUserConfiguration();
+			}
 			$params = Idrivelib::get_dashboard_params({
 				'0'   => '11',
-				'1020'=> getUsername(),
+				'1018'=> getUsername(),
 				'102' => 1,
-				'111' => $Configuration::evsVersion,
-				'113' => lc($Configuration::deviceType),
+				'111' => $AppConfig::evsVersion,
+				'113' => lc($AppConfig::deviceType),
+				'116' => 1,
 				#'119' => 1,
 				'101' => $at
 			}, 1, 0);
 			$params->{host} = getRemoteManageIP();
-			#$params->{port} = $Configuration::NSPort;
+			#$params->{port} = $AppConfig::NSPort;
 			$params->{method} = 'POST';
 			$params->{json} = 1;
 			my $response = request($params);
 debug('watch for dashboard login ' . __LINE__);
 
-			%bt = (
-				'count' => 0,
-				'stage' => 0
-			);
+			$bt{'count'} = 0;
+			$bt{'stage'} = 0;
 
-			if ($response->{'DATA'}) {
-				if (reftype($response->{'DATA'}) eq 'HASH') {
-					$response->{'DATA'} = Idrivelib::get_dashboard_params($response->{'DATA'}, 0, 1);
-					$response->{'DATA'} = $response->{'DATA'}{'queryString'};
-				}
-				elsif (reftype($response->{'DATA'}) eq 'ARRAY') {
-					$response->{'DATA'}[0] = Idrivelib::get_dashboard_params($response->{'DATA'}[0], 0, 1);
-					$response->{'DATA'}[0] = $response->{'DATA'}[0]{'queryString'};
-				}
-				else {
-					$response->{'DATA'}{'type'} = 'noop';
-				}
-debug('browser raw data: ' . Dumper($response));
-
-				unless ((reftype($response->{'DATA'}) eq 'HASH') and $response->{'DATA'}{'type'}) {
-					%data = %{$response->{'DATA'}[0]};
-					if ($data{'type'} and $data{'type'} eq 'noop') {
-						%bt = ();
+			if ($response->{'DATA'} and exists $response->{'DATA'}{'content'}) {
+				if (exists $response->{'DATA'}{'content'}{'device'}) {
+					$did = (split('#', getUserConfiguration('BACKUPLOCATION')))[0];
+					$did =~ s/^$AppConfig::deviceIDPrefix//;
+					$did =~ s/$AppConfig::deviceIDSuffix$//;
+					foreach (@{$response->{'DATA'}{'content'}{'device'}}) {
+						if (($_->{'mid'} eq Common::getMachineUID()) and ($_->{'did'} eq $did)) {
+							Common::traceLog('backup_location_is_adopted_by_another_machine');
+							Common::loadCrontab();
+							Common::setCrontab('otherInfo', 'settings', {'status' => 'INACTIVE'}, ' ');
+							Common::saveCrontab(0);
+							removeDeviceInfo($_);
+							my $cmd = sprintf("%s %s 1 0", $AppConfig::perlBin, Common::getScript('logout', 1));
+							$cmd = Common::updateLocaleCmd($cmd);
+							`$cmd`;
+							setUserConfiguration('BACKUPLOCATION', '');
+							saveUserConfiguration(0, 1);
+							Common::stopDashboardService($AppConfig::mcUser, Common::getAppPath());
+							end();
+						}
+						elsif (($_->{'dtime'} ne '') and (time() - $_->{'dtime'}) >= 604800) {
+							removeDeviceInfo($_);
+						}
 					}
-					elsif ($data{'content'}) {
-debug('browser content: ' . $data{content});
-						foreach (split(/###/, $data{'content'})) {
-							next if ($_ eq '');
+				}
+				if (exists $response->{'DATA'}{'content'}{'browser'}) {
+					foreach (@{$response->{'DATA'}{'content'}{'browser'}}) {
+						$td = ((time() + $at) - $_->{'time'});
+						next if ($td >= 300);
 
-							@temp = Helpers::parseEVSCmdOutput($_, 'item');
-							if ($temp[0]->{'STATUS'} eq 'SUCCESS') {
-								$td = ((time() + $at) - $temp[0]->{'time'});
-								next if ($td >= 300);
-
-								$bt{'stage'} = 1;
-								if ($temp[0]->{'stage'} eq (Helpers::getMachineUID(0) . getMachineUser())) {
-									$bt{'count'}++;
-									$bt{$temp[0]->{'browserid'}} = '';
-									if (exists $activeBrowsers{$temp[0]->{'browserid'}}) {
-										$activeBrowsers{$temp[0]->{'browserid'}}{'time'} = $temp[0]->{'time'};
-										next;
-									}
-
-									$activeBrowsers{$temp[0]->{'browserid'}}{'pid'} = watchDashboardActivities($temp[0]->{'browserid'});
-									$activeBrowsers{$temp[0]->{'browserid'}}{'time'}= $temp[0]->{'time'};
-debug("starting activity for browser $temp[0]->{'browserid'} $activeBrowsers{$temp[0]->{'browserid'}}{'pid'}");
-								}
+						$bt{'stage'} = 1;
+						if ($_->{'stage'} eq (Common::getMachineUID(0) . getMachineUser())) {
+							$bt{'count'}++;
+							$bt{$_->{'bid'}} = '';
+							if (exists $activeBrowsers{$_->{'bid'}}) {
+								$activeBrowsers{$_->{'bid'}}{'time'} = $_->{'time'};
+								next;
 							}
+
+							$activeBrowsers{$_->{'bid'}}{'pid'} = watchDashboardActivities($_->{'bid'});
+							$activeBrowsers{$_->{'bid'}}{'time'}= $_->{'time'};
+debug("starting activity for browser $_->{'bid'} $activeBrowsers{$_->{'bid'}}{'pid'}");
 						}
 					}
 				}
@@ -2838,8 +3305,8 @@ debug("activity for browser $browserID $activeBrowsers{$browserID}{'pid'} has st
 debug("stoping activity for browser $browserID $activeBrowsers{$browserID}{'pid'}");
 						eval {kill 9, $activeBrowsers{$browserID}{'pid'};};
 						if ($@) {
-							Helpers::traceLog("unable to kill pid: " . $activeBrowsers{$browserID}{'pid'});
-							Helpers::traceLog("Error: $@");
+							Common::traceLog("unable to kill pid: " . $activeBrowsers{$browserID}{'pid'});
+							Common::traceLog("Error: $@");
 						}
 					}
 					else {
@@ -2853,10 +3320,12 @@ debug("stoping activity for browser $browserID $activeBrowsers{$browserID}{'pid'
 debug('bt data: ' . Dumper(\%bt));
 
 			if ($bt{'stage'}) {
-				Helpers::fileWrite(getCatfile(getUserProfilePath(), 'stage.txt'), '1');
+				if (int(getFileContents(getCatfile(getUserProfilePath(), 'stage.txt'))) != $bt{'stage'}) {
+					Common::fileWrite2(getCatfile(getUserProfilePath(), 'stage.txt'), '1');
+				}
 			}
-			else {
-				Helpers::fileWrite(getCatfile(getUserProfilePath(), 'stage.txt'), '0');
+			elsif (int(getFileContents(getCatfile(getUserProfilePath(), 'stage.txt'))) > 0) {
+				Common::fileWrite2(getCatfile(getUserProfilePath(), 'stage.txt'), '0');
 			}
 
 			if ($bt{'count'} != $browsersCount) {
@@ -2868,7 +3337,7 @@ debug('bt data: ' . Dumper(\%bt));
 			}
 
 			# TODO: IMPORTANT we need kill progress when no login users.
-			Helpers::killPIDs(\@progressPIDs, 0);
+			Common::killPIDs(\@progressPIDs, 0);
 
 			if ($bt{'stage'}) {
 				sleep(4);
@@ -2891,17 +3360,22 @@ debug('bt data: ' . Dumper(\%bt));
 #****************************************************************************************************/
 sub end {
 	while(scalar @systemids > 0) {
-		Helpers::killPIDs(\@systemids);
+		Common::killPIDs(\@systemids);
 	}
 	while(scalar @progressPIDs > 0) {
-		Helpers::killPIDs(\@progressPIDs);
+		Common::killPIDs(\@progressPIDs);
 	}
 	while(scalar @activities > 0) {
-		Helpers::killPIDs(\@activities);
+		Common::killPIDs(\@activities);
 	}
 	while(scalar @others > 0) {
-		Helpers::killPIDs(\@others);
+		Common::killPIDs(\@others);
 	}
-	unlink($selfPIDFile) if (sprintf("%d%d", getppid(), $$) == $dashboardPID);
+	if (sprintf("%d%d", getppid(), $$) == $dashboardPID) {
+		updateSystemIsOffline(getUsername());
+		unlink($selfPIDFile);
+	}
 	exit(0);
 }
+
+1;

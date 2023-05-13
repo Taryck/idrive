@@ -11,8 +11,8 @@ use warnings;
 
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
-use Helpers;
-use Configuration;
+use Common;
+use AppConfig;
 
 my $cmdNumOfArgs = $#ARGV;
 
@@ -22,68 +22,80 @@ init();
 # Subroutine			: init
 # Objective				: This function is entry point for the script
 # Added By				: Yogesh Kumar
-# Modified By			: Sabin Cheruvattil
+# Modified By			: Sabin Cheruvattil, Senthil Pandian
 #****************************************************************************************************/
 sub init {
-	Helpers::loadAppPath();
-	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
-	$Configuration::callerEnv = 'BACKGROUND' unless ($cmdNumOfArgs == -1);
-	my $killall = (defined($ARGV[3]) && $ARGV[3] eq 'all')? 1 : 0;
+	Common::loadAppPath();
+	Common::loadServicePath() or Common::retreat('invalid_service_directory');
+	$AppConfig::callerEnv = 'BACKGROUND' unless ($cmdNumOfArgs == -1);
+	my $killall = (defined($ARGV[3]) && $ARGV[3] eq 'allType')? 1 : 0;
 
-	if ($cmdNumOfArgs == 1) {
-		Helpers::setUsername($ARGV[1]) if($ARGV[1] ne '-');
+	if ($cmdNumOfArgs >= 1 and $ARGV[1] ne '-') {
+		Common::setUsername($ARGV[1]);
 	}
 	else {
-		Helpers::loadUsername() or Helpers::retreat('login_&_try_again');
+		Common::loadUsername() or Common::retreat('login_&_try_again');
 	}
 
-	my $errorKey = Helpers::loadUserConfiguration();
-	#Helpers::retreat($Configuration::errorDetails{$errorKey}) if($errorKey != 1);
-	Helpers::loadEVSBinary()  or Helpers::retreat('unable_to_find_or_execute_evs_binary');
-	Helpers::isLoggedin()     or Helpers::retreat('login_&_try_again') if($Configuration::callerEnv ne 'BACKGROUND');
-	Helpers::displayHeader() unless($cmdNumOfArgs == 1);
+	$AppConfig::mcUser = $ARGV[4] if(defined($ARGV[4])); #Added to terminate all profile's jobs 
+	my $errorKey = Common::loadUserConfiguration();
+	Common::retreat($AppConfig::errorDetails{$errorKey}) if($AppConfig::callerEnv ne 'BACKGROUND' and $errorKey == 104);
+	Common::loadEVSBinary()  or Common::retreat('unable_to_find_or_execute_evs_binary');
+	Common::isLoggedin()     or Common::retreat('login_&_try_again') if($AppConfig::callerEnv ne 'BACKGROUND');
+	Common::displayHeader() unless($cmdNumOfArgs == 1);
 
-	my %jobs = Helpers::getRunningJobs($ARGV[0] || undef, $ARGV[2] || 0);
+	my $jobName = undef;
+	$jobName = $ARGV[0] if(defined($ARGV[0]) and $ARGV[0] ne 'allOp');
+	my %jobs = Common::getRunningJobs($jobName, $ARGV[2] || 0);
 	if (!%jobs) {
-		if ($Configuration::callerEnv eq 'BACKGROUND'){
-			Helpers::traceLog($ARGV[0],'_not_running');
+		if ($AppConfig::callerEnv eq 'BACKGROUND'){
+			if($ARGV[0] eq 'allOp'){
+				Common::traceLog('no_job_is_in_progress');
+			} else {
+				Common::traceLog($ARGV[0].'_not_running');
+			}
 		} else {
-			Helpers::display('no_job_is_in_progress');
+			Common::display('no_job_is_in_progress');
 		}
 		exit 0;
 	}
 
 	my @options = getOptions(%jobs);
-	my $userSelection;
+	my $userSelection = 1;
 
-	if ($Configuration::callerEnv ne 'BACKGROUND') {
+	if ($AppConfig::callerEnv ne 'BACKGROUND') {
 		if (scalar(@options) > 1) {
-			Helpers::display('you_can_stop_one_job_at_a_time')
+			Common::display('you_can_stop_one_job_at_a_time')
 		}
 
-		Helpers::displayMenu('select_the_job_from_the_above_list',@options);
-		$userSelection = Helpers::getUserMenuChoice(scalar(@options));
-	}
-	else {
-		$userSelection = 1;
+		Common::displayMenu('select_the_job_from_the_above_list',@options);
+		Common::display('');
+		$userSelection = Common::getUserMenuChoice(scalar(@options));
 	}
 
 REPEAT:
 	my $cancelFile = '';
-	if (Helpers::validateMenuChoice($userSelection, 1, scalar(@options))) {
+	if (Common::validateMenuChoice($userSelection, 1, scalar(@options))) {
 		$options[($userSelection - 1)] =~ s/stop_//g;
 		my $pid = getPid($jobs{$options[($userSelection - 1)]});
+		$cancelFile = $jobs{$options[($userSelection - 1)]};
+		$cancelFile =~ s/pid.txt$/exitError.txt/g;
+
 		if ($cmdNumOfArgs == -1) {
-			$cancelFile = $jobs{$options[($userSelection - 1)]};
-			$cancelFile =~ s/pid.txt$/cancel.txt/g;
 			if (open(my $fh, '>', $cancelFile)) {
-				Helpers::traceLog('Operation Cancelled by user');
-				print $fh "Operation could not be completed, Reason: Operation Cancelled by user";
+				Common::traceLog('Operation Cancelled by user');
+				print $fh Common::getStringConstant('operation_cancelled_by_user');
 				close $fh;
 			}
 			else {
-				Helpers::retreat(['unable_to_create_file', " \"$cancelFile\"." ]);
+				Common::retreat(['unable_to_create_file', " \"$cancelFile\"." ]);
 			}
+		}
+		elsif (defined($ARGV[5])) {
+			unless(Common::fileWrite($cancelFile,Common::getStringConstant($ARGV[5]))) {
+				Common::retreat(['unable_to_create_file', " \"$cancelFile\"." ]);
+			}
+			Common::traceLog(Common::getStringConstant($ARGV[5]));
 		}
 
 		if ($pid ne "" && !killPid($pid)) {
@@ -91,20 +103,20 @@ REPEAT:
 			exit(0) unless($killall);
 		}
 		else {
-			if(-e $jobs{$options[($userSelection - 1)]}){
+			if (-e $jobs{$options[($userSelection - 1)]}) {
 				unlink($jobs{$options[($userSelection - 1)]});
-				if($Configuration::callerEnv eq 'BACKGROUND'){
-					Helpers::traceLog([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
+				if($AppConfig::callerEnv eq 'BACKGROUND'){
+					Common::traceLog([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
 				} else {
-					Helpers::display([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
+					Common::display([$options[($userSelection - 1)], " ", 'job_terminated_successfully']);
 				}
 			} else {
-				if($Configuration::callerEnv eq 'BACKGROUND'){
-					Helpers::traceLog('no_job_is_in_progress');
+				if($AppConfig::callerEnv eq 'BACKGROUND'){
+					Common::traceLog('no_job_is_in_progress');
 				} else {
-					Helpers::display('no_job_is_in_progress');
+					Common::display('no_job_is_in_progress');
 				}
-				exit 0;
+				exit(0);
 			}
 		}
 
@@ -115,7 +127,7 @@ REPEAT:
 		}
 	}
 	else {
-		Helpers::display(['invalid_choice',"\n"]);
+		Common::display(['invalid_choice',"\n"]);
 	}
 }
 
@@ -132,7 +144,7 @@ sub getPid {
 		chomp($parentpid) if($parentpid);
 	}
 	else {
-		Helpers::traceLog(['failed_to_open_file', ": @_"]);
+		Common::traceLog(['failed_to_open_file', ": @_"]);
 		return "";
 	}
 
@@ -141,6 +153,7 @@ sub getPid {
 
 	if($parentpid){
 		$findpid = qq{ps -o sid= -p$parentpid | xargs pgrep -s | xargs ps -o pid,command -p | grep idev | grep -v "grep"};
+		$findpid = Common::updateLocaleCmd($findpid);
 		my @r    = `$findpid`;
 
 		foreach(@r) {
@@ -163,8 +176,8 @@ sub killPid {
 	$pid    =~ s/^\s+|\s+$//g;
 	return 0 if (!$pid);
 
-	my $errorFile = Helpers::getECatfile(Helpers::getServicePath(), 'kill.err');
-	my $status = system("kill -9 $pid 2>$errorFile");
+	my $errorFile = Common::getECatfile(Common::getServicePath(), 'kill.err');
+	my $status = system(Common::updateLocaleCmd("kill $pid 2>$errorFile"));
 	my $errorStr;
 
 	if ($? > 0 and -e $errorFile) {
@@ -175,24 +188,24 @@ sub killPid {
 		}
 		else {
 
-			if($Configuration::callerEnv eq 'BACKGROUND'){
-				Helpers::traceLog(['failed_to_open_file', ": $errorFile"]);
+			if($AppConfig::callerEnv eq 'BACKGROUND'){
+				Common::traceLog(['failed_to_open_file', ": $errorFile"]);
 			} else {
-				Helpers::display(['failed_to_open_file', ': ', $errorFile]);
+				Common::display(['failed_to_open_file', ': ', $errorFile]);
 			}
 		}
 		if ($errorStr =~ 'Operation not permitted') {
-			if($Configuration::callerEnv eq 'BACKGROUND'){
-				Helpers::traceLog('unable_to_kill_job');
+			if($AppConfig::callerEnv eq 'BACKGROUND'){
+				Common::traceLog('unable_to_kill_job');
 			} else {
-				Helpers::display('operation_not_permitted');
+				Common::display('operation_not_permitted');
 			}
 		}
 		elsif ($errorStr =~ 'No such process') {
-			if($Configuration::callerEnv eq 'BACKGROUND'){
-				Helpers::traceLog('this_job_might_be_stopped_already');
+			if($AppConfig::callerEnv eq 'BACKGROUND'){
+				Common::traceLog('this_job_might_be_stopped_already');
 			} else {
-				Helpers::display('this_job_might_be_stopped_already');
+				Common::display('this_job_might_be_stopped_already');
 			}
 		}
 		return 0;

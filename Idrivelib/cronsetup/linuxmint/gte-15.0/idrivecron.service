@@ -1,0 +1,14 @@
+# @IDrive Inc
+# Created By : Sabin Cheruvattil
+
+[Unit]
+Description=Regular background program processing daemon
+Documentation=man:__APP__cron(8)
+
+[Service]
+ExecStart=__LAUNCHPATH__
+IgnoreSIGPIPE=false
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

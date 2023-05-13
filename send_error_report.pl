@@ -10,12 +10,12 @@ use warnings;
 
 use lib map{if(__FILE__ =~ /\//) { substr(__FILE__, 0, rindex(__FILE__, '/'))."/$_";} else { "./$_"; }} qw(Idrivelib/lib);
 
-use Helpers;
-use Strings;
-use Configuration;
+use Common;
+use AppConfig;
 use File::Basename;
 use Scalar::Util qw(reftype);
-Helpers::initiateMigrate();
+Common::waitForUpdate();
+Common::initiateMigrate();
 
 init();
 
@@ -23,16 +23,17 @@ init();
 # Subroutine Name         : init
 # Objective               : This function is entry point for the script
 # Added By                : Sabin Cheruvattil
+# Modified By             : Senthil Pandian
 #****************************************************************************************************/
 sub init {
-	system('clear');
+	system(Common::updateLocaleCmd('clear'));
 	my $totalNumberOfArgs = $#ARGV + 1;
 
-	Helpers::loadAppPath();
-	Helpers::loadServicePath() or Helpers::retreat('invalid_service_directory');
-	Helpers::loadUsername() && Helpers::loadUserConfiguration();
-	Helpers::displayHeader() if ($totalNumberOfArgs != 5);
-	Helpers::findDependencies(0) or Helpers::retreat('failed');
+	Common::loadAppPath();
+	Common::loadServicePath() or Common::retreat('invalid_service_directory');
+	Common::loadUsername() && Common::loadUserConfiguration();
+	Common::displayHeader() if ($totalNumberOfArgs != 5);
+	Common::findDependencies(0) or Common::retreat('failed');
 
 	my %reportInputs;
 	if ($totalNumberOfArgs == 5) {
@@ -42,10 +43,10 @@ sub init {
 		$reportInputs{'reportUserTicket'} = $ARGV[3];
 		$reportInputs{'reportMessage'}    = $ARGV[4];
 
-		$Configuration::callerEnv = 'BACKGROUND';
+		$AppConfig::callerEnv = 'BACKGROUND';
 	}
 	else {
-		Helpers::isLoggedin() or Helpers::retreat('login_&_try_again');
+		Common::isLoggedin() or Common::retreat('login_&_try_again');
 
 		$reportInputs{'reportUserName'}   = getReportUserName();
 		$reportInputs{'reportUserEmail'}  = getReportUserEmails();
@@ -54,30 +55,30 @@ sub init {
 		$reportInputs{'reportMessage'}    = getReportUserMessage();
 	}
 
-	my $reportSubject = qq($Configuration::appType $Locale::strings{'for_linux_user_feed'});
+	my $reportSubject = qq($AppConfig::appType ).Common::getStringConstant('for_linux_user_feed');
 	$reportSubject   .= qq( [#$reportInputs{'reportUserTicket'}]) if($reportInputs{'reportUserTicket'} ne '');
 
 	my $reportContents = getReportMailContent(%reportInputs);
 
-	Helpers::display(["\n", 'sending_error_report']);
+	Common::display(["\n", 'sending_error_report']);
 	# send email to server
-	my $reportEmailCont = qq(Email=) . Helpers::urlEncode($Configuration::IDriveSupportEmail) . qq(&subject=) . Helpers::urlEncode($reportSubject);
-	$reportEmailCont   .= qq(&content=) . Helpers::urlEncode($reportContents) . qq(&user_email=) . Helpers::urlEncode($reportInputs{'reportUserEmail'});
+	my $reportEmailCont = qq(Email=) . Common::urlEncode($AppConfig::IDriveSupportEmail) . qq(&subject=) . Common::urlEncode($reportSubject);
+	$reportEmailCont   .= qq(&content=) . Common::urlEncode($reportContents) . qq(&user_email=) . Common::urlEncode($reportInputs{'reportUserEmail'});
 
 	my %params = (
-		'host'   => $Configuration::IDriveErrorCGI,
+		'host'   => $AppConfig::IDriveErrorCGI,
 		'method' => 'GET',
 		'encDATA'=> $reportEmailCont,
 	);
 
-	#my $response = Helpers::request(\%params);
-	my $response = Helpers::requestViaUtility(\%params);
+	#my $response = Common::request(\%params);
+	my $response = Common::requestViaUtility(\%params);
 	if(!$response || (reftype \$response eq 'REF' && $response->{STATUS} ne 'SUCCESS')) {
-		Helpers::retreat('failed_to_report_error');
+		Common::retreat('failed_to_report_error');
 		return;
 	}
 
-	Helpers::display(["\n", 'successfully_reported_error', '.', "\n"]);
+	Common::display(["\n", 'successfully_reported_error', '.', "\n"]);
 }
 
 #*****************************************************************************************************
@@ -89,15 +90,16 @@ sub init {
 sub getReportUserName {
 	my ($reportUserName, $choiceRetry) = ('', 0);
 
-	if(Helpers::isLoggedin()) {
-		Helpers::display(['current_loggedin_username_is', ': ', "\n\t", Helpers::getUsername()]);
+	if(Common::isLoggedin()) {
+		$reportUserName = Common::getUsername();
+		Common::display(['current_loggedin_username_is', ': ', "\n\t", $reportUserName]);
 	} else {
 		# Get user name and validate
-		$reportUserName = Helpers::getAndValidate(['enter_your', " ", $Configuration::appType, " ", 'username', ' : '], "username", 1);
+		$reportUserName = Common::getAndValidate(['enter_your', " ", $AppConfig::appType, " ", 'username', ' : '], "username", 1);
 		# need to set this for fetching the trace log for this user
-		Helpers::setUsername($reportUserName);
-		Helpers::loadServicePath();
-		Helpers::loadUserConfiguration();
+		Common::setUsername($reportUserName);
+		Common::loadServicePath();
+		Common::loadUserConfiguration();
 	}
 
 	return $reportUserName;
@@ -112,20 +114,20 @@ sub getReportUserName {
 sub getReportUserEmails {
 	# if user is logged in, show the email address and ask if they want to change it
 	my ($askEmailChoice, $reportUserEmail) = ('y', '');
-	my $availableEmails = Helpers::getUserConfiguration('EMAILADDRESS');
+	my $availableEmails = Common::getUserConfiguration('EMAILADDRESS');
 	chomp($availableEmails);
 
 	if($availableEmails ne '') {
-		Helpers::display(["\n", 'configured_email_address_is', ': ', "\n\t", $availableEmails]);
-		Helpers::display(["\n", 'do_you_want_edit_your_email_y_n', "\n\t"], 0);
+		Common::display(["\n", 'configured_email_address_is', ': ', "\n\t", $availableEmails]);
+		Common::display(["\n", 'do_you_want_edit_your_email_y_n', "\n\t"], 0);
 
-		$askEmailChoice = Helpers::getAndValidate(['enter_your_choice'], "YN_choice", 1);
+		$askEmailChoice = Common::getAndValidate(['enter_your_choice'], "YN_choice", 1);
 	}
 
 	$reportUserEmail = $availableEmails;
 	if(lc($askEmailChoice) eq 'y'){
-		my $emailAddresses = Helpers::getAndValidate(["\n",'enter_your_email_id_mandatory', ":", "\n\t"], "single_email_address", 1, $Configuration::inputMandetory);
-		$reportUserEmail = Helpers::formatEmailAddresses($emailAddresses);
+		my $emailAddresses = Common::getAndValidate(["\n",'enter_your_email_id_mandatory', ":", "\n\t"], "single_email_address", 1, $AppConfig::inputMandetory);
+		$reportUserEmail = Common::formatEmailAddresses($emailAddresses);
 	}
 	return $reportUserEmail;
 }
@@ -136,7 +138,7 @@ sub getReportUserEmails {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getReportUserContact {
-	my $returnUserContact = Helpers::getAndValidate(["\n",'enter_your'," ", 'contact_no', " ", '_optional_', ':', "\n\t"], "contact_no", 1);
+	my $returnUserContact = Common::getAndValidate(["\n",'enter_your'," ", 'contact_no', " ", '_optional_', ':', "\n\t"], "contact_no", 1);
 	return $returnUserContact;
 }
 
@@ -146,7 +148,7 @@ sub getReportUserContact {
 # Added By				: Sabin Cheruvattil
 #****************************************************************************************************/
 sub getReportUserTicket {
-	my $returnUserTicket = Helpers::getAndValidate(["\n",'ticket_number_if_any', " ", '_optional_'," : ", "\n\t"], "ticket_no", 1, 0);
+	my $returnUserTicket = Common::getAndValidate(["\n",'ticket_number_if_any', " ", '_optional_'," : ", "\n\t"], "ticket_no", 1, 0);
 	return $returnUserTicket;
 }
 
@@ -157,17 +159,17 @@ sub getReportUserTicket {
 #****************************************************************************************************/
 sub getReportUserMessage {
 	my ($choiceRetry, $reportMessage) = (0, '');
-	while($choiceRetry < $Configuration::maxChoiceRetry) {
-		Helpers::display(['message', ' ', '_max_4095_characters_', ':', "\n\t"], 0);
-		$reportMessage = Helpers::getUserChoice();
+	while($choiceRetry < $AppConfig::maxChoiceRetry) {
+		Common::display(['message', ' ', '_max_4095_characters_', ':', "\n\t"], 0);
+		$reportMessage = Common::getUserChoice();
 		if($reportMessage eq '') {
 			$choiceRetry++;
-			Helpers::checkRetryAndExit($choiceRetry);
-			Helpers::display(['cannot_be_empty', '.', ' ', 'enter_again', '.']);
+			Common::checkRetryAndExit($choiceRetry);
+			Common::display(['cannot_be_empty', '.', ' ', 'enter_again', '.']);
 		} else {
-			if(length($reportMessage) > $Configuration::reportMaxMsgLength) {
-				Helpers::display(["\n", 'truncating_report_message_', "\n"]) ;
-				$reportMessage = substr($reportMessage, 0, $Configuration::reportMaxMsgLength - 1);
+			if(length($reportMessage) > $AppConfig::reportMaxMsgLength) {
+				Common::display(["\n", 'truncating_report_message_', "\n"]) ;
+				$reportMessage = substr($reportMessage, 0, $AppConfig::reportMaxMsgLength - 1);
 			}
 			last;
 		}
@@ -180,50 +182,52 @@ sub getReportUserMessage {
 # Subroutine Name         : getReportUserInputs
 # Objective               : This subroutine prepares the content for error report
 # Added By                : Sabin Cheruvattil
-# Modified By             : Yogesh Kumar
+# Modified By             : Yogesh Kumar, Senthil Pandian
 #****************************************************************************************************/
 sub getReportMailContent {
 	my %reportInputs = @_;
 	my ($reportContent, $logContent) = ('', '');
-	my $proxyEnabled = Helpers::isProxyEnabled()? 'Yes' : 'No';
+	my $osd = Common::getOSBuild();
+	my $proxyEnabled = Common::isProxyEnabled()? 'Yes' : 'No';
 
-	$reportContent .= qq(<<< Feedback from $Configuration::appType $Locale::strings{'linux_backup'} - $Configuration::version >>> \n);
-	$reportContent .= qq($Locale::strings{'machine_details'}: ) . $Configuration::machineOS . qq( \n);
-	$reportContent .= qq($Locale::strings{'computer_name'}: $Configuration::hostname \n);
-	$reportContent .= qq($Locale::strings{'profile_name'}: ) . Helpers::getMachineUser() . qq( \n);
-	$reportContent .= qq($Locale::strings{'proxy_server'}: $proxyEnabled \n);
-	$reportContent .= qq($Configuration::appType ) . ucfirst($Locale::strings{'username'}) . qq(: $reportInputs{'reportUserName'} \n);
+	$reportContent .= "<<< Feedback from $AppConfig::appType ".Common::getStringConstant('linux_backup')." - $AppConfig::version >>> \n";
+	$reportContent .= Common::getStringConstant('machine_details').": $AppConfig::machineOS \n";
+	$reportContent .= Common::getStringConstant('os_details').": $osd->{'os'} $osd->{'build'} \n";
+	$reportContent .= Common::getStringConstant('computer_name').": $AppConfig::hostname \n";
+	$reportContent .= Common::getStringConstant('profile_name').": " . $AppConfig::mcUser . qq( \n);
+	$reportContent .= Common::getStringConstant('proxy_server').": $proxyEnabled \n";
+	$reportContent .= qq($AppConfig::appType ) . ucfirst(Common::getStringConstant('username')).": ".$reportInputs{'reportUserName'}."\n";
 
-	if (Helpers::loadStorageSize() or Helpers::reCalculateStorageSize()) {
-		$reportContent .= qq($Locale::strings{'total_quota'}: ) . Helpers::getTotalStorage() . qq( \n);
-		$reportContent .= qq($Locale::strings{'used_space'}: ) . Helpers::getStorageUsed() . qq( \n);
+	if (Common::loadStorageSize() or Common::reCalculateStorageSize()) {
+		$reportContent .= Common::getStringConstant('total_quota').": " . Common::getTotalStorage() . qq( \n);
+		$reportContent .= Common::getStringConstant('used_space').": " . Common::getStorageUsed() . qq( \n);
 	}
 
-	$reportContent .= qq($Locale::strings{'title_email_address'}: $reportInputs{'reportUserEmail'} \n);
-	$reportContent .= qq($Locale::strings{'tech_issue_comment_suggest'}: \n);
+	$reportContent .= Common::getStringConstant('title_email_address').": $reportInputs{'reportUserEmail'} \n";
+	$reportContent .= Common::getStringConstant('tech_issue_comment_suggest').": \n";
 	$reportContent .= qq(\n);
 	$reportContent .= qq($reportInputs{'reportMessage'} \n);
 
-	my $traceLog = Helpers::getTraceLogPath();
+	my $traceLog = Common::getTraceLogPath();
 	if (-f $traceLog and !-z $traceLog) {
 		local $/ = undef;
 		open LOGFILE, '<', $traceLog;
 		$logContent = <LOGFILE>;
 		close LOGFILE;
 
-		$reportContent .= qq(\n) . qq($Configuration::appType $Configuration::traceLogFile \n);
+		$reportContent .= qq(\n) . qq($AppConfig::appType $AppConfig::traceLogFile \n);
 		$reportContent .= qq(-) x 50 . qq(\n) . qq($logContent \n);
 	}
 
-	$Configuration::traceLogFile = 'dashboard.log';
-	$traceLog = Helpers::getTraceLogPath();
+	$AppConfig::traceLogFile = 'dashboard.log';
+	$traceLog = Common::getTraceLogPath();
 	if (-f $traceLog and !-z $traceLog) {
 		local $/ = undef;
 		open LOGFILE, '<', $traceLog;
 		$logContent = <LOGFILE>;
 		close LOGFILE;
 
-		$reportContent .= qq(\n) . qq($Configuration::appType $Configuration::traceLogFile \n);
+		$reportContent .= qq(\n) . qq($AppConfig::appType $AppConfig::traceLogFile \n);
 		$reportContent .= qq(-) x 50 . qq(\n) . qq($logContent \n);
 	}
 
